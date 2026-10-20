@@ -55,14 +55,15 @@ taken back once people download it.
    git checkout release && git merge --ff-only dev && git push origin release
    git checkout dev
    ```
-5. **Watch the build** (about 15–25 minutes; arm64 and x64 build in parallel):
+5. **Watch the build** (about 7 minutes; arm64 and x64 build in parallel):
    ```bash
    gh run list -R kohlarnhin/Bento --workflow release.yml --limit 1
    gh run watch <run-id> -R kohlarnhin/Bento --exit-status
    ```
 6. **Verify the release:**
    ```bash
-   gh release view v<version> -R kohlarnhin/Bento --json isLatest,assets --jq '.isLatest, [.assets[].name]'
+   gh release list -R kohlarnhin/Bento --limit 1 --json tagName,isLatest,isDraft
+   gh release view v<version> -R kohlarnhin/Bento --json assets --jq '[.assets[].name]'
    curl -sL https://github.com/kohlarnhin/Bento/releases/latest/download/latest.json
    ```
    Expect seven assets: `Bento_<v>_arm64.dmg`, `Bento_<v>_x64.dmg`, `Bento_<v>_arm64.app.tar.gz`
