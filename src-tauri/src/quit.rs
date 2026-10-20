@@ -29,6 +29,10 @@ pub fn install_menu(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         &MenuItem::with_id(app, "apphub-check-updates", "检查更新…", true, None::<&str>)?,
         about_index + 1,
     )?;
+    app_menu.insert(
+        &MenuItem::with_id(app, "apphub-settings", "设置…", true, Some("CmdOrCtrl+,"))?,
+        about_index + 2,
+    )?;
     let index = app_menu
         .items()?
         .iter()
@@ -51,6 +55,9 @@ pub fn install_menu(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         } else if event.id().as_ref() == "apphub-check-updates" {
             crate::reopen_main_window(app);
             let _ = app.emit("bento-check-updates", ());
+        } else if event.id().as_ref() == "apphub-settings" {
+            crate::reopen_main_window(app);
+            let _ = app.emit("bento-open-settings", ());
         } else {
             crate::tray::handle_menu(app, event.id().as_ref());
         }

@@ -17,6 +17,8 @@ import { ExternalProcessDialog } from './components/ExternalProcessDialog';
 import { StopAllProjectsDialog } from './components/StopAllProjectsDialog';
 import { UpdateDialog, UpdateFooter } from './components/UpdateDialog';
 import { useUpdater } from './hooks/useUpdater';
+import { useSettings } from './hooks/useSettings';
+import { SettingsDialog } from './components/SettingsDialog';
 import Button from './components/ui/button';
 import { Toaster } from './components/ui/sonner';
 import { Empty, EmptyTitle, EmptyDescription } from './components/ui/empty';
@@ -73,6 +75,8 @@ type StatusPayload = ProjectRuntimeStatus;
 
 export function App() {
   const updater = useUpdater();
+  const settings = useSettings();
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const terminals = useSyncExternalStore(subscribeTerminals, getTerminalSnapshot);
   const terminalCount = Object.values(terminals).filter(terminal => terminal.alive).length;
   const [projects, setProjects] = useState<ProjectConfig[]>([]);
@@ -116,7 +120,12 @@ export function App() {
   const managedProjects = projects.filter(project => runtimes[project.id]?.isManaged && ['starting', 'running'].includes(runtimes[project.id].status));
   const externalRequest = useRef(false);
   const dialogOpen = useRef(false);
-  dialogOpen.current = !!(projectForm || deleteProject || activeLogProject || externalStop || stopAllOpen || externalRequest.current || updater.isModalOpen);
+  dialogOpen.current = !!(projectForm || deleteProject || activeLogProject || externalStop || stopAllOpen || settingsOpen || externalRequest.current || updater.isModalOpen);
+  const openSettings = useCallback(() => {
+    if (dialogOpen.current) return;
+    dialogOpen.current = true;
+    setSettingsOpen(true);
+  }, []);
   const openCreate = useCallback((inspection?: ProjectDirInspection) => {
     if (dialogOpen.current) return;
     dialogOpen.current = true;
@@ -127,14 +136,15 @@ export function App() {
     const onShortcut = (event: KeyboardEvent) => {
       if (!event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || event.isComposing || event.keyCode === 229) return;
       const key = event.key.toLowerCase();
-      if (key !== 'n' && key !== 'f' && !/^[1-9]$/.test(key)) return;
+      if (key !== 'n' && key !== 'f' && key !== ',' && !/^[1-9]$/.test(key)) return;
       event.preventDefault();
       event.stopPropagation();
       // xterm also handles keyup; swallowing the complete shortcut keeps focus
       // in search and prevents a later event from reaching the old terminal.
       if (event.type !== 'keydown') return;
       if (dialogOpen.current) return;
-      if (key === 'n') openCreate();
+      if (key === ',') openSettings();
+      else if (key === 'n') openCreate();
       else if (key === 'f') { searchInput.current?.focus(); searchInput.current?.select(); }
       else {
         const project = navigation.current.projects[Number(key) - 1];
@@ -149,7 +159,16 @@ export function App() {
       sidebarDropContext = undefined;
       void unlisten.then((stop) => stop());
     };
-  }, [openCreate]);
+  }, [openCreate, openSettings]);
+
+  useEffect(() => {
+    const unlisten = listen('bento-open-settings', openSettings);
+    return () => { void unlisten.then(stop => stop()); };
+  }, [openSettings]);
+
+  useEffect(() => {
+    if (updater.isModalOpen) setSettingsOpen(false);
+  }, [updater.isModalOpen]);
 
   useEffect(() => {
     const unlisten = listen<{ projectId: string }>('apphub-select-project', ({ payload }) => {
@@ -362,7 +381,7 @@ export function App() {
           onRefresh={loadProjects}
           onCreate={() => openCreate()}
           managedCount={managedProjects.length}
-          updateFooter={<UpdateFooter updater={updater} />}
+          updateFooter={<UpdateFooter updater={updater} onOpenSettings={openSettings} />}
           onStopAll={() => { if (!dialogOpen.current) { dialogOpen.current = true; setStopAllOpen(true); } }}
         />
 
@@ -406,6 +425,9 @@ export function App() {
         </main>
 
         <UpdateDialog updater={updater} projects={managedProjects} terminalCount={terminalCount} />
+        {settingsOpen && !updater.isModalOpen && <SettingsDialog settings={settings} updater={updater}
+          onClose={() => setSettingsOpen(false)}
+          onCheckUpdates={() => { setSettingsOpen(false); void updater.checkNow(); }} />}
 
         {projectForm && <ProjectFormDialog
           project={projectForm.project}

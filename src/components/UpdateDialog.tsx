@@ -1,4 +1,4 @@
-import { ArrowDownToLine, ArrowRight, Loader2 } from 'lucide-react';
+import { ArrowDownToLine, ArrowRight, Loader2, Settings } from 'lucide-react';
 import type { UpdaterController } from '../hooks/useUpdater';
 import type { ProjectConfig } from '../types';
 import Button from './ui/button';
@@ -7,12 +7,15 @@ import { Alert, AlertDescription } from './ui/alert';
 import { ActionTooltip } from './ui/tooltip';
 import { ScrollArea } from './ui/scroll-area';
 
-export function UpdateFooter({ updater }: { updater: UpdaterController }) {
-  return <footer className="shrink-0 border-t border-sidebar-border px-3 py-2" data-update-footer>
+export function UpdateFooter({ updater, onOpenSettings }: { updater: UpdaterController; onOpenSettings: () => void }) {
+  return <footer className="flex shrink-0 items-center justify-between gap-2 border-t border-sidebar-border px-3 py-2" data-update-footer>
     <ActionTooltip label="检查更新" side="right">
       <Button variant={updater.update ? 'secondary' : 'ghost'} size="sm" onClick={() => { void updater.checkNow(); }} data-check-updates>
         {updater.update ? <><ArrowDownToLine data-icon="inline-start" />更新到 v{updater.update.version}</> : updater.currentVersion ? `v${updater.currentVersion}` : '检查更新'}
       </Button>
+    </ActionTooltip>
+    <ActionTooltip label="设置" side="right">
+      <Button variant="ghost" size="icon" aria-label="设置" onClick={onOpenSettings} data-open-settings><Settings /></Button>
     </ActionTooltip>
   </footer>;
 }

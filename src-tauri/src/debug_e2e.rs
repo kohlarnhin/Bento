@@ -226,6 +226,15 @@ pub fn e2e_window(
         "close" => window.close().map_err(|err| err.to_string())?,
         "minimize" => window.minimize().map_err(|err| err.to_string())?,
         "reopen" => crate::reopen_main_window(&app),
+        "dock-reopen" => window.with_webview(|_| {
+            use objc2::MainThreadMarker;
+            use objc2_app_kit::{NSApplication, NSApplicationDelegate};
+            let application = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+            if let Some(delegate) = application.delegate() {
+                // Replay the native delegate callback used by a Dock reopen, inside this app only.
+                delegate.applicationShouldHandleReopen_hasVisibleWindows(&application, false);
+            }
+        }).map_err(|err| err.to_string())?,
         "paste" => window
             .with_webview(|_| {
                 use objc2::{sel, MainThreadMarker};
@@ -287,7 +296,7 @@ pub async fn e2e_menu(app: AppHandle, action: Option<String>) -> Result<Value, S
                 let title = item.title().to_string();
                 let command = item.keyEquivalentModifierMask().contains(NSEventModifierFlags::Command)
                     && !item.keyEquivalentModifierMask().contains(NSEventModifierFlags::Option);
-                let matched = match action { "hide" => command && key == "h", "close" => command && key == "w", "quit" => command && key == "q", "about" => title.starts_with("About "), "check-updates" => title == "检查更新…", _ => false };
+                let matched = match action { "hide" => command && key == "h", "close" => command && key == "w", "quit" => command && key == "q", "about" => title.starts_with("About "), "check-updates" => title == "检查更新…", "settings" => command && key == "," && title == "设置…", _ => false };
                 if matched { menu.performActionForItemAtIndex(index as _); return true; }
                 if item.submenu().is_some_and(|submenu| perform(&submenu, action)) { return true; }
             }
