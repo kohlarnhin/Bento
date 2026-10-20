@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="100 100 824 824">
+  <defs>
+    <linearGradient id="body" x1="0" y1="100" x2="0" y2="924" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2A2A2E"/>
+      <stop offset="1" stop-color="#0A0A0B"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="100" x2="0" y2="924" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.16"/>
+      <stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0.04"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.02"/>
+    </linearGradient>
+    <linearGradient id="term" x1="532" y1="532" x2="764" y2="764" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6EE7B7"/>
+      <stop offset="1" stop-color="#10B981"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#body)"/>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="184.5" fill="none" stroke="url(#edge)" stroke-width="3"/>
+
+  <!-- Bento grid: one tall compartment on the left, two on the right -->
+  <rect x="260" y="260" width="232" height="504" rx="60" fill="#FAFAFA" fill-opacity="0.22"/>
+  <rect x="532" y="260" width="232" height="232" rx="60" fill="#FAFAFA"/>
+
+  <!-- Terminal tile with a ›_ prompt -->
+  <rect x="532" y="532" width="232" height="232" rx="60" fill="url(#term)"/>
+  <path d="M589 606 L633 648 L589 690" fill="none" stroke="#052E1C" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M655 690 H709" fill="none" stroke="#052E1C" stroke-width="26" stroke-linecap="round"/>
+</svg>

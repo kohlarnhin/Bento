@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Bento",
+  "version": "0.1.0",
+  "identifier": "com.apphub.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Bento",
+        "visible": false,
+        "dragDropEnabled": true,
+        "width": 1180,
+        "height": 800,
+        "minWidth": 850,
+        "minHeight": 600,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "signingIdentity": "-"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDcxNTkwNzcyMzNCOUIxNkQKUldSdHNia3pjZ2RaY2Q3UE1xUUdUbGVsN1o3UXNWL3VpeXRPNlRCRHJ3Z0ZyaEdRKzdMajN2QSsK",
+      "endpoints": [
+        "https://github.com/kohlarnhin/Bento/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}
