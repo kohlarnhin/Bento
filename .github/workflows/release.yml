@@ -1,0 +1,216 @@
+name: Release Bento
+
+on:
+  push:
+    branches: [release]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bento-release
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - name: Require the release branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/release" ]]; then
+            echo "::error::Releases must run from the release branch (received ${GITHUB_REF})."
+            exit 1
+          fi
+
+      - name: Check out the release commit and tags
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Check all versions and read the release version
+        id: version
+        run: |
+          node scripts/bump-version.mjs --check
+          node --input-type=module -e "import fs from 'node:fs'; const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8')); fs.appendFileSync(process.env.GITHUB_OUTPUT, 'value=' + pkg.version + '\n');"
+
+      - name: Refuse an existing version tag
+        env:
+          APP_VERSION: ${{ steps.version.outputs.value }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git show-ref --verify --quiet "refs/tags/v${APP_VERSION}"; then
+            echo "::error::Tag v${APP_VERSION} already exists; bump the version on dev first."
+            exit 1
+          fi
+
+      - name: Test release scripts
+        run: node --test 'scripts/*.test.mjs'
+
+  build-macos:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+          - target: x86_64-apple-darwin
+            arch: x64
+    runs-on: macos-latest
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Set up pnpm
+        run: npm install --global pnpm@10.8.0
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and sign updater bundle
+        id: tauri
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tauriScript: pnpm tauri
+          retryAttempts: 2
+          args: --target ${{ matrix.target }}
+
+      - name: Prepare macOS release files
+        env:
+          APP_VERSION: ${{ needs.verify.outputs.version }}
+          BUILT_VERSION: ${{ steps.tauri.outputs.appVersion }}
+          APP_TARGET: ${{ matrix.target }}
+          APP_ARCH: ${{ matrix.arch }}
+          ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$BUILT_VERSION" != "$APP_VERSION" ]]; then
+            echo "::error::Built version ${BUILT_VERSION} does not match verified version ${APP_VERSION}."
+            exit 1
+          fi
+
+          APP_PATH="src-tauri/target/${APP_TARGET}/release/bundle/macos/Bento.app"
+          RELEASE_DIR="${RUNNER_TEMP}/release"
+          mkdir -p "$RELEASE_DIR"
+          DMG_PATH="${RELEASE_DIR}/Bento_${APP_VERSION}_${APP_ARCH}.dmg"
+          STAGING_DIR="$(mktemp -d)"
+          trap 'rm -rf "$STAGING_DIR"' EXIT
+
+          if [[ ! -d "$APP_PATH" ]]; then
+            echo "::error::Missing app bundle: ${APP_PATH}"
+            exit 1
+          fi
+          cp -a "$APP_PATH" "$STAGING_DIR/"
+          ln -s /Applications "$STAGING_DIR/Applications"
+          hdiutil create -volname "Bento" -srcfolder "$STAGING_DIR" -ov -format UDZO "$DMG_PATH"
+          if [[ ! -s "$DMG_PATH" ]]; then
+            echo "::error::Missing or empty DMG: ${DMG_PATH}"
+            exit 1
+          fi
+
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const bundle = JSON.parse(process.env.ARTIFACT_PATHS).find(file => file.endsWith('.app.tar.gz'));
+          if (!bundle) throw new Error('Missing signed macOS updater bundle');
+          for (const file of [bundle, `${bundle}.sig`]) {
+            if (!fs.existsSync(file)) throw new Error(`Missing updater artifact: ${file}`);
+            const stat = fs.statSync(file);
+            if (!stat.isFile() || stat.size === 0) throw new Error(`Empty or invalid updater artifact: ${file}`);
+          }
+          if (!fs.readFileSync(`${bundle}.sig`, 'utf8').trim()) throw new Error('Empty updater signature');
+          const filename = `Bento_${process.env.APP_VERSION}_${process.env.APP_ARCH}.app.tar.gz`;
+          const destination = path.join(process.env.RUNNER_TEMP, 'release', filename);
+          fs.copyFileSync(bundle, destination);
+          fs.copyFileSync(`${bundle}.sig`, `${destination}.sig`);
+          NODE
+
+      - name: Store macOS release files
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-macos-${{ matrix.arch }}
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    needs: [verify, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the release commit with full history
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Download both macOS builds
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-macos-*
+          path: ${{ runner.temp }}/release/
+          merge-multiple: true
+
+      - name: Verify release assets and prepare the updater manifest and notes
+        env:
+          APP_VERSION: ${{ needs.verify.outputs.version }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          node scripts/release-manifest.mjs \
+            --directory "${RUNNER_TEMP}/release" \
+            --version "$APP_VERSION" \
+            --repository "$RELEASE_REPOSITORY" \
+            --notes-file "${RUNNER_TEMP}/release-notes.md"
+
+      - name: Publish and mark latest only after all assets are uploaded
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APP_VERSION: ${{ needs.verify.outputs.version }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "v${APP_VERSION}" \
+            --repo "$RELEASE_REPOSITORY" \
+            --target "$RELEASE_COMMIT" \
+            --title "Bento v${APP_VERSION}" \
+            --notes-file "${RUNNER_TEMP}/release-notes.md" \
+            --latest=false
+          gh release upload "v${APP_VERSION}" --repo "$RELEASE_REPOSITORY" "${RUNNER_TEMP}/release/"*
+          gh release edit "v${APP_VERSION}" --repo "$RELEASE_REPOSITORY" --latest
