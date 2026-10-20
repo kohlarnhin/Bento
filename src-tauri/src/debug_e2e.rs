@@ -64,6 +64,11 @@ pub fn quit_answer(title: &str, message: &str) -> Option<bool> {
     Some(confirm)
 }
 
+pub fn quit_answer_delay() -> std::time::Duration {
+    std::env::var("APPHUB_E2E_QUIT_DELAY_MS").ok().and_then(|value| value.parse().ok())
+        .map(std::time::Duration::from_millis).unwrap_or_default()
+}
+
 pub fn stop_all_answer(title: &str, message: &str) -> Option<bool> {
     if !enabled() { return None; }
     let answer = std::env::var("APPHUB_E2E_STOP_ALL_ANSWER").ok()?;

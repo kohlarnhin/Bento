@@ -118,6 +118,8 @@ pub fn request(app: &AppHandle) {
         crate::reopen_main_window(&app);
         #[cfg(debug_assertions)]
         if let Some(confirm) = crate::debug_e2e::quit_answer("退出 Bento？", &message) {
+            // Keep the simulated dialog open like a real one, so repeated requests can be tested.
+            tokio::time::sleep(crate::debug_e2e::quit_answer_delay()).await;
             finish(&app, confirm);
             return;
         }
