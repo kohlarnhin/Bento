@@ -7,8 +7,11 @@ import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
+import '@fontsource/jetbrains-mono/latin-400.css';
+import '@fontsource/jetbrains-mono/latin-700.css';
 import type { TerminalOpenResult, TerminalOutput, TerminalSessionInfo } from '../types';
 import { formatDroppedPaths, recoverShiftedImeInput, trackBareShift, transformTypedInput, type TerminalImeState } from './terminalInput';
+import { DEFAULT_TERMINAL_FONT_SIZE, TERMINAL_FONT_FAMILY, TERMINAL_LINE_HEIGHT, TERMINAL_THEME } from './terminalAppearance';
 
 type TerminalExit = Pick<TerminalSessionInfo, 'projectId' | 'sessionId' | 'exitCode'>;
 export interface TerminalStatus extends Partial<TerminalSessionInfo> {
@@ -75,6 +78,37 @@ export function subscribeTerminals(subscriber: () => void) {
 
 export const getTerminalSnapshot = () => registry.snapshot;
 export const getTerminal = (projectId: string) => registry.entries.get(projectId)?.terminal;
+
+let terminalFontSize = DEFAULT_TERMINAL_FONT_SIZE;
+let terminalFonts: Promise<void> | undefined;
+
+function loadTerminalFonts(): Promise<void> {
+  if (!terminalFonts) {
+    // fonts.ready alone can resolve before an unused face has been requested.
+    terminalFonts = Promise.all([400, 700].map((weight) =>
+      document.fonts.load(`${weight} ${DEFAULT_TERMINAL_FONT_SIZE}px "JetBrains Mono"`),
+    )).then(async (faces) => {
+      if (faces.some((weight) => weight.length === 0)) throw new Error('JetBrains Mono 字体未加载');
+      await document.fonts.ready;
+      // Also re-fit retained instances if the bundled faces finish loading after a remount.
+      requestAnimationFrame(() => registry.entries.forEach((entry) => fitTerminal(entry.projectId)));
+    }).catch((error) => {
+      terminalFonts = undefined;
+      throw error;
+    });
+  }
+  return terminalFonts;
+}
+
+export function setTerminalFontSize(fontSize: number) {
+  if (!Number.isFinite(fontSize) || fontSize <= 0) return;
+  terminalFontSize = fontSize;
+  registry.entries.forEach((entry) => {
+    entry.terminal.options.fontSize = fontSize;
+    // Detached terminals retain the option and fit when they are attached again.
+    fitTerminal(entry.projectId);
+  });
+}
 
 function receiveOutput(entry: Entry, output: TerminalOutput) {
   if (output.sessionId !== entry.sessionId || output.seq <= entry.seq) return;
@@ -158,16 +192,13 @@ function queueInput(entry: Entry, data: string, binary = false) {
 
 function createEntry(projectId: string): Entry {
   const terminal = new Terminal({
-    theme: {
-      background: '#101014', foreground: '#d4d4d8', cursor: '#fafafa',
-      selectionBackground: '#47556980', black: '#282a36', red: '#ff6b81',
-      green: '#7bdda5', yellow: '#e8cf87', blue: '#81a9f7', magenta: '#bd9bf6',
-      cyan: '#83d9df', white: '#e2e8f0',
-    },
-    fontFamily: 'Menlo, "SF Mono", "PingFang SC", monospace',
-    fontSize: 13,
+    theme: TERMINAL_THEME,
+    fontFamily: TERMINAL_FONT_FAMILY,
+    fontSize: terminalFontSize,
+    lineHeight: TERMINAL_LINE_HEIGHT,
     allowProposedApi: true,
     cursorBlink: true,
+    cursorStyle: 'block',
     scrollback: 5000,
   });
   const fit = new FitAddon();
@@ -379,7 +410,8 @@ async function hydrate(entry: Entry, restart: boolean) {
 
 async function showTerminal(entry: Entry) {
   await initTerminalRegistry(registry.showError);
-  await document.fonts.ready;
+  // A missing bundled face must not keep the terminal from opening; the fallback fonts still work.
+  await loadTerminalFonts().catch((error) => console.warn('Terminal font:', error));
   if (!visible(entry)) return;
   if (!entry.opened) {
     entry.terminal.open(entry.container);
