@@ -38,10 +38,12 @@
     --warning: 36 90% 42%;
     --warning-foreground: 30 75% 28%;
     --warning-muted: 48 100% 96%;
-    --terminal-background: 240 10% 7%;
-    --terminal-foreground: 240 5% 84%;
-    --terminal-muted: 240 4% 55%;
-    --terminal-border: 240 5% 22%;
+    --terminal-background: 225 6.25% 12.549020%;
+    --terminal-foreground: 225 6.349206% 75.294118%;
+    --terminal-muted: 228 4.545455% 56.862745%;
+    --terminal-border: 222.857143 5.785124% 23.725490%;
+    --terminal-scrollbar: #4b4e55;
+    --terminal-scrollbar-hover: #62656e;
   }
 
   * { @apply border-border; }
@@ -53,10 +55,19 @@
   height: 100%;
   min-width: 0;
   min-height: 0;
+  background-color: hsl(var(--terminal-background));
 }
 
 .terminal-container .xterm {
   height: 100%;
+}
+
+.terminal-container .xterm-screen,
+.terminal-container .xterm-rows {
+  -webkit-font-smoothing: antialiased;
+  /* JetBrains Mono draws -> and != as ligatures; a terminal must show the typed characters. */
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
 }
 
 /* xterm 6's legacy viewport remains visible below the last full terminal row. */
@@ -64,8 +75,14 @@
   background-color: hsl(var(--terminal-background));
 }
 
-.terminal-container .xterm-viewport::-webkit-scrollbar-thumb {
-  background: #3c4052;
+.terminal-container .xterm-viewport::-webkit-scrollbar-thumb,
+[data-terminal-logs] ::-webkit-scrollbar-thumb {
+  background-color: var(--terminal-scrollbar);
+}
+
+.terminal-container .xterm-viewport::-webkit-scrollbar-thumb:hover,
+[data-terminal-logs] ::-webkit-scrollbar-thumb:hover {
+  background-color: var(--terminal-scrollbar-hover);
 }
 
 /* Custom scrollbar for macOS feel */
