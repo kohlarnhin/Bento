@@ -86,7 +86,7 @@ python3 scripts/manage_project.py delete my-app
 xattr -dr com.apple.quarantine /Applications/Bento.app
 ```
 
-开发在 `dev` 分支进行，发版前在 `dev` 运行 `node scripts/bump-version.mjs`，同步更新四处版本号，再合并到 `release`。版本从 `0.1.0` 开始逐次加一，满十进位，例如 `0.1.9 → 0.2.0`、`0.9.9 → 1.0.0`。首个版本直接发布 `0.1.0`，无需先递增。`--print` 只预览，`--check` 检查版本是否一致。
+开发在 `dev` 分支进行，发版前在 `dev` 运行 `node scripts/bump-version.mjs`，同步更新四处版本号，再合并到 `release`。版本从 `0.1.0` 开始逐次加一，满十进位，例如 `0.1.9 → 0.2.0`、`0.9.9 → 1.0.0`。首个版本直接发布 `0.1.0`，无需先递增。`--print` 只预览，`--check` 检查版本是否一致。更新说明写在 `release-notes/v<版本>.md`，会显示在应用的更新弹窗和 GitHub Release 里；没有这个文件时，自动列出上个版本以来的 feat / fix / perf / style 提交。
 
 ```bash
 ./start.sh          # 检查环境、安装依赖并启动桌面应用开发模式（pnpm tauri dev）

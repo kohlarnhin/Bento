@@ -43,12 +43,14 @@ taken back once people download it.
 1. **Preconditions** on `dev`: working tree clean, everything committed, and these pass:
    `pnpm build`, `cd src-tauri && cargo test`, `node --test 'scripts/*.test.mjs'`.
 2. **Version.** If tag `v<current version>` already exists (`git ls-remote --tags origin`),
-   bump: `node scripts/bump-version.mjs`, then commit on `dev` as
-   `chore(release): v<new version>` (this subject is left out of the release notes).
+   bump: `node scripts/bump-version.mjs`, write the notes (step 3), then commit both on `dev` as
+   `chore(release): v<new version>`.
    The very first release, v0.1.0, needs no bump.
-3. **Release notes come from commit subjects** since the previous tag (merge commits and
-   `chore(release)` commits excluded). They are shown to users in the update dialog, so the
-   subjects should read well; if they don't, tell the user before releasing.
+3. **Release notes** are shown to the user in the update dialog and on GitHub. Write them in
+   Chinese in `release-notes/v<new version>.md` and commit the file together with the version
+   bump: short bullets under 新功能 / 修复 / 改进, user-facing changes only (no test, docs or
+   tooling items). Without that file the workflow falls back to the `feat`, `fix`, `perf` and
+   `style` commit subjects since the previous tag, grouped the same way.
 4. **Publish:**
    ```bash
    git push origin dev

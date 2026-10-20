@@ -5,15 +5,31 @@ import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { parseVersion } from './bump-version.mjs';
 
-export function releaseNotes(cwd = process.cwd()) {
+// Only changes users notice reach the update dialog; test/docs/chore/refactor commits stay out.
+const NOTE_SECTIONS = [['新功能', ['feat']], ['修复', ['fix']], ['改进', ['perf', 'style']]];
+
+/** Hand-written notes in release-notes/v<version>.md win; otherwise user-facing commits grouped by type. */
+export function releaseNotes(cwd = process.cwd(), version) {
+  if (version) {
+    try {
+      const written = readFileSync(join(cwd, 'release-notes', `v${version}.md`), 'utf8').trim();
+      if (written) return written;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  }
   const git = args => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   if (!git(['tag', '--merged', 'HEAD', '--list', 'v*'])) return 'Bento 首个版本';
   const previous = git(['describe', '--tags', '--match', 'v*', '--abbrev=0', 'HEAD']);
-  return git(['log', '--no-merges', '--format=%s', `${previous}..HEAD`])
+  const commits = git(['log', '--no-merges', '--format=%s', `${previous}..HEAD`])
     .split('\n')
-    .filter(subject => subject && !subject.startsWith('chore(release)'))
-    .map(subject => `- ${subject}`)
-    .join('\n');
+    .map(subject => subject.match(/^(\w+)(?:\([^)]*\))?!?:\s*(.+)$/))
+    .filter(Boolean);
+  const sections = NOTE_SECTIONS.map(([title, types]) => {
+    const items = commits.filter(([, type]) => types.includes(type.toLowerCase())).map(([, , text]) => `- ${text}`);
+    return items.length ? `${title}\n${items.join('\n')}` : '';
+  }).filter(Boolean);
+  return sections.join('\n\n') || '本次更新包含内部改进。';
 }
 
 function requireFile(directory, filename) {
@@ -47,7 +63,7 @@ export function prepareRelease({ directory, version, repository, notes, notesFil
       url: `https://github.com/${repository}/releases/download/v${version}/${filename}`,
     };
   }
-  manifest.notes = notes ?? releaseNotes(cwd);
+  manifest.notes = notes ?? releaseNotes(cwd, version);
   writeFileSync(notesFile ?? join(directory, '..', 'release-notes.md'), `${manifest.notes}\n`);
   writeFileSync(join(directory, 'latest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   return manifest;
