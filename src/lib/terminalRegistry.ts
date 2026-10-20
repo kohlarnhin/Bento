@@ -8,7 +8,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import type { TerminalOpenResult, TerminalOutput, TerminalSessionInfo } from '../types';
-import { formatDroppedPaths, transformTypedInput } from './terminalInput';
+import { formatDroppedPaths, recoverShiftedImeInput, trackBareShift, transformTypedInput, type TerminalImeState } from './terminalInput';
 
 type TerminalExit = Pick<TerminalSessionInfo, 'projectId' | 'sessionId' | 'exitCode'>;
 export interface TerminalStatus extends Partial<TerminalSessionInfo> {
@@ -42,6 +42,8 @@ interface Entry {
   sentSize?: string;
   lastPrintable: string;
   pasting: boolean;
+  ime: TerminalImeState;
+  imePendingTimer?: ReturnType<typeof setTimeout>;
 }
 
 interface Registry {
@@ -183,6 +185,7 @@ function createEntry(projectId: string): Entry {
     projectId, terminal, fit, container, opened: false, alive: false, seq: 0,
     hydrating: false, buffered: [], exits: [], input: [], writing: false, resizing: false,
     lastPrintable: '', pasting: false,
+    ime: { shiftDown: false, composing: false, pendingSend: false },
   };
   const paste = terminal.paste.bind(terminal);
   terminal.paste = (text) => {
@@ -201,6 +204,13 @@ function createEntry(projectId: string): Entry {
     if (imageOnly) queueInput(entry, '\x16');
     else terminal.paste(text);
     terminal.focus();
+  }, true);
+  container.addEventListener('input', (event) => {
+    if (event.target !== terminal.textarea) return;
+    const data = recoverShiftedImeInput(entry.ime, event as InputEvent);
+    // xterm rejects this input after Shift; its later 229 snapshot already includes the text.
+    // Leave the event and textarea intact so all other input stays on xterm's normal path.
+    if (data) terminal.input(data, true);
   }, true);
   terminal.attachCustomKeyEventHandler((event) => handleTerminalKey(entry, event));
   terminal.onData((data) => {
@@ -221,6 +231,7 @@ function createEntry(projectId: string): Entry {
 }
 
 function handleTerminalKey(entry: Entry, event: KeyboardEvent): boolean {
+  entry.ime.shiftDown = trackBareShift(entry.ime.shiftDown, event);
   if (event.isComposing || event.keyCode === 229) return true;
   const { key, metaKey, altKey, ctrlKey, shiftKey } = event;
   const command = metaKey && !altKey && !ctrlKey;
@@ -372,6 +383,19 @@ async function showTerminal(entry: Entry) {
   if (!visible(entry)) return;
   if (!entry.opened) {
     entry.terminal.open(entry.container);
+    const textarea = entry.terminal.textarea!;
+    textarea.addEventListener('blur', () => { entry.ime.shiftDown = false; });
+    textarea.addEventListener('compositionstart', () => { entry.ime.composing = true; });
+    textarea.addEventListener('compositionend', () => {
+      entry.ime.composing = false;
+      entry.ime.pendingSend = true;
+      clearTimeout(entry.imePendingTimer);
+      // Registered after open(): xterm queues its composition finalization before this timer.
+      entry.imePendingTimer = setTimeout(() => {
+        entry.ime.pendingSend = false;
+        entry.imePendingTimer = undefined;
+      }, 0);
+    });
     entry.opened = true;
   }
   fitTerminal(entry.projectId, true);
