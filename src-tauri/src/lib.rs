@@ -14,6 +14,8 @@ mod logs;
 mod quit;
 mod tray;
 mod git;
+mod settings;
+mod autostart;
 use lifecycle::ProcessMap;
 use projects::{ProjectDraft, ProjectDirInspection};
 #[cfg(debug_assertions)]
@@ -102,6 +104,13 @@ pub fn get_db_path() -> PathBuf {
 
 pub fn init_db(conn: &Connection) -> Result<(), rusqlite::Error> {
     let transaction = conn.unchecked_transaction()?;
+    transaction.execute(
+        "CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )", [],
+    )?;
     transaction.execute(
         "CREATE TABLE IF NOT EXISTS projects (
             id TEXT PRIMARY KEY,
@@ -387,6 +396,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(autostart::plugin())
+        .manage(autostart::AutostartState::default())
         .manage(process_map)
         .manage(quit::QuitPending::default())
         .manage(tray::TrayState::default())
@@ -394,6 +405,9 @@ pub fn run() {
             app.manage(terminal::TerminalManager::for_app(app.handle().clone()));
             quit::install_menu(app.handle())?;
             tray::install(app.handle())?;
+            if let Err(error) = autostart::initialize(app.handle()) {
+                eprintln!("Bento launch at login: {error}");
+            }
             show_initial_window(app.handle());
             Ok(())
         })
@@ -424,6 +438,10 @@ pub fn run() {
         open_url,
         reveal_path,
         open_config_file,
+        settings::get_settings,
+        settings::set_setting,
+        autostart::autostart_status,
+        autostart::set_autostart,
         terminal::terminal_open,
         terminal::terminal_restart,
         terminal::terminal_list,
@@ -489,8 +507,10 @@ fn show_initial_window(app: &AppHandle) {
             eprintln!("Bento initial window size: {error}");
         }
         // Size/monitor failures must never strand a hidden window.
-        let _ = window.show();
-        let _ = window.set_focus();
+        if !std::env::args_os().any(|arg| arg == "--autostart") {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
     }
 }
 
