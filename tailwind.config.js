@@ -33,6 +33,7 @@ export default {
           ring: 'hsl(var(--sidebar-ring))',
         },
         success: { DEFAULT: 'hsl(var(--success))', foreground: 'hsl(var(--success-foreground))', muted: 'hsl(var(--success-muted))' },
+        attention: 'hsl(var(--attention))',
         warning: { DEFAULT: 'hsl(var(--warning))', foreground: 'hsl(var(--warning-foreground))', muted: 'hsl(var(--warning-muted))' },
         terminal: { DEFAULT: 'hsl(var(--terminal-background))', foreground: 'hsl(var(--terminal-foreground))', muted: 'hsl(var(--terminal-muted))', border: 'hsl(var(--terminal-border))' },
         mac: {

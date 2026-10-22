@@ -14,6 +14,23 @@ static LOG_LINES: AtomicU64 = AtomicU64::new(0);
 static SYSTEM_LOGS: AtomicU64 = AtomicU64::new(0);
 static DB_INITIALIZATIONS: AtomicU64 = AtomicU64::new(0);
 static OPENED_URLS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static TERMINAL_BADGE: AtomicU64 = AtomicU64::new(0);
+static TERMINAL_BOUNCES: AtomicU64 = AtomicU64::new(0);
+static TERMINAL_FOCUS: Mutex<Vec<Option<String>>> = Mutex::new(Vec::new());
+
+pub fn record_terminal_focus(project_id: Option<String>) {
+    if enabled() {
+        if let Ok(mut reports) = TERMINAL_FOCUS.lock() { reports.push(project_id); }
+    }
+}
+
+pub fn record_terminal_badge(count: usize) {
+    if enabled() { TERMINAL_BADGE.store(count as u64, Ordering::Relaxed); }
+}
+
+pub fn record_terminal_bounce() {
+    if enabled() { TERMINAL_BOUNCES.fetch_add(1, Ordering::Relaxed); }
+}
 
 pub fn record_open_url(url: &str) -> bool {
     if !enabled() { return false; }
@@ -278,6 +295,9 @@ pub fn e2e_window(
         "commands": COMMANDS.lock().map(|commands| commands.clone()).unwrap_or_default(),
         "quitConfirmations": QUIT_CONFIRMATIONS.lock().map(|records| records.clone()).unwrap_or_default(),
         "openedUrls": OPENED_URLS.lock().map(|urls| urls.clone()).unwrap_or_default(),
+        "terminalBadge": TERMINAL_BADGE.load(Ordering::Relaxed),
+        "terminalBounces": TERMINAL_BOUNCES.load(Ordering::Relaxed),
+        "terminalFocusReports": TERMINAL_FOCUS.lock().map(|reports| reports.clone()).unwrap_or_default(),
     }))
 }
 

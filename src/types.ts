@@ -100,9 +100,12 @@ export interface TerminalSessionInfo {
   projectId: string;
   sessionId: string;
   alive: boolean;
+  attention: boolean;
   exitCode?: number | null;
   pid?: number | null;
 }
+
+export type TerminalAttention = Pick<TerminalSessionInfo, 'projectId' | 'sessionId' | 'attention'>;
 
 export interface TerminalOutput {
   projectId: string;

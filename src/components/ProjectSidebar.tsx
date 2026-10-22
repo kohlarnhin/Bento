@@ -338,7 +338,8 @@ export function ProjectSidebar({ projects, visibleProjects, searchQuery, searchI
                     data-project-row={project.id} data-search-highlighted={searchFocused && highlighted === project.id || undefined} data-reorder-draggable={canReorder || undefined}>
                     <span className={cn('size-1.5 shrink-0 rounded-full', conflict ? 'bg-warning' : statusColors[status])} aria-label={conflict ? '端口冲突' : statusNames[status]} />
                     <span className="truncate">{name}</span>
-                    {!searching && <GripVertical aria-hidden="true" className="ml-auto size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/project:opacity-60 group-focus-within/project:opacity-60" />}
+                    {!expanded && terminals[project.id]?.attention && <span className="ml-auto size-1.5 shrink-0 rounded-full bg-attention" aria-label="终端有新动静" title="终端有新动静" data-terminal-attention={project.id} />}
+                    {!searching && <GripVertical aria-hidden="true" className={cn('size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/project:opacity-60 group-focus-within/project:opacity-60', expanded || !terminals[project.id]?.attention ? 'ml-auto' : '')} />}
                   </button>
                 </div>
                 <CollapsibleContent>
@@ -352,7 +353,7 @@ export function ProjectSidebar({ projects, visibleProjects, searchQuery, searchI
                             className={cn('flex min-w-0 flex-1 items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs outline-none focus-visible:ring-[3px] focus-visible:ring-sidebar-ring/50', active ? 'font-medium' : 'text-muted-foreground')}>
                             <Icon className="size-3.5 shrink-0" />
                             <span>{view === 'overview' ? '概览' : '终端'}</span>
-                            {view === 'terminal' && terminals[project.id]?.alive && <span className="ml-auto size-1.5 rounded-full bg-success" aria-label="终端运行中" />}
+                            {view === 'terminal' && (terminals[project.id]?.attention ? <span className="ml-auto size-1.5 shrink-0 rounded-full bg-attention" aria-label="终端有新动静" title="终端有新动静" data-terminal-attention={project.id} /> : terminals[project.id]?.alive && <span className="ml-auto size-1.5 rounded-full bg-success" aria-label="终端运行中" />)}
                           </button>
                           {view === 'terminal' && <RestartTerminalButton projectId={project.id} alive={!!terminals[project.id]?.alive} opening={!!terminals[project.id]?.opening} active={!!active} onSelect={onSelect} />}
                         </div>

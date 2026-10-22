@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+use crate::terminal_attention::{AttentionManager, Sinks as AttentionSinks};
 
 const SCROLLBACK_BYTES: usize = 2 * 1024 * 1024;
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
@@ -25,6 +26,7 @@ pub struct TerminalSessionInfo {
     pub alive: bool,
     pub exit_code: Option<u32>,
     pub pid: Option<u32>,
+    pub attention: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -158,6 +160,7 @@ struct Session {
     writer: mpsc::Sender<Input>,
     killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
     scrollback: Arc<Mutex<Scrollback>>,
+    attention: Arc<AttentionManager>,
 }
 
 impl Session {
@@ -169,6 +172,7 @@ impl Session {
             alive: state.alive,
             exit_code: state.exit_code,
             pid: self.pid,
+            attention: self.attention.raised(&self.project_id, &self.session_id),
         }
     }
 
@@ -180,6 +184,7 @@ impl Session {
     }
 
     fn terminate(&self) {
+        self.attention.remove(&self.project_id, &self.session_id);
         // An interactive foreground job can have its own process group.
         let foreground = lock(&self.master)
             .as_ref()
@@ -221,27 +226,60 @@ pub struct TerminalManager {
     mutation: Arc<Mutex<()>>,
     output: OutputSink,
     exit: ExitSink,
+    attention: Arc<AttentionManager>,
 }
 
 impl TerminalManager {
+    #[cfg(test)]
     fn new(output: OutputSink, exit: ExitSink) -> Self {
+        Self::with_attention(output, exit, AttentionSinks::default())
+    }
+
+    fn with_attention(output: OutputSink, exit: ExitSink, sinks: AttentionSinks) -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             mutation: Arc::new(Mutex::new(())),
             output,
             exit,
+            attention: AttentionManager::new(sinks),
         }
     }
 
     pub fn for_app(app: AppHandle) -> Self {
         let output_app = app.clone();
-        Self::new(
+        let exit_app = app.clone();
+        let change_app = app.clone();
+        let badge_app = app.clone();
+        let inactive_app = app.clone();
+        Self::with_attention(
             Arc::new(move |event| {
                 let _ = output_app.emit("terminal-output", event);
             }),
             Arc::new(move |event| {
-                let _ = app.emit("terminal-exit", event);
+                let _ = exit_app.emit("terminal-exit", event);
             }),
+            AttentionSinks {
+                change: Arc::new(move |event| { let _ = change_app.emit("terminal-attention", event); }),
+                badge: Arc::new(move |count| {
+                    if let Some(window) = badge_app.get_webview_window("main") {
+                        let _ = window.set_badge_count((count > 0).then_some(count as i64));
+                    }
+                    #[cfg(debug_assertions)]
+                    crate::debug_e2e::record_terminal_badge(count);
+                }),
+                inactive: Arc::new(move || {
+                    inactive_app.get_webview_window("main").is_none_or(|window| {
+                        !window.is_visible().unwrap_or(false) || !window.is_focused().unwrap_or(false)
+                    })
+                }),
+                bounce: Arc::new(move || {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.request_user_attention(Some(tauri::UserAttentionType::Informational));
+                    }
+                    #[cfg(debug_assertions)]
+                    crate::debug_e2e::record_terminal_bounce();
+                }),
+            },
         )
     }
 
@@ -331,7 +369,9 @@ impl TerminalManager {
             writer: sender,
             killer: Arc::new(Mutex::new(killer)),
             scrollback: Arc::new(Mutex::new(Scrollback::new(SCROLLBACK_BYTES))),
+            attention: self.attention.clone(),
         };
+        self.attention.register(project_id, &session.session_id);
 
         // Retain ownership outside the closure until the waiter has successfully started.
         let pending_child = Arc::new(Mutex::new(Some(child)));
@@ -344,6 +384,7 @@ impl TerminalManager {
                 let child = lock(&waiter_child).take();
                 let exit_code =
                     child.and_then(|mut child| child.wait().ok().map(|status| status.exit_code()));
+                waiter_session.attention.remove(&waiter_session.project_id, &waiter_session.session_id);
                 {
                     let mut state = lock(&waiter_session.state.0);
                     state.alive = false;
@@ -357,6 +398,7 @@ impl TerminalManager {
                 });
             });
         if let Err(err) = waiter {
+            self.attention.remove(project_id, &session.session_id);
             if let Some(mut child) = lock(&pending_child).take() {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -416,6 +458,7 @@ impl TerminalManager {
         let output = self.output.clone();
         let output_project = project_id.to_string();
         let output_session = session.session_id.clone();
+        let attention = self.attention.clone();
         let reader_result =
             thread::Builder::new()
                 .name("terminal-reader".into())
@@ -437,7 +480,10 @@ impl TerminalManager {
                     loop {
                         match reader.read(&mut buffer) {
                             Ok(0) => break,
-                            Ok(len) => emit(decoder.decode(&buffer[..len], false)),
+                            Ok(len) => {
+                                attention.output(&output_project, &output_session, &buffer[..len]);
+                                emit(decoder.decode(&buffer[..len], false));
+                            }
                             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
                             Err(_) => break, // macOS/Linux may report EIO at the end of a PTY.
                         }
@@ -493,6 +539,7 @@ impl TerminalManager {
             return Ok(());
         }
         let session = self.get(project_id)?;
+        self.attention.resize(project_id, &session.session_id);
         let master = lock(&session.master);
         if let Some(master) = master.as_ref() {
             master
@@ -531,6 +578,11 @@ impl TerminalManager {
 
     pub fn kill_all(&self) {
         self.retain_projects(&HashSet::new());
+        self.attention.shutdown();
+    }
+
+    pub fn focus(&self, project_id: Option<String>) {
+        self.attention.focus(project_id);
     }
 }
 
@@ -627,6 +679,13 @@ pub fn terminal_list(state: State<'_, TerminalManager>) -> Vec<TerminalSessionIn
 }
 
 #[tauri::command]
+pub fn terminal_focus(state: State<'_, TerminalManager>, project_id: Option<String>) {
+    #[cfg(debug_assertions)]
+    crate::debug_e2e::record_terminal_focus(project_id.clone());
+    state.focus(project_id);
+}
+
+#[tauri::command]
 pub async fn terminal_run(
     state: State<'_, TerminalManager>,
     project_id: String,
@@ -715,6 +774,38 @@ mod tests {
             self.manager.kill_all();
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[test]
+    fn real_pty_bell_raises_unwatched_and_focus_restart_close_exit_clear_it() {
+        let fixture = Fixture::new();
+        fixture.manager.open("bell", &fixture.dir, 80, 24, false, &[]).unwrap();
+        let ring = || {
+            fixture.manager.write("bell", b"printf '\\a'\n".to_vec()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !fixture.manager.get("bell").unwrap().info().attention {
+                assert!(Instant::now() < deadline, "PTY bell did not raise attention");
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        ring();
+        assert!(fixture.manager.list()[0].attention);
+        fixture.manager.focus(Some("bell".into()));
+        assert!(!fixture.manager.list()[0].attention);
+        fixture.manager.focus(None);
+        ring();
+        fixture.manager.open("bell", &fixture.dir, 80, 24, true, &[]).unwrap();
+        assert!(!fixture.manager.list()[0].attention);
+        ring();
+        fixture.manager.write("bell", b"exit\n".to_vec()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while fixture.manager.list()[0].alive {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!fixture.manager.list()[0].attention);
+        fixture.manager.close("bell");
+        assert!(fixture.manager.list().is_empty());
     }
 
     #[test]

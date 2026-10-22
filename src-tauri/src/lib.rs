@@ -7,6 +7,7 @@ use tauri::{AppHandle, Manager, State};
 use tokio::sync::Mutex;
 
 mod terminal;
+mod terminal_attention;
 mod shell_env;
 mod projects;
 mod processes;
@@ -446,6 +447,7 @@ pub fn run() {
         terminal::terminal_open,
         terminal::terminal_restart,
         terminal::terminal_list,
+        terminal::terminal_focus,
         terminal::terminal_write,
         terminal::terminal_run,
         terminal::terminal_write_bytes,
@@ -471,8 +473,15 @@ pub fn run() {
         debug_e2e::record_command(invoke.message.command());
         commands(invoke)
     });
-    #[cfg(debug_assertions)]
-    let builder = builder.on_page_load(debug_e2e::on_page_load);
+    let builder = builder.on_page_load(|webview, payload| {
+        if webview.label() == "main" && payload.event() == tauri::webview::PageLoadEvent::Started {
+            if let Some(manager) = webview.try_state::<terminal::TerminalManager>() {
+                manager.focus(None);
+            }
+        }
+        #[cfg(debug_assertions)]
+        debug_e2e::on_page_load(webview, payload);
+    });
     builder.build(tauri::generate_context!())
         .expect("构建 Bento 失败")
         .run(handle_run_event);
