@@ -7,6 +7,7 @@ use tauri::{AppHandle, Manager, State};
 use tokio::sync::Mutex;
 
 mod terminal;
+mod shell_env;
 mod projects;
 mod processes;
 mod lifecycle;
