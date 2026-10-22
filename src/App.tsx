@@ -104,6 +104,32 @@ export function App() {
   const [activeLogProject, setActiveLogProject] = useState<ProjectConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [selection, setSelection] = useState<ProjectSelection | null>(null);
+  const watchedTerminal = selection?.view === 'terminal' ? selection.projectId : null;
+  const reportedTerminal = useRef<string | null>();
+  const focusRequests = useRef(Promise.resolve());
+  useEffect(() => {
+    const report = (projectId: string | null) => {
+      if (reportedTerminal.current === projectId) return;
+      reportedTerminal.current = projectId;
+      focusRequests.current = focusRequests.current.catch(() => {}).then(() =>
+        invoke<void>('terminal_focus', { projectId }),
+      );
+      void focusRequests.current.catch(error => toast.error(`更新终端关注状态失败：${error}`));
+    };
+    const update = () => report(document.visibilityState === 'visible' && document.hasFocus() ? watchedTerminal : null);
+    const blur = () => report(null);
+    update();
+    window.addEventListener('focus', update);
+    window.addEventListener('blur', blur);
+    window.addEventListener('pagehide', blur);
+    document.addEventListener('visibilitychange', update);
+    return () => {
+      window.removeEventListener('focus', update);
+      window.removeEventListener('blur', blur);
+      window.removeEventListener('pagehide', blur);
+      document.removeEventListener('visibilitychange', update);
+    };
+  }, [watchedTerminal]);
   const [searchQuery, setSearchQuery] = useState('');
   const searchInput = useRef<HTMLInputElement>(null);
   const searchText = searchQuery.trim().toLowerCase();

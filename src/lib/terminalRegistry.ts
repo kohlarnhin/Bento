@@ -9,7 +9,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import '@fontsource/jetbrains-mono/latin-400.css';
 import '@fontsource/jetbrains-mono/latin-700.css';
-import type { TerminalOpenResult, TerminalOutput, TerminalSessionInfo } from '../types';
+import type { TerminalAttention, TerminalOpenResult, TerminalOutput, TerminalSessionInfo } from '../types';
 import { formatDroppedPaths, recoverShiftedImeInput, trackBareShift, transformTypedInput, type TerminalImeState } from './terminalInput';
 import { DEFAULT_TERMINAL_FONT_SIZE, TERMINAL_FONT_FAMILY, TERMINAL_LINE_HEIGHT, TERMINAL_THEME } from './terminalAppearance';
 
@@ -37,6 +37,7 @@ interface Entry {
   hydrating: boolean;
   buffered: TerminalOutput[];
   exits: TerminalExit[];
+  attentions: TerminalAttention[];
   opening?: Promise<void>;
   input: InputChunk[];
   writing: boolean;
@@ -120,14 +121,21 @@ function receiveOutput(entry: Entry, output: TerminalOutput) {
 function receiveExit(entry: Entry, event: TerminalExit) {
   if (entry.sessionId !== event.sessionId) return;
   entry.alive = false;
-  publish(entry.projectId, { ...registry.snapshot[entry.projectId], ...event, alive: false });
+  publish(entry.projectId, { ...registry.snapshot[entry.projectId], ...event, alive: false, attention: false });
+}
+
+function receiveAttention(event: TerminalAttention) {
+  const current = registry.snapshot[event.projectId];
+  if (current?.sessionId && current.sessionId !== event.sessionId) return;
+  if (current?.alive === false && event.attention) return;
+  publish(event.projectId, { ...current, ...event });
 }
 
 export function initTerminalRegistry(showError: (message: string) => void): Promise<void> {
   registry.showError = showError;
   if (!registry.initialized) {
     registry.initialized = (async () => {
-      // Install both listeners before any open/snapshot request, to avoid a rehydration gap.
+      // Install listeners before any open/snapshot request, to avoid a rehydration gap.
       const unlistenOutput = await listen<TerminalOutput>('terminal-output', ({ payload }) => {
         const entry = registry.entries.get(payload.projectId);
         if (!entry) return;
@@ -135,20 +143,37 @@ export function initTerminalRegistry(showError: (message: string) => void): Prom
         else receiveOutput(entry, payload);
       });
       try {
-        await listen<TerminalExit>('terminal-exit', ({ payload }) => {
+        const unlistenExit = await listen<TerminalExit>('terminal-exit', ({ payload }) => {
           const entry = registry.entries.get(payload.projectId);
           if (entry?.hydrating) entry.exits.push(payload);
           else if (entry) receiveExit(entry, payload);
           else if (registry.snapshot[payload.projectId]?.sessionId === payload.sessionId) {
-            publish(payload.projectId, { ...registry.snapshot[payload.projectId], ...payload, alive: false });
+            publish(payload.projectId, { ...registry.snapshot[payload.projectId], ...payload, alive: false, attention: false });
           }
         });
+        const pending: TerminalAttention[] = [];
+        let listing = true;
+        let unlistenAttention: (() => void) | undefined;
+        try {
+          unlistenAttention = await listen<TerminalAttention>('terminal-attention', ({ payload }) => {
+            const entry = registry.entries.get(payload.projectId);
+            if (listing) pending.push(payload);
+            else if (entry?.hydrating) entry.attentions.push(payload);
+            else receiveAttention(payload);
+          });
+          const sessions = await invoke<TerminalSessionInfo[]>('terminal_list');
+          sessions.forEach((session) => publish(session.projectId, session));
+          listing = false;
+          pending.forEach(receiveAttention);
+        } catch (error) {
+          unlistenAttention?.();
+          unlistenExit();
+          throw error;
+        }
       } catch (error) {
         unlistenOutput();
         throw error;
       }
-      const sessions = await invoke<TerminalSessionInfo[]>('terminal_list');
-      sessions.forEach((session) => publish(session.projectId, session));
       await getCurrentWebview().onDragDropEvent(({ payload }) => handleTerminalDragDrop(payload));
     })().catch((error) => {
       registry.showError(`终端初始化失败：${error}`);
@@ -214,7 +239,7 @@ function createEntry(projectId: string): Entry {
   container.dataset.terminalProject = projectId;
   const entry: Entry = {
     projectId, terminal, fit, container, opened: false, alive: false, seq: 0,
-    hydrating: false, buffered: [], exits: [], input: [], writing: false, resizing: false,
+    hydrating: false, buffered: [], exits: [], attentions: [], input: [], writing: false, resizing: false,
     lastPrintable: '', pasting: false,
     ime: { shiftDown: false, composing: false, pendingSend: false },
   };
@@ -371,6 +396,7 @@ async function hydrate(entry: Entry, restart: boolean) {
   entry.hydrating = true;
   entry.buffered = [];
   entry.exits = [];
+  entry.attentions = [];
   entry.input = [];
   entry.lastPrintable = '';
   publish(entry.projectId, { ...registry.snapshot[entry.projectId], opening: true, error: undefined });
@@ -386,8 +412,10 @@ async function hydrate(entry: Entry, restart: boolean) {
     publish(entry.projectId, result.session);
     entry.buffered.sort((a, b) => a.seq - b.seq).forEach((output) => receiveOutput(entry, output));
     entry.exits.forEach((event) => receiveExit(entry, event));
+    entry.attentions.forEach(receiveAttention);
     entry.buffered = [];
     entry.exits = [];
+    entry.attentions = [];
   } catch (error) {
     const message = `打开终端失败：${error}`;
     // A failed restart may already have terminated the old shell. Reconcile before retrying.
@@ -400,6 +428,7 @@ async function hydrate(entry: Entry, restart: boolean) {
     entry.buffered.sort((a, b) => a.seq - b.seq).forEach((output) => receiveOutput(entry, output));
     entry.exits.forEach((event) => receiveExit(entry, event));
     publish(entry.projectId, { ...(sessions ? session : registry.snapshot[entry.projectId]), opening: false, error: message });
+    entry.attentions.forEach(receiveAttention);
     registry.showError(message);
   } finally {
     entry.hydrating = false;
