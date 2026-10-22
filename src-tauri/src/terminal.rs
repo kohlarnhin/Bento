@@ -549,19 +549,7 @@ fn configure_environment(command: &mut CommandBuilder) {
         .map(|(key, _)| key.to_string())
         .collect();
     for key in keys {
-        if matches!(
-            key.as_str(),
-            "CLAUDECODE"
-                | "CLAUDE_PID"
-                | "CLAUDE_EFFORT"
-                | "CODEX_THREAD_ID"
-                | "CODEX_CI"
-                | "INIT_CWD"
-        ) || key.starts_with("CLAUDE_CODE_")
-            || key.starts_with("CODEX_SANDBOX")
-            || key.starts_with("npm_")
-            || key.starts_with("PNPM_")
-        {
+        if crate::shell_env::should_strip(&key) {
             command.env_remove(key);
         }
     }

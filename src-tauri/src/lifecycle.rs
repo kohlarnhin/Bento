@@ -1,4 +1,4 @@
-use crate::{get_projects_sync, logs, processes, LogPayload, RunningProjectInfo};
+use crate::{get_projects_sync, logs, processes, shell_env, LogPayload, RunningProjectInfo};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -313,9 +313,25 @@ async fn start(app: &AppHandle, id: &str, state: &ProcessMap) -> Result<(), Stri
         format!("[Bento] 执行命令: {}", project.start_command),
     );
     let script = processes::launch_script(&path, &project.start_command, &project.env)?;
+    let environment = tauri::async_runtime::spawn_blocking(shell_env::capture)
+        .await
+        .unwrap_or_else(|err| Err(format!("读取环境任务失败：{err}")));
     let mut command = std::process::Command::new("zsh");
+    match environment {
+        Ok(env) => {
+            command.args(["-f", "-c", &script]).env_clear().envs(env);
+        }
+        Err(reason) => {
+            log(app, id, format!("[Bento] 读取终端环境失败（{reason}），已改用登录 shell 启动，.zshrc 中的设置可能不会生效"));
+            command.args(["-lc", &script]);
+            for (key, _) in std::env::vars_os() {
+                if key.to_str().is_some_and(shell_env::should_strip) {
+                    command.env_remove(key);
+                }
+            }
+        }
+    }
     command
-        .args(["-lc", &script])
         .process_group(0)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -498,6 +514,9 @@ async fn start(app: &AppHandle, id: &str, state: &ProcessMap) -> Result<(), Stri
                 }
             ),
         );
+        if code == Some(127) {
+            log(&app, &id, format!("[Bento] 状态码 127 通常表示找不到命令，请确认「{}」在项目终端中能直接运行", project.start_command));
+        }
     });
     Ok(())
 }
