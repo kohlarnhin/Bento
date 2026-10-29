@@ -103,6 +103,7 @@ export function App() {
   const { logs, enqueue: enqueueLogs, flush: flushLogs, clear: clearLogs } = useProjectLogs();
   const [activeLogProject, setActiveLogProject] = useState<ProjectConfig | null>(null);
   const [loading, setLoading] = useState(true);
+  const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [selection, setSelection] = useState<ProjectSelection | null>(null);
   const [activeSlots, setActiveSlots] = useState<Record<string, number>>({});
   const selectTerminalSlot = useCallback((projectId: string, slot: number) => {
@@ -266,6 +267,7 @@ export function App() {
       setLoading(true);
       const res = await invoke<ProjectsResponse>('get_projects');
       setProjects(res.projects);
+      setProjectsLoaded(true);
       setConflicts(res.conflicts);
       setSelection((previous) => previous && res.projects.some((project) => project.id === previous.projectId)
         ? previous
@@ -441,6 +443,7 @@ export function App() {
           selection={selection}
           activeSlots={activeSlots}
           loading={loading}
+          projectsLoaded={projectsLoaded}
           onSelect={selectView}
           onRefresh={loadProjects}
           onCreate={() => openCreate()}

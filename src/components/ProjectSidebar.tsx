@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { PointerEvent as ReactPointerEvent, ReactNode, RefObject } from 'react';
-import { ChevronRight, GripVertical, LayoutDashboard, Plus, RefreshCw, RotateCcw, Search, Square, Terminal, X } from 'lucide-react';
+import { ChevronRight, ChevronsDownUp, ChevronsUpDown, GripVertical, LayoutDashboard, Plus, RefreshCw, RotateCcw, Search, Square, Terminal, X } from 'lucide-react';
 import type { PortConflict, ProjectConfig, ProjectSelection, ProjectStatus } from '../types';
 import { getTerminalSnapshot, restartTerminal, subscribeTerminals, terminalKey } from '../lib/terminalRegistry';
 import { cn } from '../lib/utils';
@@ -25,6 +25,7 @@ interface Props {
   selection: ProjectSelection | null;
   activeSlots: Record<string, number>;
   loading: boolean;
+  projectsLoaded: boolean;
   onSelect: (selection: ProjectSelection) => void;
   onRefresh: () => void;
   onCreate: () => void;
@@ -57,6 +58,22 @@ const statusNames: Record<ProjectStatus, string> = {
 const statusColors: Record<ProjectStatus, string> = {
   running: 'bg-success', starting: 'bg-foreground animate-pulse', stopped: 'bg-muted-foreground/35', error: 'bg-destructive',
 };
+
+const COLLAPSED_KEY = 'bento.sidebar.collapsed';
+const RUNNING_COLLAPSED_KEY = 'bento.sidebar.runningCollapsed';
+
+function readCollapsedProjects(): Set<string> {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? '[]');
+    if (Array.isArray(saved) && saved.every(id => typeof id === 'string')) return new Set(saved);
+  } catch { /* Unavailable storage or malformed preferences use the expanded default. */ }
+  return new Set();
+}
+
+function readRunningCollapsed(): boolean {
+  try { return JSON.parse(localStorage.getItem(RUNNING_COLLAPSED_KEY) ?? 'false') === true; }
+  catch { return false; }
+}
 
 function RestartTerminalButton({ projectId, slot, count, alive, opening, active, onSelect }: {
   projectId: string; slot: number; count: number; alive: boolean; opening: boolean; active: boolean; onSelect: Props['onSelect'];
@@ -99,8 +116,9 @@ function RestartTerminalButton({ projectId, slot, count, alive, opening, active,
   );
 }
 
-export function ProjectSidebar({ projects, visibleProjects, searchQuery, searchInputRef, onSearchChange, onReorder, reordering, statuses, conflicts, selection, activeSlots, loading, onSelect, onRefresh, onCreate, managedCount, onStopAll, updateFooter }: Props) {
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+export function ProjectSidebar({ projects, visibleProjects, searchQuery, searchInputRef, onSearchChange, onReorder, reordering, statuses, conflicts, selection, activeSlots, loading, projectsLoaded, onSelect, onRefresh, onCreate, managedCount, onStopAll, updateFooter }: Props) {
+  const [collapsed, setCollapsed] = useState(readCollapsedProjects);
+  const [runningCollapsed, setRunningCollapsed] = useState(readRunningCollapsed);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const [searchFocused, setSearchFocused] = useState(false);
   const [draggingId, setDraggingId] = useState<string | null>(null);
@@ -124,6 +142,24 @@ export function ProjectSidebar({ projects, visibleProjects, searchQuery, searchI
     return groups;
   }, [terminals]);
   const running = projects.filter((project) => statuses[project.id] === 'running').length;
+  const runningProjects = projects.filter(project => ['running', 'starting'].includes(statuses[project.id]));
+  const anyExpanded = projects.some(project => !collapsed.has(project.id));
+  const collapseAllLabel = anyExpanded ? '全部折叠' : '全部展开';
+  const CollapseAllIcon = anyExpanded ? ChevronsDownUp : ChevronsUpDown;
+
+  useEffect(() => {
+    if (loading || !projectsLoaded) return;
+    const ids = new Set(projects.map(project => project.id));
+    const retained = new Set([...collapsed].filter(id => ids.has(id)));
+    if (retained.size !== collapsed.size) { setCollapsed(retained); return; }
+    try { localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsed])); }
+    catch { /* Keep the current session usable when storage is unavailable. */ }
+  }, [collapsed, projects, loading, projectsLoaded]);
+
+  useEffect(() => {
+    try { localStorage.setItem(RUNNING_COLLAPSED_KEY, JSON.stringify(runningCollapsed)); }
+    catch { /* The in-memory preference still works. */ }
+  }, [runningCollapsed]);
 
   const clearDrag = useCallback(() => {
     const current = drag.current;
@@ -300,10 +336,56 @@ export function ProjectSidebar({ projects, visibleProjects, searchQuery, searchI
           onSearchChange(''); setHighlightedId(null); searchInputRef.current?.focus();
         }}><X className="size-3.5" /></Button>}
       </div>
+      {!searching && runningProjects.length > 0 && <section className="mx-3 mt-2 flex max-h-[40%] shrink-0 flex-col overflow-hidden border-b border-sidebar-border pb-2" aria-labelledby="sidebar-running-heading" data-running-section>
+        <div className="mb-1 flex h-7 shrink-0 items-center justify-between px-2 text-[11px] font-medium text-muted-foreground">
+          <span id="sidebar-running-heading">运行中</span>
+          <div className="flex items-center gap-1">
+            <span className="tabular-nums" data-running-count>{runningProjects.length}</span>
+            <ActionTooltip label={runningCollapsed ? '展开运行中项目' : '收起运行中项目'}>
+              <Button variant="ghost" size="icon-sm" aria-label={runningCollapsed ? '展开运行中项目' : '收起运行中项目'}
+                aria-expanded={!runningCollapsed} aria-controls="sidebar-running-projects" data-running-toggle
+                onClick={() => setRunningCollapsed(previous => !previous)}>
+                <ChevronRight className={cn('transition-transform', !runningCollapsed && 'rotate-90')} />
+              </Button>
+            </ActionTooltip>
+          </div>
+        </div>
+        {!runningCollapsed && <nav id="sidebar-running-projects" aria-label="运行中的项目" className="min-h-0 overflow-x-hidden overflow-y-auto">
+          {runningProjects.map(project => {
+            const selected = selection?.projectId === project.id;
+            const terminalSelected = selected && selection.view === 'terminal';
+            const status = statuses[project.id];
+            const conflict = conflicts.some(item => item.projectIds.includes(project.id));
+            const name = project.displayName || project.name;
+            return <div key={project.id} className={cn('group/running flex min-w-0 items-center rounded-md transition-colors hover:bg-sidebar-accent/70', selected && 'bg-sidebar-accent text-sidebar-accent-foreground')}>
+              <button data-running-project={project.id} aria-current={selected && selection.view === 'overview' ? 'page' : undefined}
+                title={name} onClick={() => onSelect({ projectId: project.id, view: 'overview' })}
+                className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-2 text-left text-xs outline-none focus-visible:ring-[3px] focus-visible:ring-sidebar-ring/50">
+                <span className={cn('size-1.5 shrink-0 rounded-full', conflict ? 'bg-warning' : statusColors[status])} aria-label={conflict ? '端口冲突' : statusNames[status]} />
+                <span className="min-w-0 flex-1 truncate">{name}</span>
+                {project.port != null && <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">:{project.port}</span>}
+                {terminalGroups[project.id]?.attention && <span className="size-1.5 shrink-0 rounded-full bg-attention" aria-label="终端有新动静" title="终端有新动静" data-running-attention={project.id} />}
+              </button>
+              <ActionTooltip label={`${name} 终端`} side="right">
+                <Button variant="ghost" size="icon-sm" aria-label={`${name} 终端`} aria-current={terminalSelected ? 'page' : undefined}
+                  data-running-terminal={project.id} onClick={() => onSelect({ projectId: project.id, view: 'terminal' })}
+                  className={cn('no-drag mr-1 shrink-0 opacity-0 transition-opacity group-hover/running:opacity-100 group-focus-within/running:opacity-100', terminalSelected && 'opacity-100')}><Terminal /></Button>
+              </ActionTooltip>
+            </div>;
+          })}
+        </nav>}
+      </section>}
       <ScrollArea ref={scrollArea} className="min-h-0 flex-1 px-3 py-3">
         <nav id="project-list" aria-label="项目列表" className="flex flex-col gap-1">
-          <div className="mb-2 flex h-5 items-center justify-between px-2 text-[11px] font-medium text-muted-foreground">
-            <span>项目</span><span className="tabular-nums" data-project-count>{searching ? `${visibleProjects.length} / ${projects.length}` : projects.length}</span>
+          <div className="mb-2 flex h-7 items-center justify-between px-2 text-[11px] font-medium text-muted-foreground">
+            <span>项目</span>
+            <div className="flex items-center gap-1">
+              <span className="tabular-nums" data-project-count>{searching ? `${visibleProjects.length} / ${projects.length}` : projects.length}</span>
+              <ActionTooltip label={collapseAllLabel}>
+                <Button variant="ghost" size="icon-sm" aria-label={collapseAllLabel} title={collapseAllLabel} data-collapse-all disabled={loading || projects.length === 0}
+                  onClick={() => setCollapsed(anyExpanded ? new Set(projects.map(project => project.id)) : new Set())}><CollapseAllIcon /></Button>
+              </ActionTooltip>
+            </div>
           </div>
           {searching && <p className="mb-2 px-2 text-[10px] leading-relaxed text-muted-foreground" data-reorder-search-hint>清除搜索后可拖动排序</p>}
           {searching && !visibleProjects.length && <p role="status" className="px-2 py-6 text-xs leading-relaxed text-muted-foreground break-all" data-project-search-empty>没有匹配「{searchQuery.trim()}」的项目</p>}
