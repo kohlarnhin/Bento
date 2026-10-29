@@ -888,10 +888,12 @@ mod tests {
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
+    const TEST_PROMPT: &str = "BENTO_PTY_READY> ";
 
     struct Fixture {
         manager: TerminalManager,
         dir: PathBuf,
+        env: Vec<crate::projects::EnvVar>,
         settings: Arc<Mutex<rusqlite::Connection>>,
         opened: Arc<Mutex<Vec<TerminalSessionInfo>>>,
         closed: Arc<Mutex<Vec<TerminalClosed>>>,
@@ -909,6 +911,15 @@ mod tests {
                     .as_nanos()
             ));
             std::fs::create_dir_all(&dir).unwrap();
+            let dir = dir.canonicalize().unwrap();
+            // Keep real login shells, but isolate them from the developer's rc files/plugins.
+            std::fs::write(dir.join(".zshenv"), "unsetopt GLOBAL_RCS\n").unwrap();
+            std::fs::write(dir.join(".zprofile"), "export BENTO_TEST_LOGIN=login-env\n").unwrap();
+            std::fs::write(dir.join(".zshrc"), format!("PROMPT='{TEST_PROMPT}'\nRPROMPT=''\n")).unwrap();
+            let env = vec![crate::projects::EnvVar {
+                key: "ZDOTDIR".into(),
+                value: dir.to_str().unwrap().into(),
+            }];
             let settings = Arc::new(Mutex::new(rusqlite::Connection::open_in_memory().unwrap()));
             crate::init_db(&lock(&settings)).unwrap();
             let db = settings.clone();
@@ -921,8 +932,7 @@ mod tests {
             manager.opened = Arc::new(move |event| lock(&opened_sink).push(event));
             manager.closed = Arc::new(move |event| lock(&closed_sink).push(event));
             Self {
-                manager, settings, opened, closed,
-                dir: dir.canonicalize().unwrap(),
+                manager, dir, env, settings, opened, closed,
             }
         }
 
@@ -937,7 +947,7 @@ mod tests {
                 if data.contains(text) {
                     return data;
                 }
-                assert!(Instant::now() < deadline, "Missing {text:?} in {data:?}");
+                assert!(Instant::now() < deadline, "Missing {text:?}: {}", self.diagnostics(id, slot));
                 thread::sleep(Duration::from_millis(30));
             }
         }
@@ -947,66 +957,91 @@ mod tests {
         }
 
         fn create(&self, id: &str) -> OpenResult {
-            self.manager.create(id, &self.dir, 80, 24, &[]).unwrap()
+            self.manager.create(id, &self.dir, 80, 24, &self.env).unwrap()
         }
 
         fn idle(&self, id: &str, slot: u8) {
-            wait_until(|| self.manager.get(id, slot).unwrap().idle());
+            // A foreground process group alone does not mean the shell has finished starting.
+            self.wait_for_slot(id, slot, TEST_PROMPT);
+            self.wait_until(id, slot, "shell idle", |session| session.idle());
         }
 
         fn busy(&self, id: &str, slot: u8) {
             self.idle(id, slot);
-            self.manager.write(id, slot, b"sleep 300\r".to_vec()).unwrap();
-            wait_until(|| !self.manager.get(id, slot).unwrap().idle());
+            self.manager.write(id, slot, b"/bin/sleep 300\r".to_vec()).unwrap();
+            self.wait_until(id, slot, "foreground job started", |session| session.info().alive && !session.idle());
         }
 
         fn exit(&self, id: &str, slot: u8) {
-            self.manager.write(id, slot, b"\x03".to_vec()).unwrap();
+            self.wait_for_slot(id, slot, TEST_PROMPT);
+            let session = self.manager.get(id, slot).unwrap();
+            let shell_group = session.pid.unwrap() as i32;
+            let foreground = lock(&session.master).as_ref().unwrap().process_group_leader().unwrap();
+            if foreground != shell_group {
+                // Only stop this fixture's foreground job. Ctrl-C can kill a starting shell or
+                // flush typed-ahead `exit` before the shell regains control of the terminal.
+                assert!(foreground > 0);
+                assert_ne!(foreground, unsafe { libc::getpgrp() });
+                assert_eq!(unsafe { libc::killpg(foreground, libc::SIGTERM) }, 0);
+            }
             self.idle(id, slot);
-            self.manager.write(id, slot, b"exit\r".to_vec()).unwrap();
-            wait_until(|| !self.manager.get(id, slot).unwrap().info().alive);
+            self.manager.write(id, slot, b"exit 0\r".to_vec()).unwrap();
+            self.wait_until(id, slot, "shell exited", |session| !session.info().alive);
+            assert_eq!(session.info().exit_code, Some(0));
+        }
+
+        fn diagnostics(&self, id: &str, slot: u8) -> String {
+            let session = self.manager.get(id, slot).unwrap();
+            let result = session.result();
+            let tail: String = result.snapshot.data.chars().rev().take(1000).collect::<Vec<_>>().into_iter().rev().collect();
+            let foreground = lock(&session.master).as_ref().and_then(|pty| pty.process_group_leader());
+            format!("{:?}, idle={}, foreground={foreground:?}, scrollback tail={tail:?}", result.session, session.idle())
+        }
+
+        fn wait_until(&self, id: &str, slot: u8, label: &str, mut condition: impl FnMut(&Session) -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while !condition(&self.manager.get(id, slot).unwrap()) {
+                assert!(Instant::now() < deadline, "PTY timed out waiting for {label}: {}", self.diagnostics(id, slot));
+                thread::sleep(Duration::from_millis(10));
+            }
         }
 
         fn run(&self, id: &str, slot: u8, command: &str) -> RunResult {
-            self.manager.run(id, slot, &self.dir, command.into(), &[]).unwrap()
-        }
-    }
-
-    fn wait_until(mut condition: impl FnMut() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while !condition() {
-            assert!(Instant::now() < deadline, "PTY condition timed out");
-            thread::sleep(Duration::from_millis(10));
+            self.manager.run(id, slot, &self.dir, command.into(), &self.env).unwrap()
         }
     }
 
     fn group_gone(pid: u32) {
-        wait_until(|| unsafe { libc::kill(-(pid as i32), 0) } != 0);
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while unsafe { libc::kill(-(pid as i32), 0) } == 0 {
+            assert!(Instant::now() < deadline, "PTY process group {pid} survived cleanup");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
     fn create_enforces_live_db_limit_counts_exited_slots_and_reuses_smallest_free_slot() {
         let fixture = Fixture::new();
-        assert!(fixture.manager.open("a", 2, &fixture.dir, 80, 24, false, &[]).unwrap_err().contains("该终端已关闭"));
-        assert!(fixture.manager.open("a", 2, &fixture.dir, 80, 24, true, &[]).is_err());
-        assert!(fixture.manager.open("a", 0, &fixture.dir, 80, 24, false, &[]).is_err());
+        assert!(fixture.manager.open("a", 2, &fixture.dir, 80, 24, false, &fixture.env).unwrap_err().contains("该终端已关闭"));
+        assert!(fixture.manager.open("a", 2, &fixture.dir, 80, 24, true, &fixture.env).is_err());
+        assert!(fixture.manager.open("a", 0, &fixture.dir, 80, 24, false, &fixture.env).is_err());
         assert_eq!(fixture.create("a").session.slot, 1);
         let two = fixture.create("a");
         assert_eq!(two.session.slot, 2);
         fixture.exit("a", 2);
-        assert_eq!(fixture.manager.create("a", &fixture.dir, 80, 24, &[]).unwrap_err(), "每个项目最多 2 个终端，可在设置中调整");
+        assert_eq!(fixture.manager.create("a", &fixture.dir, 80, 24, &fixture.env).unwrap_err(), "每个项目最多 2 个终端，可在设置中调整");
         fixture.limit(3);
         assert_eq!(fixture.create("a").session.slot, 3);
-        fixture.manager.open("a", 2, &fixture.dir, 80, 24, true, &[]).unwrap();
+        fixture.manager.open("a", 2, &fixture.dir, 80, 24, true, &fixture.env).unwrap();
         let before = fixture.manager.list();
         fixture.limit(1);
         assert_eq!(fixture.manager.list().iter().map(|s| &s.session_id).collect::<Vec<_>>(), before.iter().map(|s| &s.session_id).collect::<Vec<_>>());
         assert!(fixture.manager.list().iter().all(|s| s.alive));
-        assert!(fixture.manager.create("a", &fixture.dir, 80, 24, &[]).is_err());
-        let restarted = fixture.manager.open("a", 3, &fixture.dir, 80, 24, true, &[]).unwrap();
+        assert!(fixture.manager.create("a", &fixture.dir, 80, 24, &fixture.env).is_err());
+        let restarted = fixture.manager.open("a", 3, &fixture.dir, 80, 24, true, &fixture.env).unwrap();
         assert_ne!(restarted.session.session_id, before[2].session_id);
         fixture.manager.close_terminal("a", 2).unwrap();
-        assert!(fixture.manager.create("a", &fixture.dir, 80, 24, &[]).is_err());
+        assert!(fixture.manager.create("a", &fixture.dir, 80, 24, &fixture.env).is_err());
         fixture.limit(3);
         assert_eq!(fixture.create("a").session.slot, 2);
         assert_eq!(fixture.manager.list().iter().map(|s| s.slot).collect::<Vec<_>>(), [1, 2, 3]);
@@ -1021,7 +1056,8 @@ mod tests {
         let threads: Vec<_> = (0..6).map(|_| {
             let manager = fixture.manager.clone();
             let dir = fixture.dir.clone();
-            thread::spawn(move || manager.create("a", &dir, 80, 24, &[]))
+            let env = fixture.env.clone();
+            thread::spawn(move || manager.create("a", &dir, 80, 24, &env))
         }).collect();
         let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
         assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
@@ -1051,11 +1087,15 @@ mod tests {
     fn extra_slot_has_independent_login_shell_cwd_env_output_and_size() {
         let fixture = Fixture::new();
         fixture.create("a");
-        fixture.manager.create("a", &fixture.dir, 80, 24, &[crate::projects::EnvVar { key: "BENTO_SLOT_TEST".into(), value: "extra-env".into() }]).unwrap();
+        let mut env = fixture.env.clone();
+        env.push(crate::projects::EnvVar { key: "BENTO_SLOT_TEST".into(), value: "extra-env".into() });
+        fixture.manager.create("a", &fixture.dir, 80, 24, &env).unwrap();
+        fixture.idle("a", 2);
         fixture.manager.resize("a", 2, 91, 31).unwrap();
-        fixture.manager.write("a", 2, b"pwd; printf '%s\\n' $BENTO_SLOT_TEST; stty size\r".to_vec()).unwrap();
+        fixture.manager.write("a", 2, b"pwd; printf '%s\\n' $BENTO_SLOT_TEST $BENTO_TEST_LOGIN; stty size\r".to_vec()).unwrap();
         fixture.wait_for_slot("a", 2, &format!("\r\n{}\r\n", fixture.dir.display()));
         fixture.wait_for_slot("a", 2, "\r\nextra-env\r\n");
+        fixture.wait_for_slot("a", 2, "\r\nlogin-env\r\n");
         fixture.wait_for_slot("a", 2, "31 91");
         assert!(!fixture.manager.get("a", 1).unwrap().result().snapshot.data.contains("extra-env"));
     }
@@ -1075,7 +1115,7 @@ mod tests {
         assert_eq!(fixture.run("a", 3, "printf 'other-idle\\n'").slot, 2);
         fixture.wait_for_slot("a", 2, "\r\nother-idle\r\n");
         fixture.busy("a", 2);
-        let error = fixture.manager.run("a", 1, &fixture.dir, "FORBIDDEN".into(), &[]).unwrap_err();
+        let error = fixture.manager.run("a", 1, &fixture.dir, "FORBIDDEN".into(), &fixture.env).unwrap_err();
         assert_eq!(error, "所有终端都在运行程序，请结束其中一个，或在设置中调高终端数量上限");
         assert!(fixture.manager.list().iter().all(|s| !fixture.manager.get("a", s.slot).unwrap().result().snapshot.data.contains("FORBIDDEN")));
         fixture.exit("a", 2);
@@ -1117,8 +1157,9 @@ mod tests {
     #[test]
     fn real_pty_bell_raises_unwatched_and_focus_restart_close_exit_clear_it() {
         let fixture = Fixture::new();
-        fixture.manager.open("bell", 1, &fixture.dir, 80, 24, false, &[]).unwrap();
+        fixture.manager.open("bell", 1, &fixture.dir, 80, 24, false, &fixture.env).unwrap();
         let ring = || {
+            fixture.idle("bell", 1);
             fixture.manager.write("bell", 1, b"printf '\\a'\n".to_vec()).unwrap();
             let deadline = Instant::now() + Duration::from_secs(5);
             while !fixture.manager.get("bell", 1).unwrap().info().attention {
@@ -1132,7 +1173,7 @@ mod tests {
         assert!(!fixture.manager.list()[0].attention);
         fixture.manager.focus(None);
         ring();
-        fixture.manager.open("bell", 1, &fixture.dir, 80, 24, true, &[]).unwrap();
+        fixture.manager.open("bell", 1, &fixture.dir, 80, 24, true, &fixture.env).unwrap();
         assert!(!fixture.manager.list()[0].attention);
         ring();
         fixture.manager.write("bell", 1, b"exit\n".to_vec()).unwrap();
@@ -1290,9 +1331,10 @@ mod tests {
             .map(|_| {
                 let manager = fixture.manager.clone();
                 let dir = fixture.dir.clone();
+                let env = fixture.env.clone();
                 thread::spawn(move || {
                     manager
-                        .open("same", 1, &dir, 80, 24, false, &[])
+                        .open("same", 1, &dir, 80, 24, false, &env)
                         .unwrap()
                         .session
                 })
@@ -1307,21 +1349,18 @@ mod tests {
             .all(|session| session.session_id == sessions[0].session_id
                 && session.pid == sessions[0].pid));
         assert_eq!(fixture.manager.list().len(), 1);
+        fixture.idle("same", 1);
         fixture.manager.write("same", 1, b"exit 7\n".to_vec()).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while fixture.manager.get("same", 1).unwrap().info().alive {
-            assert!(Instant::now() < deadline);
-            thread::sleep(Duration::from_millis(30));
-        }
+        fixture.wait_until("same", 1, "shell exited with status 7", |session| !session.info().alive);
         let exited = fixture
             .manager
-            .open("same", 1, &fixture.dir, 80, 24, false, &[])
+            .open("same", 1, &fixture.dir, 80, 24, false, &fixture.env)
             .unwrap();
         assert_eq!(exited.session.session_id, sessions[0].session_id);
         assert_eq!(exited.session.exit_code, Some(7));
         let restarted = fixture
             .manager
-            .open("same", 1, &fixture.dir, 80, 24, true, &[])
+            .open("same", 1, &fixture.dir, 80, 24, true, &fixture.env)
             .unwrap();
         assert_ne!(restarted.session.session_id, sessions[0].session_id);
         assert_ne!(restarted.session.pid, sessions[0].pid);
@@ -1333,9 +1372,10 @@ mod tests {
         let fixture = Fixture::new();
         let first = fixture
             .manager
-            .open("pty", 1, &fixture.dir, 80, 24, false, &[])
+            .open("pty", 1, &fixture.dir, 80, 24, false, &fixture.env)
             .unwrap();
         let pgid = first.session.pid.unwrap() as i32;
+        fixture.idle("pty", 1);
         fixture
             .manager
             .write("pty", 1, b"pwd\necho \xe4\xbd\xa0\xe5\xa5\xbd\n".to_vec())
@@ -1385,7 +1425,7 @@ mod tests {
                 80,
                 24,
                 false,
-                &[]
+                &fixture.env
             )
             .unwrap_err()
             .contains("项目目录不存在"));
