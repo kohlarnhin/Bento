@@ -22,7 +22,7 @@ import { SettingsDialog } from './components/SettingsDialog';
 import Button from './components/ui/button';
 import { Toaster } from './components/ui/sonner';
 import { Empty, EmptyTitle, EmptyDescription } from './components/ui/empty';
-import { getTerminalSnapshot, initTerminalRegistry, restartTerminal, subscribeTerminals } from './lib/terminalRegistry';
+import { createTerminal, getProjectTerminalSlots, getTerminalSnapshot, initTerminalRegistry, subscribeTerminals, terminalKey } from './lib/terminalRegistry';
 import { useProjectLogs } from './lib/useProjectLogs';
 import {
   ProjectConfig,
@@ -104,20 +104,43 @@ export function App() {
   const [activeLogProject, setActiveLogProject] = useState<ProjectConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [selection, setSelection] = useState<ProjectSelection | null>(null);
-  const watchedTerminal = selection?.view === 'terminal' ? selection.projectId : null;
+  const [activeSlots, setActiveSlots] = useState<Record<string, number>>({});
+  const selectTerminalSlot = useCallback((projectId: string, slot: number) => {
+    setActiveSlots(previous => ({ ...previous, [projectId]: slot }));
+    setSelection({ projectId, view: 'terminal' });
+  }, []);
+  useEffect(() => {
+    setActiveSlots(previous => {
+      let next = previous;
+      for (const [projectId, slot] of Object.entries(previous)) {
+        if (slot === 1 || terminals[terminalKey(projectId, slot)]) continue;
+        const slots = getProjectTerminalSlots(projectId, terminals);
+        const replacement = slots.filter(candidate => candidate < slot).at(-1) ?? slots.find(candidate => candidate > slot) ?? 1;
+        if (next === previous) next = { ...previous };
+        next[projectId] = replacement;
+      }
+      return next;
+    });
+  }, [terminals]);
+  const watchedProjectId = selection?.view === 'terminal' ? selection.projectId : null;
+  const watchedSlot = watchedProjectId ? activeSlots[watchedProjectId] ?? 1 : null;
   const reportedTerminal = useRef<string | null>();
   const focusRequests = useRef(Promise.resolve());
   useEffect(() => {
-    const report = (projectId: string | null) => {
-      if (reportedTerminal.current === projectId) return;
-      reportedTerminal.current = projectId;
+    const report = (projectId: string | null, slot: number | null) => {
+      const key = projectId && slot ? terminalKey(projectId, slot) : null;
+      if (reportedTerminal.current === key) return;
+      reportedTerminal.current = key;
       focusRequests.current = focusRequests.current.catch(() => {}).then(() =>
-        invoke<void>('terminal_focus', { projectId }),
+        invoke<void>('terminal_focus', { projectId, slot }),
       );
       void focusRequests.current.catch(error => toast.error(`更新终端关注状态失败：${error}`));
     };
-    const update = () => report(document.visibilityState === 'visible' && document.hasFocus() ? watchedTerminal : null);
-    const blur = () => report(null);
+    const update = () => {
+      if (document.visibilityState === 'visible' && document.hasFocus()) report(watchedProjectId, watchedSlot);
+      else report(null, null);
+    };
+    const blur = () => report(null, null);
     update();
     window.addEventListener('focus', update);
     window.addEventListener('blur', blur);
@@ -129,14 +152,14 @@ export function App() {
       window.removeEventListener('pagehide', blur);
       document.removeEventListener('visibilitychange', update);
     };
-  }, [watchedTerminal]);
+  }, [watchedProjectId, watchedSlot]);
   const [searchQuery, setSearchQuery] = useState('');
   const searchInput = useRef<HTMLInputElement>(null);
   const searchText = searchQuery.trim().toLowerCase();
   const visibleProjects = useMemo(() => projects.filter(project => !searchText ||
     [project.displayName, project.name, project.path, project.port?.toString()].some(value => value?.toLowerCase().includes(searchText))), [projects, searchText]);
-  const navigation = useRef({ projects: visibleProjects, view: selection?.view || 'overview' });
-  navigation.current = { projects: visibleProjects, view: selection?.view || 'overview' };
+  const navigation = useRef({ projects: visibleProjects, view: selection?.view || 'overview', selection, activeSlots });
+  navigation.current = { projects: visibleProjects, view: selection?.view || 'overview', selection, activeSlots };
   const [reordering, setReordering] = useState(false);
   const reorderPending = useRef(false);
   const [projectForm, setProjectForm] = useState<{ project?: ProjectConfig; inspection?: ProjectDirInspection } | null>(null);
@@ -158,18 +181,43 @@ export function App() {
     setProjectForm({ inspection });
   }, []);
 
+  const creatingTerminals = useRef(new Set<string>());
+  const openTerminal = useCallback(async (projectId: string) => {
+    if (dialogOpen.current || creatingTerminals.current.has(projectId)) return;
+    creatingTerminals.current.add(projectId);
+    try {
+      const slot = await createTerminal(projectId);
+      selectTerminalSlot(projectId, slot);
+    } catch (error) {
+      toast.error(String(error));
+    } finally {
+      creatingTerminals.current.delete(projectId);
+    }
+  }, [selectTerminalSlot]);
+
   useEffect(() => {
     const onShortcut = (event: KeyboardEvent) => {
-      if (!event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+      if (!event.metaKey || event.ctrlKey || event.altKey || event.isComposing || event.keyCode === 229) return;
       const key = event.key.toLowerCase();
-      if (key !== 'n' && key !== 'f' && key !== ',' && !/^[1-9]$/.test(key)) return;
+      const cycle = event.shiftKey && ['BracketLeft', 'BracketRight'].includes(event.code) && navigation.current.view === 'terminal';
+      if (!cycle && (event.shiftKey || (key !== 't' && key !== 'n' && key !== 'f' && key !== ',' && !/^[1-9]$/.test(key)))) return;
       event.preventDefault();
       event.stopPropagation();
       // xterm also handles keyup; swallowing the complete shortcut keeps focus
       // in search and prevents a later event from reaching the old terminal.
       if (event.type !== 'keydown') return;
       if (dialogOpen.current) return;
-      if (key === ',') openSettings();
+      if (cycle) {
+        const projectId = navigation.current.selection?.projectId;
+        if (!projectId) return;
+        const slots = getProjectTerminalSlots(projectId);
+        const index = slots.indexOf(navigation.current.activeSlots[projectId] ?? 1);
+        const direction = event.code === 'BracketLeft' ? -1 : 1;
+        selectTerminalSlot(projectId, slots[(index + direction + slots.length) % slots.length]);
+      } else if (key === 't') {
+        const projectId = navigation.current.selection?.projectId;
+        if (projectId && !event.repeat) void openTerminal(projectId);
+      } else if (key === ',') openSettings();
       else if (key === 'n') openCreate();
       else if (key === 'f') { searchInput.current?.focus(); searchInput.current?.select(); }
       else {
@@ -185,7 +233,7 @@ export function App() {
       sidebarDropContext = undefined;
       void unlisten.then((stop) => stop());
     };
-  }, [openCreate, openSettings]);
+  }, [openCreate, openSettings, openTerminal, selectTerminalSlot]);
 
   useEffect(() => {
     const unlisten = listen('bento-open-settings', openSettings);
@@ -311,20 +359,9 @@ export function App() {
 
   const handleRunCommand = async (id: string, command: string) => {
     if (dialogOpen.current) return;
-    setSelection({ projectId: id, view: 'terminal' });
     try {
-      const deadline = Date.now() + 5000;
-      let restarted = false;
-      while (!getTerminalSnapshot()[id]?.alive) {
-        const terminal = getTerminalSnapshot()[id];
-        if (terminal?.sessionId && !terminal.opening && !restarted) {
-          restarted = true;
-          await restartTerminal(id);
-        }
-        if (Date.now() >= deadline) throw new Error('终端未就绪，请稍后重试');
-        await new Promise(resolve => setTimeout(resolve, 40));
-      }
-      await invoke('terminal_run', { projectId: id, command });
+      const result = await invoke<{ slot: number }>('terminal_run', { projectId: id, slot: activeSlots[id] ?? 1, command });
+      selectTerminalSlot(id, result.slot);
     } catch (error) {
       toast.error(String(error));
     }
@@ -402,6 +439,7 @@ export function App() {
           statuses={projectStatuses}
           conflicts={conflicts}
           selection={selection}
+          activeSlots={activeSlots}
           loading={loading}
           onSelect={selectView}
           onRefresh={loadProjects}
@@ -423,7 +461,8 @@ export function App() {
               <Button onClick={() => openCreate()}>新建项目</Button>
             </Empty>
           ) : selectedProject && selection?.view === 'terminal' ? (
-            <ProjectTerminal key={selectedProject.id} project={selectedProject} />
+            <ProjectTerminal key={selectedProject.id} project={selectedProject} activeSlot={activeSlots[selectedProject.id] ?? 1}
+              maxPerProject={settings.maxPerProject} onSelectSlot={slot => selectTerminalSlot(selectedProject.id, slot)} onCreate={() => openTerminal(selectedProject.id)} />
           ) : selectedProject ? (
             <div className="flex-1 overflow-y-auto px-7 pb-8 pt-3 lg:px-12 lg:pt-7" data-project-overview={selectedProject.id}>
               <div className="mx-auto flex max-w-4xl flex-col gap-5">

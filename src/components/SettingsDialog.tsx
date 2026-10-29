@@ -49,6 +49,19 @@ export function SettingsDialog({ settings, updater, onClose, onCheckUpdates }: {
           </select>
         </div>
         {settings.fontError && <p role="alert" className="mt-3 break-words text-xs leading-relaxed text-destructive" data-font-size-error>{settings.fontError}</p>}
+        <div className="mt-5 flex items-center justify-between gap-5">
+          <div>
+            <label htmlFor="settings-max-terminals" className="text-sm font-medium">每个项目最多终端数</label>
+            <p id="settings-max-terminals-help" className="mt-1.5 text-xs leading-relaxed text-muted-foreground">默认 2 个；调低不会关闭已打开的终端</p>
+          </div>
+          <select id="settings-max-terminals" value={settings.maxPerProject} disabled={settings.fontLoading || settings.maxSaving}
+            aria-describedby="settings-max-terminals-help" data-settings-max-terminals
+            onChange={event => { void settings.changeMaxPerProject(Number(event.target.value)); }}
+            className="h-9 w-24 shrink-0 rounded-md border border-input bg-background px-3 text-sm tabular-nums outline-none transition-[box-shadow] focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:opacity-50">
+            {Array.from({ length: 6 }, (_, i) => i + 1).map(max => <option key={max} value={max}>{max} 个</option>)}
+          </select>
+        </div>
+        {settings.maxError && <p role="alert" className="mt-3 break-words text-xs leading-relaxed text-destructive" data-max-terminals-error>{settings.maxError}</p>}
       </section>
 
       <section className="border-t px-6 py-5" aria-labelledby="settings-about">

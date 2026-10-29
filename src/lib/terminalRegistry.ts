@@ -13,8 +13,11 @@ import type { TerminalAttention, TerminalOpenResult, TerminalOutput, TerminalSes
 import { formatDroppedPaths, recoverShiftedImeInput, trackBareShift, transformTypedInput, type TerminalImeState } from './terminalInput';
 import { DEFAULT_TERMINAL_FONT_SIZE, TERMINAL_FONT_FAMILY, TERMINAL_LINE_HEIGHT, TERMINAL_THEME } from './terminalAppearance';
 
-type TerminalExit = Pick<TerminalSessionInfo, 'projectId' | 'sessionId' | 'exitCode'>;
+type TerminalExit = Pick<TerminalSessionInfo, 'projectId' | 'slot' | 'sessionId' | 'exitCode'>;
+type TerminalClosed = Pick<TerminalSessionInfo, 'projectId' | 'slot' | 'sessionId'>;
 export interface TerminalStatus extends Partial<TerminalSessionInfo> {
+  projectId: string;
+  slot: number;
   opening?: boolean;
   error?: string;
 }
@@ -27,6 +30,9 @@ interface InputChunk {
 
 interface Entry {
   projectId: string;
+  slot: number;
+  disposed: boolean;
+  expectedSessionId?: string;
   terminal: Terminal;
   fit: FitAddon;
   container: HTMLDivElement;
@@ -55,20 +61,29 @@ interface Registry {
   snapshot: Record<string, TerminalStatus>;
   subscribers: Set<() => void>;
   initialized?: Promise<void>;
+  closedSessions: Set<string>;
+  exits: Map<string, TerminalExit>;
+  fontSize: number;
   showError: (message: string) => void;
 }
 
 // Retain instances and listeners through module HMR as well as React StrictMode remounts.
 const registry: Registry = import.meta.hot?.data.terminalRegistry ?? {
-  entries: new Map(), snapshot: {}, subscribers: new Set(), showError: () => {},
+  entries: new Map(), snapshot: {}, subscribers: new Set(), closedSessions: new Set(), exits: new Map(), fontSize: DEFAULT_TERMINAL_FONT_SIZE, showError: () => {},
 };
 if (import.meta.hot) {
   import.meta.hot.data.terminalRegistry = registry;
   import.meta.hot.accept();
 }
 
-function publish(projectId: string, status: TerminalStatus) {
-  registry.snapshot = { ...registry.snapshot, [projectId]: status };
+export const terminalKey = (projectId: string, slot: number) => `${projectId}#${slot}`;
+
+export function getProjectTerminalSlots(projectId: string, snapshot = registry.snapshot): number[] {
+  return [...new Set([1, ...Object.values(snapshot).filter(status => status.projectId === projectId).map(status => status.slot)])].sort((a, b) => a - b);
+}
+
+function publish(status: TerminalStatus) {
+  registry.snapshot = { ...registry.snapshot, [terminalKey(status.projectId, status.slot)]: status };
   registry.subscribers.forEach((subscriber) => subscriber());
 }
 
@@ -78,9 +93,8 @@ export function subscribeTerminals(subscriber: () => void) {
 }
 
 export const getTerminalSnapshot = () => registry.snapshot;
-export const getTerminal = (projectId: string) => registry.entries.get(projectId)?.terminal;
+export const getTerminal = (projectId: string, slot: number) => registry.entries.get(terminalKey(projectId, slot))?.terminal;
 
-let terminalFontSize = DEFAULT_TERMINAL_FONT_SIZE;
 let terminalFonts: Promise<void> | undefined;
 
 function loadTerminalFonts(): Promise<void> {
@@ -92,7 +106,7 @@ function loadTerminalFonts(): Promise<void> {
       if (faces.some((weight) => weight.length === 0)) throw new Error('JetBrains Mono 字体未加载');
       await document.fonts.ready;
       // Also re-fit retained instances if the bundled faces finish loading after a remount.
-      requestAnimationFrame(() => registry.entries.forEach((entry) => fitTerminal(entry.projectId)));
+      requestAnimationFrame(() => registry.entries.forEach((entry) => fitTerminal(entry.projectId, entry.slot)));
     }).catch((error) => {
       terminalFonts = undefined;
       throw error;
@@ -103,11 +117,11 @@ function loadTerminalFonts(): Promise<void> {
 
 export function setTerminalFontSize(fontSize: number) {
   if (!Number.isFinite(fontSize) || fontSize <= 0) return;
-  terminalFontSize = fontSize;
+  registry.fontSize = fontSize;
   registry.entries.forEach((entry) => {
     entry.terminal.options.fontSize = fontSize;
     // Detached terminals retain the option and fit when they are attached again.
-    fitTerminal(entry.projectId);
+    fitTerminal(entry.projectId, entry.slot);
   });
 }
 
@@ -121,61 +135,94 @@ function receiveOutput(entry: Entry, output: TerminalOutput) {
 function receiveExit(entry: Entry, event: TerminalExit) {
   if (entry.sessionId !== event.sessionId) return;
   entry.alive = false;
-  publish(entry.projectId, { ...registry.snapshot[entry.projectId], ...event, alive: false, attention: false });
+  publish({ ...registry.snapshot[terminalKey(entry.projectId, entry.slot)], ...event, alive: false, attention: false });
 }
 
 function receiveAttention(event: TerminalAttention) {
-  const current = registry.snapshot[event.projectId];
+  const current = registry.snapshot[terminalKey(event.projectId, event.slot)];
+  if (!current || current.sessionId !== event.sessionId) return;
+  if (current.alive === false && event.attention) return;
+  publish({ ...current, ...event });
+}
+
+function receiveOpened(session: TerminalSessionInfo) {
+  if (registry.closedSessions.has(session.sessionId)) return;
+  const key = terminalKey(session.projectId, session.slot);
+  const entry = registry.entries.get(key);
+  if (entry) entry.expectedSessionId = session.sessionId;
+  const exited = registry.exits.get(session.sessionId);
+  publish({ ...session, ...(exited ? { ...exited, alive: false, attention: false } : {}), opening: entry?.hydrating });
+  if (entry && entry.sessionId !== session.sessionId && !entry.hydrating) startHydrate(entry, false);
+}
+
+function receiveClosed(event: TerminalClosed) {
+  registry.closedSessions.add(event.sessionId);
+  registry.exits.delete(event.sessionId);
+  const key = terminalKey(event.projectId, event.slot);
+  const current = registry.snapshot[key];
+  const entry = registry.entries.get(key);
+  // A delayed close of the old session must never dispose its replacement.
   if (current?.sessionId && current.sessionId !== event.sessionId) return;
-  if (current?.alive === false && event.attention) return;
-  publish(event.projectId, { ...current, ...event });
+  if (entry?.expectedSessionId && entry.expectedSessionId !== event.sessionId) return;
+  if (entry) {
+    entry.disposed = true;
+    entry.input = [];
+    entry.resize = undefined;
+    clearTimeout(entry.imePendingTimer);
+    entry.terminal.dispose();
+    entry.container.remove();
+    registry.entries.delete(key);
+  }
+  const next = { ...registry.snapshot };
+  delete next[key];
+  registry.snapshot = next;
+  registry.subscribers.forEach(subscriber => subscriber());
 }
 
 export function initTerminalRegistry(showError: (message: string) => void): Promise<void> {
   registry.showError = showError;
   if (!registry.initialized) {
     registry.initialized = (async () => {
-      // Install listeners before any open/snapshot request, to avoid a rehydration gap.
-      const unlistenOutput = await listen<TerminalOutput>('terminal-output', ({ payload }) => {
-        const entry = registry.entries.get(payload.projectId);
-        if (!entry) return;
-        if (entry.hydrating) entry.buffered.push(payload);
-        else receiveOutput(entry, payload);
-      });
+      const unlisteners: (() => void)[] = [];
+      const pending: (() => void)[] = [];
+      let listing = true;
+      const dispatch = (apply: () => void) => { if (listing) pending.push(apply); else apply(); };
       try {
-        const unlistenExit = await listen<TerminalExit>('terminal-exit', ({ payload }) => {
-          const entry = registry.entries.get(payload.projectId);
+        // Queue lifecycle events until the seed is installed; no list/event race can resurrect a closed tab.
+        unlisteners.push(await listen<TerminalOutput>('terminal-output', ({ payload }) => dispatch(() => {
+          const entry = registry.entries.get(terminalKey(payload.projectId, payload.slot));
+          if (entry?.hydrating) entry.buffered.push(payload);
+          else if (entry) receiveOutput(entry, payload);
+        })));
+        unlisteners.push(await listen<TerminalExit>('terminal-exit', ({ payload }) => dispatch(() => {
+          if (registry.closedSessions.has(payload.sessionId)) return;
+          registry.exits.set(payload.sessionId, payload);
+          const key = terminalKey(payload.projectId, payload.slot);
+          const entry = registry.entries.get(key);
           if (entry?.hydrating) entry.exits.push(payload);
           else if (entry) receiveExit(entry, payload);
-          else if (registry.snapshot[payload.projectId]?.sessionId === payload.sessionId) {
-            publish(payload.projectId, { ...registry.snapshot[payload.projectId], ...payload, alive: false, attention: false });
+          if (registry.snapshot[key]?.sessionId === payload.sessionId) {
+            publish({ ...registry.snapshot[key], ...payload, alive: false, attention: false });
           }
-        });
-        const pending: TerminalAttention[] = [];
-        let listing = true;
-        let unlistenAttention: (() => void) | undefined;
-        try {
-          unlistenAttention = await listen<TerminalAttention>('terminal-attention', ({ payload }) => {
-            const entry = registry.entries.get(payload.projectId);
-            if (listing) pending.push(payload);
-            else if (entry?.hydrating) entry.attentions.push(payload);
-            else receiveAttention(payload);
-          });
-          const sessions = await invoke<TerminalSessionInfo[]>('terminal_list');
-          sessions.forEach((session) => publish(session.projectId, session));
-          listing = false;
-          pending.forEach(receiveAttention);
-        } catch (error) {
-          unlistenAttention?.();
-          unlistenExit();
-          throw error;
-        }
+        })));
+        unlisteners.push(await listen<TerminalAttention>('terminal-attention', ({ payload }) => dispatch(() => {
+          const entry = registry.entries.get(terminalKey(payload.projectId, payload.slot));
+          if (entry?.hydrating) entry.attentions.push(payload);
+          else receiveAttention(payload);
+        })));
+        unlisteners.push(await listen<TerminalSessionInfo>('terminal-opened', ({ payload }) => dispatch(() => receiveOpened(payload))));
+        unlisteners.push(await listen<TerminalClosed>('terminal-closed', ({ payload }) => dispatch(() => receiveClosed(payload))));
+        const sessions = await invoke<TerminalSessionInfo[]>('terminal_list');
+        sessions.forEach(receiveOpened);
+        listing = false;
+        pending.forEach(apply => apply());
+        unlisteners.push(await getCurrentWebview().onDragDropEvent(({ payload }) => handleTerminalDragDrop(payload)));
       } catch (error) {
-        unlistenOutput();
+        unlisteners.forEach(unlisten => unlisten());
         throw error;
       }
-      await getCurrentWebview().onDragDropEvent(({ payload }) => handleTerminalDragDrop(payload));
     })().catch((error) => {
+      registry.initialized = undefined;
       registry.showError(`终端初始化失败：${error}`);
       throw error;
     });
@@ -187,39 +234,39 @@ async function drainInput(entry: Entry) {
   if (entry.writing) return;
   entry.writing = true;
   try {
-    while (entry.input.length) {
+    while (!entry.disposed && entry.input.length) {
       const chunk = entry.input.shift()!;
-      if (chunk.sessionId !== entry.sessionId || !entry.alive) continue;
+      if (chunk.sessionId !== entry.sessionId || !entry.alive || entry.hydrating) continue;
       if (chunk.binary) {
         await invoke('terminal_write_bytes', {
-          projectId: entry.projectId,
+          projectId: entry.projectId, slot: entry.slot,
           data: Array.from(chunk.data, (character) => character.charCodeAt(0) & 255),
         });
       } else {
-        await invoke('terminal_write', { projectId: entry.projectId, data: chunk.data });
+        await invoke('terminal_write', { projectId: entry.projectId, slot: entry.slot, data: chunk.data });
       }
     }
   } catch (error) {
     entry.input = [];
-    registry.showError(`终端输入失败：${error}`);
+    if (!entry.disposed && !entry.hydrating) registry.showError(`终端输入失败：${error}`);
   } finally {
     entry.writing = false;
   }
 }
 
 function queueInput(entry: Entry, data: string, binary = false) {
-  if (!entry.alive || !entry.sessionId || entry.hydrating) return;
+  if (entry.disposed || !entry.alive || !entry.sessionId || entry.hydrating) return;
   const last = entry.input[entry.input.length - 1];
   if (last && last.binary === binary && last.sessionId === entry.sessionId) last.data += data;
   else entry.input.push({ data, binary, sessionId: entry.sessionId });
   void drainInput(entry);
 }
 
-function createEntry(projectId: string): Entry {
+function createEntry(projectId: string, slot: number): Entry {
   const terminal = new Terminal({
     theme: TERMINAL_THEME,
     fontFamily: TERMINAL_FONT_FAMILY,
-    fontSize: terminalFontSize,
+    fontSize: registry.fontSize,
     lineHeight: TERMINAL_LINE_HEIGHT,
     allowProposedApi: true,
     cursorBlink: true,
@@ -237,8 +284,9 @@ function createEntry(projectId: string): Entry {
   const container = document.createElement('div');
   container.className = 'terminal-container';
   container.dataset.terminalProject = projectId;
+  container.dataset.terminalSlot = String(slot);
   const entry: Entry = {
-    projectId, terminal, fit, container, opened: false, alive: false, seq: 0,
+    projectId, slot, disposed: false, terminal, fit, container, opened: false, alive: false, seq: 0,
     hydrating: false, buffered: [], exits: [], attentions: [], input: [], writing: false, resizing: false,
     lastPrintable: '', pasting: false,
     ime: { shiftDown: false, composing: false, pendingSend: false },
@@ -282,7 +330,7 @@ function createEntry(projectId: string): Entry {
     entry.lastPrintable = transformTypedInput(data, entry.lastPrintable).lastPrintable;
     queueInput(entry, data, true);
   });
-  registry.entries.set(projectId, entry);
+  registry.entries.set(terminalKey(projectId, slot), entry);
   return entry;
 }
 
@@ -358,27 +406,27 @@ function visible(entry: Entry) {
 }
 
 async function drainResize(entry: Entry) {
-  if (entry.resizing || !entry.sessionId) return;
+  if (entry.disposed || entry.hydrating || entry.resizing || !entry.sessionId) return;
   entry.resizing = true;
   try {
-    while (entry.resize) {
+    while (!entry.disposed && !entry.hydrating && entry.resize) {
       const dimensions = entry.resize;
       entry.resize = undefined;
       const key = `${entry.sessionId}:${dimensions.cols}:${dimensions.rows}`;
       if (entry.sentSize === key) continue;
-      await invoke('terminal_resize', { projectId: entry.projectId, ...dimensions });
+      await invoke('terminal_resize', { projectId: entry.projectId, slot: entry.slot, ...dimensions });
       entry.sentSize = key;
     }
   } catch (error) {
-    registry.showError(`调整终端大小失败：${error}`);
+    if (!entry.disposed) registry.showError(`调整终端大小失败：${error}`);
   } finally {
     entry.resizing = false;
   }
 }
 
-export function fitTerminal(projectId: string, focus = false) {
-  const entry = registry.entries.get(projectId);
-  if (!entry?.opened || !visible(entry)) return;
+export function fitTerminal(projectId: string, slot: number, focus = false) {
+  const entry = registry.entries.get(terminalKey(projectId, slot));
+  if (!entry?.opened || entry.disposed || !visible(entry)) return;
   // Focus also when the renderer is still measuring cells on the first visible frame.
   if (focus) entry.terminal.focus();
   const atBottom = entry.terminal.buffer.active.viewportY >= entry.terminal.buffer.active.baseY;
@@ -392,48 +440,74 @@ export function fitTerminal(projectId: string, focus = false) {
   if (atBottom) entry.terminal.scrollToBottom();
 }
 
-async function hydrate(entry: Entry, restart: boolean) {
+function startHydrate(entry: Entry, restart: boolean): Promise<void> {
+  if (entry.opening) return entry.opening;
   entry.hydrating = true;
   entry.buffered = [];
   entry.exits = [];
   entry.attentions = [];
   entry.input = [];
+  entry.resize = undefined;
   entry.lastPrintable = '';
-  publish(entry.projectId, { ...registry.snapshot[entry.projectId], opening: true, error: undefined });
+  const key = terminalKey(entry.projectId, entry.slot);
+  publish({ ...registry.snapshot[key], projectId: entry.projectId, slot: entry.slot, opening: true, error: undefined });
+  entry.opening = hydrate(entry, restart).finally(() => {
+    if (entry.disposed) return;
+    entry.hydrating = false;
+    entry.opening = undefined;
+    fitTerminal(entry.projectId, entry.slot, true);
+  });
+  return entry.opening;
+}
+
+async function hydrate(entry: Entry, restart: boolean) {
+  const key = terminalKey(entry.projectId, entry.slot);
   try {
-    const result = await invoke<TerminalOpenResult>(restart ? 'terminal_restart' : 'terminal_open', {
-      projectId: entry.projectId, cols: entry.terminal.cols, rows: entry.terminal.rows,
+    let result = await invoke<TerminalOpenResult>(restart ? 'terminal_restart' : 'terminal_open', {
+      projectId: entry.projectId, slot: entry.slot, cols: entry.terminal.cols, rows: entry.terminal.rows,
     });
+    // An external restart may overtake an in-flight snapshot. Keep buffering until it matches.
+    while (!entry.disposed && entry.expectedSessionId && result.session.sessionId !== entry.expectedSessionId) {
+      result = await invoke<TerminalOpenResult>('terminal_open', {
+        projectId: entry.projectId, slot: entry.slot, cols: entry.terminal.cols, rows: entry.terminal.rows,
+      });
+    }
+    if (entry.disposed || registry.closedSessions.has(result.session.sessionId)) return;
+    // Flush queued old-session writes before resetting the renderer.
+    await new Promise<void>(resolve => entry.terminal.write('', resolve));
+    if (entry.disposed) return;
+    if (entry.expectedSessionId && result.session.sessionId !== entry.expectedSessionId) return hydrate(entry, false);
     entry.sessionId = result.session.sessionId;
+    entry.expectedSessionId = entry.sessionId;
     entry.alive = result.session.alive;
     entry.seq = result.snapshot.seq;
     entry.terminal.reset();
     entry.terminal.write(result.snapshot.data);
-    publish(entry.projectId, result.session);
-    entry.buffered.sort((a, b) => a.seq - b.seq).forEach((output) => receiveOutput(entry, output));
-    entry.exits.forEach((event) => receiveExit(entry, event));
+    publish(result.session);
+    entry.buffered.sort((a, b) => a.seq - b.seq).forEach(output => receiveOutput(entry, output));
+    entry.exits.forEach(event => receiveExit(entry, event));
+    const exited = registry.exits.get(entry.sessionId);
+    if (exited) receiveExit(entry, exited);
     entry.attentions.forEach(receiveAttention);
     entry.buffered = [];
     entry.exits = [];
     entry.attentions = [];
   } catch (error) {
+    if (entry.disposed) return;
     const message = `打开终端失败：${error}`;
-    // A failed restart may already have terminated the old shell. Reconcile before retrying.
     const sessions = await invoke<TerminalSessionInfo[]>('terminal_list').catch(() => undefined);
-    const session = sessions?.find((item) => item.projectId === entry.projectId);
+    if (entry.disposed) return;
+    const session = sessions?.find(item => item.projectId === entry.projectId && item.slot === entry.slot);
     if (sessions) {
       entry.sessionId = session?.sessionId;
+      entry.expectedSessionId = session?.sessionId;
       entry.alive = !!session?.alive;
     }
-    entry.buffered.sort((a, b) => a.seq - b.seq).forEach((output) => receiveOutput(entry, output));
-    entry.exits.forEach((event) => receiveExit(entry, event));
-    publish(entry.projectId, { ...(sessions ? session : registry.snapshot[entry.projectId]), opening: false, error: message });
+    entry.buffered.sort((a, b) => a.seq - b.seq).forEach(output => receiveOutput(entry, output));
+    entry.exits.forEach(event => receiveExit(entry, event));
+    publish({ ...(sessions ? session : registry.snapshot[key]), projectId: entry.projectId, slot: entry.slot, opening: false, error: message });
     entry.attentions.forEach(receiveAttention);
     registry.showError(message);
-  } finally {
-    entry.hydrating = false;
-    entry.opening = undefined;
-    fitTerminal(entry.projectId, true);
   }
 }
 
@@ -441,7 +515,7 @@ async function showTerminal(entry: Entry) {
   await initTerminalRegistry(registry.showError);
   // A missing bundled face must not keep the terminal from opening; the fallback fonts still work.
   await loadTerminalFonts().catch((error) => console.warn('Terminal font:', error));
-  if (!visible(entry)) return;
+  if (entry.disposed || !visible(entry)) return;
   if (!entry.opened) {
     entry.terminal.open(entry.container);
     const textarea = entry.terminal.textarea!;
@@ -459,31 +533,43 @@ async function showTerminal(entry: Entry) {
     });
     entry.opened = true;
   }
-  fitTerminal(entry.projectId, true);
-  if (!entry.sessionId && !entry.opening) entry.opening = hydrate(entry, false);
+  fitTerminal(entry.projectId, entry.slot, true);
+  if (!entry.sessionId && !entry.opening) void startHydrate(entry, false);
 }
 
-export function attachTerminal(projectId: string, host: HTMLDivElement) {
-  const entry = registry.entries.get(projectId) ?? createEntry(projectId);
+export function attachTerminal(projectId: string, slot: number, host: HTMLDivElement) {
+  const entry = registry.entries.get(terminalKey(projectId, slot)) ?? createEntry(projectId, slot);
   host.appendChild(entry.container);
   void showTerminal(entry).catch((error) => registry.showError(`终端显示失败：${error}`));
-  const frame = requestAnimationFrame(() => fitTerminal(projectId, true));
+  const frame = requestAnimationFrame(() => fitTerminal(projectId, slot, true));
   return () => {
     cancelAnimationFrame(frame);
-    // A detached container and its xterm instance keep receiving output for the webview's lifetime.
+    // Detached instances keep receiving output until the backend removes their slot.
     if (entry.container.parentElement === host) entry.container.remove();
   };
 }
 
-export async function restartTerminal(projectId: string) {
+export async function restartTerminal(projectId: string, slot: number) {
   await initTerminalRegistry(registry.showError);
-  const entry = registry.entries.get(projectId) ?? createEntry(projectId);
-  if (entry.opening) return entry.opening;
-  entry.opening = hydrate(entry, true);
-  return entry.opening;
+  const entry = registry.entries.get(terminalKey(projectId, slot)) ?? createEntry(projectId, slot);
+  return startHydrate(entry, true);
 }
 
-export function retryTerminal(projectId: string) {
-  const entry = registry.entries.get(projectId);
-  if (entry) void showTerminal(entry).catch((error) => registry.showError(String(error)));
+export function retryTerminal(projectId: string, slot: number) {
+  const entry = registry.entries.get(terminalKey(projectId, slot));
+  if (entry) void showTerminal(entry).catch(error => registry.showError(String(error)));
+}
+
+export async function createTerminal(projectId: string): Promise<number> {
+  await initTerminalRegistry(registry.showError);
+  const result = await invoke<TerminalOpenResult>('terminal_create', { projectId, cols: 80, rows: 24 });
+  const current = registry.snapshot[terminalKey(projectId, result.session.slot)];
+  if (!current?.sessionId) receiveOpened(result.session);
+  return result.session.slot;
+}
+
+export async function closeTerminal(projectId: string, slot: number) {
+  const current = registry.snapshot[terminalKey(projectId, slot)];
+  await invoke('terminal_close', { projectId, slot });
+  if (current?.sessionId) receiveClosed({ projectId, slot, sessionId: current.sessionId });
 }

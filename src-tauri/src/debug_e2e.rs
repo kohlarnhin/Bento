@@ -18,9 +18,11 @@ static TERMINAL_BADGE: AtomicU64 = AtomicU64::new(0);
 static TERMINAL_BOUNCES: AtomicU64 = AtomicU64::new(0);
 static TERMINAL_FOCUS: Mutex<Vec<Option<String>>> = Mutex::new(Vec::new());
 
-pub fn record_terminal_focus(project_id: Option<String>) {
+pub fn record_terminal_focus(key: Option<&crate::terminal::TerminalKey>) {
     if enabled() {
-        if let Ok(mut reports) = TERMINAL_FOCUS.lock() { reports.push(project_id); }
+        if let Ok(mut reports) = TERMINAL_FOCUS.lock() {
+            reports.push(key.map(|key| format!("{}#{}", key.project_id, key.slot)));
+        }
     }
 }
 

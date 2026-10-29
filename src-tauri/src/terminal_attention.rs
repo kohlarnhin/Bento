@@ -1,3 +1,4 @@
+use crate::terminal::TerminalKey;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{
@@ -14,6 +15,7 @@ const TICK: Duration = Duration::from_millis(250);
 #[serde(rename_all = "camelCase")]
 pub struct AttentionEvent {
     pub project_id: String,
+    pub slot: u8,
     pub session_id: String,
     pub attention: bool,
 }
@@ -211,8 +213,8 @@ struct Entry {
 
 #[derive(Default)]
 struct State {
-    watched: Option<String>,
-    sessions: HashMap<String, Entry>,
+    watched: Option<TerminalKey>,
+    sessions: HashMap<TerminalKey, Entry>,
 }
 
 enum Effect {
@@ -286,9 +288,9 @@ impl AttentionManager {
         let _ = self.effects.send(Effect::Change(event, count));
     }
 
-    pub fn register(&self, project_id: &str, session_id: &str) {
+    pub fn register(&self, key: &TerminalKey, session_id: &str) {
         self.state.lock().unwrap().sessions.insert(
-            project_id.into(),
+            key.clone(),
             Entry {
                 session_id: session_id.into(),
                 tracker: Tracker::default(),
@@ -296,21 +298,21 @@ impl AttentionManager {
         );
     }
 
-    pub fn raised(&self, project_id: &str, session_id: &str) -> bool {
+    pub fn raised(&self, key: &TerminalKey, session_id: &str) -> bool {
         self.state
             .lock()
             .unwrap()
             .sessions
-            .get(project_id)
+            .get(key)
             .is_some_and(|entry| entry.session_id == session_id && entry.tracker.raised)
     }
 
-    fn update(&self, project_id: &str, session_id: &str, update: impl FnOnce(&mut Tracker, bool)) {
+    fn update(&self, key: &TerminalKey, session_id: &str, update: impl FnOnce(&mut Tracker, bool)) {
         let mut state = self.state.lock().unwrap();
-        let watched = state.watched.as_deref() == Some(project_id);
+        let watched = state.watched.as_ref() == Some(key);
         let Some(entry) = state
             .sessions
-            .get_mut(project_id)
+            .get_mut(key)
             .filter(|entry| entry.session_id == session_id)
         else {
             return;
@@ -322,7 +324,8 @@ impl AttentionManager {
             self.changed(
                 &state,
                 AttentionEvent {
-                    project_id: project_id.into(),
+                    project_id: key.project_id.clone(),
+                    slot: key.slot,
                     session_id: session_id.into(),
                     attention: raised,
                 },
@@ -330,26 +333,27 @@ impl AttentionManager {
         }
     }
 
-    pub fn output(&self, project_id: &str, session_id: &str, bytes: &[u8]) {
+    pub fn output(&self, key: &TerminalKey, session_id: &str, bytes: &[u8]) {
         let now = (self.clock)();
-        self.update(project_id, session_id, |tracker, watched| {
+        self.update(key, session_id, |tracker, watched| {
             tracker.output(bytes, now, watched)
         });
     }
 
-    pub fn resize(&self, project_id: &str, session_id: &str) {
-        self.update(project_id, session_id, |tracker, _| tracker.episode = None);
+    pub fn resize(&self, key: &TerminalKey, session_id: &str) {
+        self.update(key, session_id, |tracker, _| tracker.episode = None);
     }
 
-    pub fn focus(&self, project_id: Option<String>) {
+    pub fn focus(&self, key: Option<TerminalKey>) {
         let mut state = self.state.lock().unwrap();
-        state.watched = project_id;
+        state.watched = key;
         let event = state.watched.clone().and_then(|id| {
             let entry = state.sessions.get_mut(&id)?;
             let raised = entry.tracker.raised;
             entry.tracker.clear();
             raised.then(|| AttentionEvent {
-                project_id: id,
+                project_id: id.project_id,
+                slot: id.slot,
                 session_id: entry.session_id.clone(),
                 attention: false,
             })
@@ -359,24 +363,25 @@ impl AttentionManager {
         }
     }
 
-    pub fn remove(&self, project_id: &str, session_id: &str) {
+    pub fn remove(&self, key: &TerminalKey, session_id: &str) {
         let mut state = self.state.lock().unwrap();
         if !state
             .sessions
-            .get(project_id)
+            .get(key)
             .is_some_and(|entry| entry.session_id == session_id)
         {
             return;
         }
         if let Some(entry) = state
             .sessions
-            .remove(project_id)
+            .remove(key)
             .filter(|entry| entry.tracker.raised)
         {
             self.changed(
                 &state,
                 AttentionEvent {
-                    project_id: project_id.into(),
+                    project_id: key.project_id.clone(),
+                    slot: key.slot,
                     session_id: entry.session_id,
                     attention: false,
                 },
@@ -388,12 +393,13 @@ impl AttentionManager {
         let now = (self.clock)();
         let mut state = self.state.lock().unwrap();
         let mut changes = Vec::new();
-        for (project_id, entry) in &mut state.sessions {
+        for (key, entry) in &mut state.sessions {
             let before = entry.tracker.raised;
             entry.tracker.tick(now);
             if !before && entry.tracker.raised {
                 changes.push(AttentionEvent {
-                    project_id: project_id.clone(),
+                    project_id: key.project_id.clone(),
+                    slot: key.slot,
                     session_id: entry.session_id.clone(),
                     attention: true,
                 });
@@ -413,6 +419,36 @@ impl AttentionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attention_focus_restart_remove_and_badges_are_isolated_between_project_slots() {
+        let (badge, badges) = mpsc::channel();
+        let manager = AttentionManager::new(Sinks { badge: Arc::new(move |count| { badge.send(count).unwrap(); }), ..Sinks::default() });
+        let one = TerminalKey::new("a", 1);
+        let two = TerminalKey::new("a", 2);
+        manager.register(&one, "one");
+        manager.register(&two, "two");
+        manager.focus(Some(one.clone()));
+        manager.output(&one, "one", b"\x07");
+        manager.output(&two, "two", b"\x07");
+        assert_eq!(badges.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
+        assert!(!manager.raised(&one, "one"));
+        assert!(manager.raised(&two, "two"));
+        manager.focus(None);
+        manager.output(&one, "one", b"\x07");
+        assert_eq!(badges.recv_timeout(Duration::from_secs(1)).unwrap(), 2);
+        manager.focus(Some(two.clone()));
+        assert_eq!(badges.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
+        manager.remove(&two, "two");
+        manager.register(&two, "replacement");
+        manager.remove(&two, "two");
+        manager.output(&two, "two", b"\x07");
+        assert!(!manager.raised(&two, "replacement"));
+        assert!(manager.raised(&one, "one"));
+        manager.remove(&one, "one");
+        assert_eq!(badges.recv_timeout(Duration::from_secs(1)).unwrap(), 0);
+        manager.shutdown();
+    }
 
     #[test]
     fn scanner_distinguishes_notifications_from_control_string_bells_across_reads() {
@@ -510,27 +546,27 @@ mod tests {
             Sinks::default(),
             Arc::new(move || at(clock.load(Ordering::Relaxed))),
         );
-        manager.register("a", "session");
-        manager.output("a", "session", b"start");
+        manager.register(&TerminalKey::new("a", 1), "session");
+        manager.output(&TerminalKey::new("a", 1), "session", b"start");
         time.store(2000, Ordering::Relaxed);
-        manager.output("a", "session", b"done");
+        manager.output(&TerminalKey::new("a", 1), "session", b"done");
         time.store(4999, Ordering::Relaxed);
         manager.tick();
-        assert!(!manager.raised("a", "session"));
+        assert!(!manager.raised(&TerminalKey::new("a", 1), "session"));
         time.store(5000, Ordering::Relaxed);
         manager.tick();
-        assert!(manager.raised("a", "session"));
-        manager.focus(Some("a".into()));
+        assert!(manager.raised(&TerminalKey::new("a", 1), "session"));
+        manager.focus(Some(TerminalKey::new("a", 1)));
         manager.focus(None);
         time.store(6000, Ordering::Relaxed);
-        manager.output("a", "session", b"start");
+        manager.output(&TerminalKey::new("a", 1), "session", b"start");
         time.store(8000, Ordering::Relaxed);
-        manager.output("a", "session", b"work");
-        manager.resize("a", "session");
-        manager.output("a", "session", b"redraw");
+        manager.output(&TerminalKey::new("a", 1), "session", b"work");
+        manager.resize(&TerminalKey::new("a", 1), "session");
+        manager.output(&TerminalKey::new("a", 1), "session", b"redraw");
         time.store(11000, Ordering::Relaxed);
         manager.tick();
-        assert!(!manager.raised("a", "session"));
+        assert!(!manager.raised(&TerminalKey::new("a", 1), "session"));
         manager.shutdown();
     }
 
@@ -543,16 +579,16 @@ mod tests {
             }),
             ..Sinks::default()
         });
-        manager.register("a", "one");
-        manager.register("b", "two");
-        manager.output("a", "one", b"\x07");
+        manager.register(&TerminalKey::new("a", 1), "one");
+        manager.register(&TerminalKey::new("b", 1), "two");
+        manager.output(&TerminalKey::new("a", 1), "one", b"\x07");
         assert_eq!(badges.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
-        manager.output("b", "two", b"\x07");
+        manager.output(&TerminalKey::new("b", 1), "two", b"\x07");
         assert_eq!(badges.recv_timeout(Duration::from_secs(1)).unwrap(), 2);
-        manager.focus(Some("a".into()));
+        manager.focus(Some(TerminalKey::new("a", 1)));
         assert_eq!(badges.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
-        assert!(manager.raised("b", "two"));
-        manager.remove("b", "two");
+        assert!(manager.raised(&TerminalKey::new("b", 1), "two"));
+        manager.remove(&TerminalKey::new("b", 1), "two");
         assert_eq!(badges.recv_timeout(Duration::from_secs(1)).unwrap(), 0);
         manager.shutdown();
     }
@@ -573,27 +609,27 @@ mod tests {
             }),
             ..Sinks::default()
         });
-        manager.register("a", "one");
-        manager.output("a", "one", b"\x07");
+        manager.register(&TerminalKey::new("a", 1), "one");
+        manager.output(&TerminalKey::new("a", 1), "one", b"\x07");
         assert_eq!(badges.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
-        manager.focus(Some("a".into()));
+        manager.focus(Some(TerminalKey::new("a", 1)));
         assert_eq!(badges.recv_timeout(Duration::from_secs(1)).unwrap(), 0);
-        assert!(!manager.raised("a", "one"));
+        assert!(!manager.raised(&TerminalKey::new("a", 1), "one"));
         assert!(bounces.try_recv().is_err());
-        manager.output("a", "one", b"\x07");
-        assert!(!manager.raised("a", "one"));
+        manager.output(&TerminalKey::new("a", 1), "one", b"\x07");
+        assert!(!manager.raised(&TerminalKey::new("a", 1), "one"));
         manager.focus(None);
         inactive.store(true, Ordering::Relaxed);
-        manager.output("a", "one", b"\x07");
-        manager.output("a", "one", b"\x07");
+        manager.output(&TerminalKey::new("a", 1), "one", b"\x07");
+        manager.output(&TerminalKey::new("a", 1), "one", b"\x07");
         assert_eq!(badges.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
         bounces.recv_timeout(Duration::from_secs(1)).unwrap();
-        manager.remove("a", "one");
+        manager.remove(&TerminalKey::new("a", 1), "one");
         assert_eq!(badges.recv_timeout(Duration::from_secs(1)).unwrap(), 0);
         assert!(bounces.try_recv().is_err());
-        manager.register("a", "two");
-        manager.output("a", "one", b"\x07");
-        assert!(!manager.raised("a", "two"));
+        manager.register(&TerminalKey::new("a", 1), "two");
+        manager.output(&TerminalKey::new("a", 1), "one", b"\x07");
+        assert!(!manager.raised(&TerminalKey::new("a", 1), "two"));
         manager.shutdown();
     }
 }

@@ -98,6 +98,7 @@ export interface ProjectSelection {
 
 export interface TerminalSessionInfo {
   projectId: string;
+  slot: number;
   sessionId: string;
   alive: boolean;
   attention: boolean;
@@ -105,10 +106,11 @@ export interface TerminalSessionInfo {
   pid?: number | null;
 }
 
-export type TerminalAttention = Pick<TerminalSessionInfo, 'projectId' | 'sessionId' | 'attention'>;
+export type TerminalAttention = Pick<TerminalSessionInfo, 'projectId' | 'slot' | 'sessionId' | 'attention'>;
 
 export interface TerminalOutput {
   projectId: string;
+  slot: number;
   sessionId: string;
   seq: number;
   data: string;

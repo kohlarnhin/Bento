@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { PointerEvent as ReactPointerEvent, ReactNode, RefObject } from 'react';
 import { ChevronRight, GripVertical, LayoutDashboard, Plus, RefreshCw, RotateCcw, Search, Square, Terminal, X } from 'lucide-react';
 import type { PortConflict, ProjectConfig, ProjectSelection, ProjectStatus } from '../types';
-import { getTerminalSnapshot, restartTerminal, subscribeTerminals } from '../lib/terminalRegistry';
+import { getTerminalSnapshot, restartTerminal, subscribeTerminals, terminalKey } from '../lib/terminalRegistry';
 import { cn } from '../lib/utils';
 import logo from '../assets/logo.svg';
 import Button from './ui/button';
@@ -23,6 +23,7 @@ interface Props {
   statuses: Record<string, ProjectStatus>;
   conflicts: PortConflict[];
   selection: ProjectSelection | null;
+  activeSlots: Record<string, number>;
   loading: boolean;
   onSelect: (selection: ProjectSelection) => void;
   onRefresh: () => void;
@@ -57,14 +58,17 @@ const statusColors: Record<ProjectStatus, string> = {
   running: 'bg-success', starting: 'bg-foreground animate-pulse', stopped: 'bg-muted-foreground/35', error: 'bg-destructive',
 };
 
-function RestartTerminalButton({ projectId, alive, opening, active, onSelect }: {
-  projectId: string; alive: boolean; opening: boolean; active: boolean; onSelect: Props['onSelect'];
+function RestartTerminalButton({ projectId, slot, count, alive, opening, active, onSelect }: {
+  projectId: string; slot: number; count: number; alive: boolean; opening: boolean; active: boolean; onSelect: Props['onSelect'];
 }) {
   const [confirmUntil, setConfirmUntil] = useState(0);
   const timer = useRef<ReturnType<typeof setTimeout>>();
-  useEffect(() => () => clearTimeout(timer.current), []);
+  useEffect(() => {
+    setConfirmUntil(0);
+    return () => clearTimeout(timer.current);
+  }, [slot]);
   const confirming = alive && confirmUntil > 0;
-  const label = confirming ? '再次点击确认重启' : '重启终端';
+  const label = confirming ? '再次点击确认重启' : count > 1 ? `重启终端 ${slot}` : '重启终端';
   return (
     <ActionTooltip label={label} side="right">
       <Button
@@ -86,7 +90,7 @@ function RestartTerminalButton({ projectId, alive, opening, active, onSelect }: 
           }
           clearTimeout(timer.current);
           setConfirmUntil(0);
-          void restartTerminal(projectId);
+          void restartTerminal(projectId, slot);
         }}
       >
         <RotateCcw data-icon="inline-start" className={cn(opening && 'animate-spin')} />
@@ -95,7 +99,7 @@ function RestartTerminalButton({ projectId, alive, opening, active, onSelect }: 
   );
 }
 
-export function ProjectSidebar({ projects, visibleProjects, searchQuery, searchInputRef, onSearchChange, onReorder, reordering, statuses, conflicts, selection, loading, onSelect, onRefresh, onCreate, managedCount, onStopAll, updateFooter }: Props) {
+export function ProjectSidebar({ projects, visibleProjects, searchQuery, searchInputRef, onSearchChange, onReorder, reordering, statuses, conflicts, selection, activeSlots, loading, onSelect, onRefresh, onCreate, managedCount, onStopAll, updateFooter }: Props) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const [searchFocused, setSearchFocused] = useState(false);
@@ -109,6 +113,16 @@ export function ProjectSidebar({ projects, visibleProjects, searchQuery, searchI
   const canReorder = !searching && !loading && !reordering;
   const highlighted = visibleProjects.find(project => project.id === highlightedId)?.id || visibleProjects[0]?.id;
   const terminals = useSyncExternalStore(subscribeTerminals, getTerminalSnapshot);
+  const terminalGroups = useMemo(() => {
+    const groups: Record<string, { count: number; alive: boolean; attention: boolean }> = {};
+    for (const terminal of Object.values(terminals)) {
+      const group = groups[terminal.projectId] ??= { count: 0, alive: false, attention: false };
+      group.count++;
+      group.alive ||= !!terminal.alive;
+      group.attention ||= !!terminal.attention;
+    }
+    return groups;
+  }, [terminals]);
   const running = projects.filter((project) => statuses[project.id] === 'running').length;
 
   const clearDrag = useCallback(() => {
@@ -295,6 +309,9 @@ export function ProjectSidebar({ projects, visibleProjects, searchQuery, searchI
           {searching && !visibleProjects.length && <p role="status" className="px-2 py-6 text-xs leading-relaxed text-muted-foreground break-all" data-project-search-empty>没有匹配「{searchQuery.trim()}」的项目</p>}
           {visibleProjects.map((project, index) => {
             const selected = selection?.projectId === project.id;
+            const terminalGroup = terminalGroups[project.id];
+            const activeSlot = activeSlots[project.id] ?? 1;
+            const activeTerminal = terminals[terminalKey(project.id, activeSlot)];
             const expanded = !collapsed.has(project.id);
             const conflict = conflicts.some((item) => item.projectIds.includes(project.id));
             const status = statuses[project.id] || 'stopped';
@@ -338,8 +355,8 @@ export function ProjectSidebar({ projects, visibleProjects, searchQuery, searchI
                     data-project-row={project.id} data-search-highlighted={searchFocused && highlighted === project.id || undefined} data-reorder-draggable={canReorder || undefined}>
                     <span className={cn('size-1.5 shrink-0 rounded-full', conflict ? 'bg-warning' : statusColors[status])} aria-label={conflict ? '端口冲突' : statusNames[status]} />
                     <span className="truncate">{name}</span>
-                    {!expanded && terminals[project.id]?.attention && <span className="ml-auto size-1.5 shrink-0 rounded-full bg-attention" aria-label="终端有新动静" title="终端有新动静" data-terminal-attention={project.id} />}
-                    {!searching && <GripVertical aria-hidden="true" className={cn('size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/project:opacity-60 group-focus-within/project:opacity-60', expanded || !terminals[project.id]?.attention ? 'ml-auto' : '')} />}
+                    {!expanded && terminalGroup?.attention && <span className="ml-auto size-1.5 shrink-0 rounded-full bg-attention" aria-label="终端有新动静" title="终端有新动静" data-terminal-attention={project.id} />}
+                    {!searching && <GripVertical aria-hidden="true" className={cn('size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/project:opacity-60 group-focus-within/project:opacity-60', expanded || !terminalGroup?.attention ? 'ml-auto' : '')} />}
                   </button>
                 </div>
                 <CollapsibleContent>
@@ -353,9 +370,10 @@ export function ProjectSidebar({ projects, visibleProjects, searchQuery, searchI
                             className={cn('flex min-w-0 flex-1 items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs outline-none focus-visible:ring-[3px] focus-visible:ring-sidebar-ring/50', active ? 'font-medium' : 'text-muted-foreground')}>
                             <Icon className="size-3.5 shrink-0" />
                             <span>{view === 'overview' ? '概览' : '终端'}</span>
-                            {view === 'terminal' && (terminals[project.id]?.attention ? <span className="ml-auto size-1.5 shrink-0 rounded-full bg-attention" aria-label="终端有新动静" title="终端有新动静" data-terminal-attention={project.id} /> : terminals[project.id]?.alive && <span className="ml-auto size-1.5 rounded-full bg-success" aria-label="终端运行中" />)}
+                            {view === 'terminal' && terminalGroup?.count > 1 && <span className="text-[10px] tabular-nums text-muted-foreground" data-project-terminal-count>{terminalGroup.count}</span>}
+                            {view === 'terminal' && (terminalGroup?.attention ? <span className="ml-auto size-1.5 shrink-0 rounded-full bg-attention" aria-label="终端有新动静" title="终端有新动静" data-terminal-attention={project.id} /> : terminalGroup?.alive && <span className="ml-auto size-1.5 rounded-full bg-success" aria-label="终端运行中" />)}
                           </button>
-                          {view === 'terminal' && <RestartTerminalButton projectId={project.id} alive={!!terminals[project.id]?.alive} opening={!!terminals[project.id]?.opening} active={!!active} onSelect={onSelect} />}
+                          {view === 'terminal' && <RestartTerminalButton projectId={project.id} slot={activeSlot} count={terminalGroup?.count ?? 1} alive={!!activeTerminal?.alive} opening={!!activeTerminal?.opening} active={!!active} onSelect={onSelect} />}
                         </div>
                       );
                     })}
