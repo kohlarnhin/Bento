@@ -1,6 +1,6 @@
 [package]
 name = "apphub"
-version = "0.1.2"
+version = "0.1.3"
 description = "Bento - 本地项目开发与启动的 macOS 桌面应用"
 authors = ["zhujiangyong"]
 edition = "2021"
