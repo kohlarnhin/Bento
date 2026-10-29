@@ -446,6 +446,8 @@ pub fn run() {
         autostart::set_autostart,
         terminal::terminal_open,
         terminal::terminal_restart,
+        terminal::terminal_create,
+        terminal::terminal_close,
         terminal::terminal_list,
         terminal::terminal_focus,
         terminal::terminal_write,
