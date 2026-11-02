@@ -424,6 +424,10 @@ export function App() {
     setActiveLogProject(null);
     setSelection(next);
   };
+  const selectSidebarTerminal = (projectId: string, slot: number) => {
+    setActiveLogProject(null);
+    selectTerminalSlot(projectId, slot);
+  };
 
   return (
     <TooltipProvider delayDuration={150}>
@@ -442,9 +446,12 @@ export function App() {
           conflicts={conflicts}
           selection={selection}
           activeSlots={activeSlots}
+          maxPerProject={settings.maxPerProject}
           loading={loading}
           projectsLoaded={projectsLoaded}
           onSelect={selectView}
+          onSelectTerminal={selectSidebarTerminal}
+          onCreateTerminal={openTerminal}
           onRefresh={loadProjects}
           onCreate={() => openCreate()}
           managedCount={managedProjects.length}
@@ -464,8 +471,7 @@ export function App() {
               <Button onClick={() => openCreate()}>新建项目</Button>
             </Empty>
           ) : selectedProject && selection?.view === 'terminal' ? (
-            <ProjectTerminal key={selectedProject.id} project={selectedProject} activeSlot={activeSlots[selectedProject.id] ?? 1}
-              maxPerProject={settings.maxPerProject} onSelectSlot={slot => selectTerminalSlot(selectedProject.id, slot)} onCreate={() => openTerminal(selectedProject.id)} />
+            <ProjectTerminal key={selectedProject.id} project={selectedProject} activeSlot={activeSlots[selectedProject.id] ?? 1} />
           ) : selectedProject ? (
             <div className="flex-1 overflow-y-auto px-7 pb-8 pt-3 lg:px-12 lg:pt-7" data-project-overview={selectedProject.id}>
               <div className="mx-auto flex max-w-4xl flex-col gap-5">

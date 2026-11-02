@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { PointerEvent as ReactPointerEvent, ReactNode, RefObject } from 'react';
 import { ChevronRight, ChevronsDownUp, ChevronsUpDown, GripVertical, LayoutDashboard, Plus, RefreshCw, RotateCcw, Search, Square, Terminal, X } from 'lucide-react';
+import { toast } from 'sonner';
 import type { PortConflict, ProjectConfig, ProjectSelection, ProjectStatus } from '../types';
-import { getTerminalSnapshot, restartTerminal, subscribeTerminals, terminalKey } from '../lib/terminalRegistry';
+import { closeTerminal, getProjectTerminalSlots, getTerminalSnapshot, restartTerminal, subscribeTerminals, terminalKey, type TerminalStatus } from '../lib/terminalRegistry';
 import { cn } from '../lib/utils';
 import logo from '../assets/logo.svg';
 import Button from './ui/button';
@@ -24,9 +25,12 @@ interface Props {
   conflicts: PortConflict[];
   selection: ProjectSelection | null;
   activeSlots: Record<string, number>;
+  maxPerProject: number;
   loading: boolean;
   projectsLoaded: boolean;
   onSelect: (selection: ProjectSelection) => void;
+  onSelectTerminal: (projectId: string, slot: number) => void;
+  onCreateTerminal: (projectId: string) => Promise<void>;
   onRefresh: () => void;
   onCreate: () => void;
   managedCount: number;
@@ -75,31 +79,32 @@ function readRunningCollapsed(): boolean {
   catch { return false; }
 }
 
-function RestartTerminalButton({ projectId, slot, count, alive, opening, active, onSelect }: {
-  projectId: string; slot: number; count: number; alive: boolean; opening: boolean; active: boolean; onSelect: Props['onSelect'];
+function RestartTerminalButton({ projectId, slot, status, active, onSelect }: {
+  projectId: string; slot: number; status?: TerminalStatus; active: boolean; onSelect: Props['onSelectTerminal'];
 }) {
   const [confirmUntil, setConfirmUntil] = useState(0);
   const timer = useRef<ReturnType<typeof setTimeout>>();
   useEffect(() => {
     setConfirmUntil(0);
     return () => clearTimeout(timer.current);
-  }, [slot]);
-  const confirming = alive && confirmUntil > 0;
-  const label = confirming ? '再次点击确认重启' : count > 1 ? `重启终端 ${slot}` : '重启终端';
+  }, [status?.sessionId]);
+  const confirming = !!status?.alive && confirmUntil > 0;
+  const label = confirming ? '再次点击确认重启' : `重启终端 ${slot}`;
   return (
     <ActionTooltip label={label} side="right">
       <Button
         size="icon-sm"
         variant={confirming ? 'ghost-destructive' : 'ghost'}
-        className={cn('no-drag mr-1 shrink-0 opacity-0 transition-opacity group-hover/terminal:opacity-100 group-focus-within/terminal:opacity-100', (active || confirming) && 'opacity-100')}
+        className={cn('no-drag shrink-0 opacity-0 transition-opacity group-hover/terminal:opacity-100 group-focus-within/terminal:opacity-100', (active || confirming) && 'opacity-100')}
         aria-label={label}
         title={label}
         data-sidebar-terminal-restart={projectId}
+        data-sidebar-terminal-slot={slot}
         data-confirming={confirming}
-        disabled={opening}
+        disabled={status?.opening}
         onClick={() => {
-          onSelect({ projectId, view: 'terminal' });
-          if (alive && Date.now() >= confirmUntil) {
+          onSelect(projectId, slot);
+          if (status?.alive && Date.now() >= confirmUntil) {
             setConfirmUntil(Date.now() + 3000);
             clearTimeout(timer.current);
             timer.current = setTimeout(() => setConfirmUntil(0), 3000);
@@ -110,13 +115,73 @@ function RestartTerminalButton({ projectId, slot, count, alive, opening, active,
           void restartTerminal(projectId, slot);
         }}
       >
-        <RotateCcw data-icon="inline-start" className={cn(opening && 'animate-spin')} />
+        <RotateCcw data-icon="inline-start" className={cn(status?.opening && 'animate-spin')} />
       </Button>
     </ActionTooltip>
   );
 }
 
-export function ProjectSidebar({ projects, visibleProjects, searchQuery, searchInputRef, onSearchChange, onReorder, reordering, statuses, conflicts, selection, activeSlots, loading, projectsLoaded, onSelect, onRefresh, onCreate, managedCount, onStopAll, updateFooter }: Props) {
+function CloseTerminalButton({ projectId, slot, status, active }: {
+  projectId: string; slot: number; status?: TerminalStatus; active: boolean;
+}) {
+  const [confirmUntil, setConfirmUntil] = useState(0);
+  const [closing, setClosing] = useState(false);
+  const pending = useRef(false);
+  const timer = useRef<ReturnType<typeof setTimeout>>();
+  useEffect(() => {
+    setConfirmUntil(0);
+    return () => clearTimeout(timer.current);
+  }, [status?.sessionId]);
+  const confirming = !!status?.alive && confirmUntil > 0;
+  const label = confirming ? '再次点击确认关闭' : `关闭终端 ${slot}`;
+  return <ActionTooltip label={label} side="right">
+    <Button variant={confirming ? 'ghost-destructive' : 'ghost'} size="icon-sm"
+      className={cn('no-drag shrink-0 opacity-0 transition-opacity group-hover/terminal:opacity-100 group-focus-within/terminal:opacity-100', (active || confirming) && 'opacity-100')}
+      aria-label={label} title={label} data-sidebar-terminal-close={projectId} data-sidebar-terminal-slot={slot} data-confirming={confirming} disabled={closing || status?.opening}
+      onClick={() => {
+        if (pending.current) return;
+        if (status?.alive && Date.now() >= confirmUntil) {
+          setConfirmUntil(Date.now() + 3000);
+          clearTimeout(timer.current);
+          timer.current = setTimeout(() => setConfirmUntil(0), 3000);
+          return;
+        }
+        clearTimeout(timer.current);
+        setConfirmUntil(0);
+        pending.current = true;
+        setClosing(true);
+        void closeTerminal(projectId, slot).catch(error => toast.error(`关闭终端失败：${error}`)).finally(() => {
+          pending.current = false;
+          setClosing(false);
+        });
+      }}><X /></Button>
+  </ActionTooltip>;
+}
+
+function NewTerminalButton({ projectId, atLimit, maxPerProject, onCreate }: {
+  projectId: string; atLimit: boolean; maxPerProject: number; onCreate: () => Promise<void>;
+}) {
+  const [creating, setCreating] = useState(false);
+  const label = atLimit ? `已达上限（${maxPerProject} 个），可在设置中调整` : '新建终端 (⌘T)';
+  return <ActionTooltip label={label} side="right">
+    <span className="no-drag mr-1 inline-flex shrink-0 opacity-0 transition-opacity group-hover/project:opacity-100 group-focus-within/project:opacity-100" title={label}>
+      <Button variant="ghost" size="icon-sm" aria-label={label} data-sidebar-terminal-new={projectId} disabled={atLimit || creating}
+        onClick={() => {
+          setCreating(true);
+          void onCreate().finally(() => setCreating(false));
+        }}><Plus /></Button>
+    </span>
+  </ActionTooltip>;
+}
+
+function TerminalStatusDot({ projectId, slot, status }: { projectId: string; slot: number; status?: TerminalStatus }) {
+  if (!status?.attention && !status?.alive) return null;
+  const label = status.attention ? '终端有新动静' : '终端运行中';
+  return <span className={cn('ml-auto size-1.5 shrink-0 rounded-full', status.attention ? 'bg-attention' : 'bg-success')}
+    aria-label={label} title={label} data-terminal-attention={status.attention ? projectId : undefined} data-sidebar-terminal-slot={slot} />;
+}
+
+export function ProjectSidebar({ projects, visibleProjects, searchQuery, searchInputRef, onSearchChange, onReorder, reordering, statuses, conflicts, selection, activeSlots, maxPerProject, loading, projectsLoaded, onSelect, onSelectTerminal, onCreateTerminal, onRefresh, onCreate, managedCount, onStopAll, updateFooter }: Props) {
   const [collapsed, setCollapsed] = useState(readCollapsedProjects);
   const [runningCollapsed, setRunningCollapsed] = useState(readRunningCollapsed);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
@@ -132,11 +197,9 @@ export function ProjectSidebar({ projects, visibleProjects, searchQuery, searchI
   const highlighted = visibleProjects.find(project => project.id === highlightedId)?.id || visibleProjects[0]?.id;
   const terminals = useSyncExternalStore(subscribeTerminals, getTerminalSnapshot);
   const terminalGroups = useMemo(() => {
-    const groups: Record<string, { count: number; alive: boolean; attention: boolean }> = {};
+    const groups: Record<string, { attention: boolean }> = {};
     for (const terminal of Object.values(terminals)) {
-      const group = groups[terminal.projectId] ??= { count: 0, alive: false, attention: false };
-      group.count++;
-      group.alive ||= !!terminal.alive;
+      const group = groups[terminal.projectId] ??= { attention: false };
       group.attention ||= !!terminal.attention;
     }
     return groups;
@@ -353,24 +416,29 @@ export function ProjectSidebar({ projects, visibleProjects, searchQuery, searchI
         {!runningCollapsed && <nav id="sidebar-running-projects" aria-label="运行中的项目" className="min-h-0 overflow-x-hidden overflow-y-auto">
           {runningProjects.map(project => {
             const selected = selection?.projectId === project.id;
-            const terminalSelected = selected && selection.view === 'terminal';
+            const overviewSelected = selected && selection.view === 'overview';
             const status = statuses[project.id];
             const conflict = conflicts.some(item => item.projectIds.includes(project.id));
             const name = project.displayName || project.name;
-            return <div key={project.id} className={cn('group/running flex min-w-0 items-center rounded-md transition-colors hover:bg-sidebar-accent/70', selected && 'bg-sidebar-accent text-sidebar-accent-foreground')}>
-              <button data-running-project={project.id} aria-current={selected && selection.view === 'overview' ? 'page' : undefined}
+            return <div key={project.id} className="min-w-0">
+              <button data-running-project={project.id} aria-current={overviewSelected ? 'page' : undefined}
                 title={name} onClick={() => onSelect({ projectId: project.id, view: 'overview' })}
-                className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-2 text-left text-xs outline-none focus-visible:ring-[3px] focus-visible:ring-sidebar-ring/50">
+                className={cn('flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-2 text-left text-xs outline-none transition-colors hover:bg-sidebar-accent/70 focus-visible:ring-[3px] focus-visible:ring-sidebar-ring/50', overviewSelected && 'bg-sidebar-accent font-medium text-sidebar-accent-foreground')}>
                 <span className={cn('size-1.5 shrink-0 rounded-full', conflict ? 'bg-warning' : statusColors[status])} aria-label={conflict ? '端口冲突' : statusNames[status]} />
                 <span className="min-w-0 flex-1 truncate">{name}</span>
                 {project.port != null && <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">:{project.port}</span>}
-                {terminalGroups[project.id]?.attention && <span className="size-1.5 shrink-0 rounded-full bg-attention" aria-label="终端有新动静" title="终端有新动静" data-running-attention={project.id} />}
               </button>
-              <ActionTooltip label={`${name} 终端`} side="right">
-                <Button variant="ghost" size="icon-sm" aria-label={`${name} 终端`} aria-current={terminalSelected ? 'page' : undefined}
-                  data-running-terminal={project.id} onClick={() => onSelect({ projectId: project.id, view: 'terminal' })}
-                  className={cn('no-drag mr-1 shrink-0 opacity-0 transition-opacity group-hover/running:opacity-100 group-focus-within/running:opacity-100', terminalSelected && 'opacity-100')}><Terminal /></Button>
-              </ActionTooltip>
+              <div className="mb-1 ml-3.5 flex flex-col gap-0.5 border-l border-sidebar-border pl-3">
+                {getProjectTerminalSlots(project.id, terminals).map(slot => {
+                  const active = selected && selection.view === 'terminal' && (activeSlots[project.id] ?? 1) === slot;
+                  return <button key={slot} data-running-terminal={project.id} data-running-terminal-slot={slot} aria-current={active ? 'page' : undefined}
+                    onClick={() => onSelectTerminal(project.id, slot)}
+                    className={cn('flex min-w-0 items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs outline-none transition-colors hover:bg-sidebar-accent/70 focus-visible:ring-[3px] focus-visible:ring-sidebar-ring/50', active ? 'bg-sidebar-accent font-medium text-sidebar-accent-foreground' : 'text-muted-foreground')}>
+                    <Terminal className="size-3.5 shrink-0" /><span className="min-w-0 truncate">终端 {slot}</span>
+                    <TerminalStatusDot projectId={project.id} slot={slot} status={terminals[terminalKey(project.id, slot)]} />
+                  </button>;
+                })}
+              </div>
             </div>;
           })}
         </nav>}
@@ -393,7 +461,7 @@ export function ProjectSidebar({ projects, visibleProjects, searchQuery, searchI
             const selected = selection?.projectId === project.id;
             const terminalGroup = terminalGroups[project.id];
             const activeSlot = activeSlots[project.id] ?? 1;
-            const activeTerminal = terminals[terminalKey(project.id, activeSlot)];
+            const slots = getProjectTerminalSlots(project.id, terminals);
             const expanded = !collapsed.has(project.id);
             const conflict = conflicts.some((item) => item.projectIds.includes(project.id));
             const status = statuses[project.id] || 'stopped';
@@ -440,24 +508,32 @@ export function ProjectSidebar({ projects, visibleProjects, searchQuery, searchI
                     {!expanded && terminalGroup?.attention && <span className="ml-auto size-1.5 shrink-0 rounded-full bg-attention" aria-label="终端有新动静" title="终端有新动静" data-terminal-attention={project.id} />}
                     {!searching && <GripVertical aria-hidden="true" className={cn('size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover/project:opacity-60 group-focus-within/project:opacity-60', expanded || !terminalGroup?.attention ? 'ml-auto' : '')} />}
                   </button>
+                  <NewTerminalButton projectId={project.id} atLimit={slots.length >= maxPerProject} maxPerProject={maxPerProject} onCreate={() => {
+                    setCollapsed(previous => { const next = new Set(previous); next.delete(project.id); return next; });
+                    return onCreateTerminal(project.id);
+                  }} />
                 </div>
                 <CollapsibleContent>
                   <div className="mb-2 ml-3.5 mt-1 flex flex-col gap-1 border-l border-sidebar-border pl-3">
-                    {(['overview', 'terminal'] as const).map((view) => {
-                      const active = selected && selection.view === view;
-                      const Icon = view === 'overview' ? LayoutDashboard : Terminal;
-                      return (
-                        <div key={view} className={cn('group/terminal flex items-center rounded-md transition-colors hover:bg-sidebar-accent/70', active && 'bg-sidebar-accent text-sidebar-accent-foreground')}>
-                          <button data-project-view={view} data-project-target={project.id} aria-current={active ? 'page' : undefined} onClick={() => onSelect({ projectId: project.id, view })}
-                            className={cn('flex min-w-0 flex-1 items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs outline-none focus-visible:ring-[3px] focus-visible:ring-sidebar-ring/50', active ? 'font-medium' : 'text-muted-foreground')}>
-                            <Icon className="size-3.5 shrink-0" />
-                            <span>{view === 'overview' ? '概览' : '终端'}</span>
-                            {view === 'terminal' && terminalGroup?.count > 1 && <span className="text-[10px] tabular-nums text-muted-foreground" data-project-terminal-count>{terminalGroup.count}</span>}
-                            {view === 'terminal' && (terminalGroup?.attention ? <span className="ml-auto size-1.5 shrink-0 rounded-full bg-attention" aria-label="终端有新动静" title="终端有新动静" data-terminal-attention={project.id} /> : terminalGroup?.alive && <span className="ml-auto size-1.5 rounded-full bg-success" aria-label="终端运行中" />)}
-                          </button>
-                          {view === 'terminal' && <RestartTerminalButton projectId={project.id} slot={activeSlot} count={terminalGroup?.count ?? 1} alive={!!activeTerminal?.alive} opening={!!activeTerminal?.opening} active={!!active} onSelect={onSelect} />}
-                        </div>
-                      );
+                    <button data-project-view="overview" data-project-target={project.id} aria-current={selected && selection.view === 'overview' ? 'page' : undefined}
+                      onClick={() => onSelect({ projectId: project.id, view: 'overview' })}
+                      className={cn('flex min-w-0 items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs outline-none transition-colors hover:bg-sidebar-accent/70 focus-visible:ring-[3px] focus-visible:ring-sidebar-ring/50', selected && selection.view === 'overview' ? 'bg-sidebar-accent font-medium text-sidebar-accent-foreground' : 'text-muted-foreground')}>
+                      <LayoutDashboard className="size-3.5 shrink-0" /><span className="min-w-0 truncate">概览</span>
+                    </button>
+                    {slots.map(slot => {
+                      const active = !!selected && selection.view === 'terminal' && activeSlot === slot;
+                      const status = terminals[terminalKey(project.id, slot)];
+                      return <div key={slot} className={cn('group/terminal flex min-w-0 items-center rounded-md pr-1 transition-colors hover:bg-sidebar-accent/70', active && 'bg-sidebar-accent text-sidebar-accent-foreground')}>
+                        <button data-project-view="terminal" data-project-target={project.id} data-project-terminal-slot={slot} aria-current={active ? 'page' : undefined}
+                          onClick={() => onSelectTerminal(project.id, slot)}
+                          className={cn('flex min-w-0 flex-1 items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs outline-none focus-visible:ring-[3px] focus-visible:ring-sidebar-ring/50', active ? 'font-medium' : 'text-muted-foreground')}>
+                          <Terminal className="size-3.5 shrink-0" /><span className="min-w-0 truncate">终端 {slot}</span>
+                          <TerminalStatusDot projectId={project.id} slot={slot} status={status} />
+                        </button>
+                        <RestartTerminalButton projectId={project.id} slot={slot} status={status} active={active} onSelect={onSelectTerminal} />
+                        {slot > 1 ? <CloseTerminalButton projectId={project.id} slot={slot} status={status} active={active} />
+                          : <span aria-hidden="true" className="size-7 shrink-0" />}
+                      </div>;
                     })}
                   </div>
                 </CollapsibleContent>
