@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
 import { isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -175,11 +175,11 @@ export function useUpdater() {
     if (!installing.current) void updateRef.current?.close().catch(() => undefined);
   }, []);
 
-  return {
+  return useMemo(() => ({
     currentVersion, status, update, error, downloadProgress, isModalOpen,
     isBusy: status === 'downloading' || status === 'installing' || status === 'restarting',
     checkNow, installUpdate, retry, closeModal,
-  };
+  }), [currentVersion, status, update, error, downloadProgress, isModalOpen, checkNow, installUpdate, retry, closeModal]);
 }
 
 export type UpdaterController = ReturnType<typeof useUpdater>;

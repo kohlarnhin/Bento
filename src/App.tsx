@@ -23,7 +23,8 @@ import Button from './components/ui/button';
 import { Toaster } from './components/ui/sonner';
 import { Empty, EmptyTitle, EmptyDescription } from './components/ui/empty';
 import { createTerminal, getProjectTerminalSlots, getTerminalSnapshot, initTerminalRegistry, subscribeTerminals, terminalKey } from './lib/terminalRegistry';
-import { useProjectLogs } from './lib/useProjectLogs';
+import { projectLogs } from './lib/useProjectLogs';
+import { recordRender } from './lib/renderMetrics';
 import {
   ProjectConfig,
   PortConflict,
@@ -74,6 +75,7 @@ interface LogBatchPayload {
 type StatusPayload = ProjectRuntimeStatus;
 
 export function App() {
+  recordRender('app');
   const updater = useUpdater();
   const settings = useSettings();
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -82,7 +84,7 @@ export function App() {
   const [projects, setProjects] = useState<ProjectConfig[]>([]);
   const [conflicts, setConflicts] = useState<PortConflict[]>([]);
   const [runtimes, setRuntimes] = useState<Record<string, ProjectRuntimeStatus>>({});
-  const projectStatuses: Record<string, ProjectStatus> = Object.fromEntries(Object.entries(runtimes).map(([id, runtime]) => [id, runtime.status]));
+  const projectStatuses: Record<string, ProjectStatus> = useMemo(() => Object.fromEntries(Object.entries(runtimes).map(([id, runtime]) => [id, runtime.status])), [runtimes]);
   const applyRuntime = useCallback((updates: ProjectRuntimeStatus[]) => {
     setRuntimes(previous => {
       let changed = false;
@@ -100,7 +102,7 @@ export function App() {
   const refreshRuntime = useCallback(async () => {
     applyRuntime(await invoke<ProjectRuntimeStatus[]>('get_projects_runtime_status'));
   }, [applyRuntime]);
-  const { logs, enqueue: enqueueLogs, flush: flushLogs, clear: clearLogs } = useProjectLogs();
+  const { enqueue: enqueueLogs, flush: flushLogs, clear: clearLogs } = projectLogs;
   const [activeLogProject, setActiveLogProject] = useState<ProjectConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [projectsLoaded, setProjectsLoaded] = useState(false);
@@ -420,14 +422,19 @@ export function App() {
 
   const selectedProject = projects.find((project) => project.id === selection?.projectId);
   const selectedConflict = conflicts.find((conflict) => selectedProject && conflict.projectIds.includes(selectedProject.id));
-  const selectView = (next: ProjectSelection) => {
+  const selectView = useCallback((next: ProjectSelection) => {
     setActiveLogProject(null);
     setSelection(next);
-  };
-  const selectSidebarTerminal = (projectId: string, slot: number) => {
+  }, []);
+  const selectSidebarTerminal = useCallback((projectId: string, slot: number) => {
     setActiveLogProject(null);
     selectTerminalSlot(projectId, slot);
-  };
+  }, [selectTerminalSlot]);
+  const createProject = useCallback(() => openCreate(), [openCreate]);
+  const openStopAll = useCallback(() => {
+    if (!dialogOpen.current) { dialogOpen.current = true; setStopAllOpen(true); }
+  }, []);
+  const updateFooter = useMemo(() => <UpdateFooter updater={updater} onOpenSettings={openSettings} />, [updater, openSettings]);
 
   return (
     <TooltipProvider delayDuration={150}>
@@ -453,10 +460,10 @@ export function App() {
           onSelectTerminal={selectSidebarTerminal}
           onCreateTerminal={openTerminal}
           onRefresh={loadProjects}
-          onCreate={() => openCreate()}
+          onCreate={createProject}
           managedCount={managedProjects.length}
-          updateFooter={<UpdateFooter updater={updater} onOpenSettings={openSettings} />}
-          onStopAll={() => { if (!dialogOpen.current) { dialogOpen.current = true; setStopAllOpen(true); } }}
+          updateFooter={updateFooter}
+          onStopAll={openStopAll}
         />
 
         <main className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
@@ -481,7 +488,6 @@ export function App() {
                   project={selectedProject}
                   status={projectStatuses[selectedProject.id] || 'stopped'}
                   runtime={runtimes[selectedProject.id]}
-                  logs={logs[selectedProject.id] || []}
                   conflict={selectedConflict}
                   onStart={handleStart}
                   onStop={handleStop}
@@ -539,7 +545,6 @@ export function App() {
         {activeLogProject && (
           <TerminalLogsModal
             project={activeLogProject}
-            logs={logs[activeLogProject.id as string] || []}
             onClose={() => setActiveLogProject(null)}
             onClear={() => handleClearLogs(activeLogProject.id as string)}
           />

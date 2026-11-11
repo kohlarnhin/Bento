@@ -563,7 +563,19 @@ pub async fn stop_managed(
         .await
         .map_err(|err| format!("停止进程失败：{err}"))?;
     let remaining = if let Some(port) = info.port {
-        tauri::async_runtime::spawn_blocking(move || processes::port_pids(port))
+        tauri::async_runtime::spawn_blocking(move || {
+            // A new external owner can bind just after the managed root exits.
+            // Native enumeration can outrun that handoff; briefly recheck so
+            // Stop still reports the occupied port without touching its owner.
+            let deadline = Instant::now() + Duration::from_millis(500);
+            loop {
+                let owners = processes::port_pids(port);
+                if !owners.is_empty() || Instant::now() >= deadline {
+                    break owners;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        })
             .await
             .unwrap_or_default()
     } else {

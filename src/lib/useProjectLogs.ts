@@ -1,7 +1,20 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useSyncExternalStore } from 'react';
 import type { LogEntry } from '../types';
 
 type IncomingEntry = Pick<LogEntry, 'text' | 'stream'>;
+interface LogStore {
+  lines: Map<string, LogEntry[]>;
+  pending: Map<string, LogEntry[]>;
+  subscribers: Map<string, Set<() => void>>;
+  timer?: ReturnType<typeof setTimeout>;
+  nextId: number;
+}
+
+const store: LogStore = import.meta.hot?.data.projectLogs ?? {
+  lines: new Map(), pending: new Map(), subscribers: new Map(), nextId: 0,
+};
+if (import.meta.hot) import.meta.hot.data.projectLogs = store;
+const emptyLines: LogEntry[] = [];
 const debugMetrics = import.meta.env.DEV ? { stateFlushes: 0, linesReceived: 0 } : undefined;
 
 // Read by the real-webview harness; the counters are absent in production.
@@ -14,52 +27,61 @@ export function logDeliveryMetrics(reset = false) {
   return snapshot;
 }
 
-export function useProjectLogs() {
-  const [logs, setLogs] = useState<Record<string, LogEntry[]>>({});
-  const pending = useRef<Record<string, LogEntry[]>>({});
-  const timer = useRef<ReturnType<typeof setTimeout>>();
-  const nextId = useRef(0);
+function notify(projectId: string) {
+  store.subscribers.get(projectId)?.forEach(subscriber => subscriber());
+}
 
-  const flush = useCallback(() => {
-    clearTimeout(timer.current);
-    timer.current = undefined;
-    const batches = pending.current;
-    pending.current = {};
-    if (!Object.keys(batches).length) return;
-    if (debugMetrics) debugMetrics.stateFlushes++;
-    setLogs(previous => {
-      const next = { ...previous };
-      for (const [projectId, entries] of Object.entries(batches)) {
-        next[projectId] = [...(previous[projectId] || []), ...entries].slice(-800);
-      }
-      return next;
-    });
-  }, []);
+function flush() {
+  clearTimeout(store.timer);
+  store.timer = undefined;
+  const batches = store.pending;
+  store.pending = new Map();
+  if (!batches.size) return;
+  if (debugMetrics) debugMetrics.stateFlushes++;
+  for (const [projectId, entries] of batches) {
+    store.lines.set(projectId, [...(store.lines.get(projectId) ?? emptyLines), ...entries].slice(-800));
+    notify(projectId);
+  }
+}
 
-  const enqueue = useCallback((projectId: string, entries: IncomingEntry[]) => {
-    if (!entries.length) return;
-    const timestamp = Date.now();
-    const incoming = entries.map(entry => ({ ...entry, projectId, timestamp, id: String(++nextId.current) }));
-    pending.current[projectId] = [...(pending.current[projectId] || []), ...incoming].slice(-800);
-    if (debugMetrics) debugMetrics.linesReceived += entries.length;
-    if (timer.current === undefined) timer.current = setTimeout(flush, 100);
-  }, [flush]);
+function enqueue(projectId: string, entries: IncomingEntry[]) {
+  if (!entries.length) return;
+  const timestamp = Date.now();
+  const incoming = entries.map(entry => ({ ...entry, projectId, timestamp, id: String(++store.nextId) }));
+  store.pending.set(projectId, [...(store.pending.get(projectId) ?? emptyLines), ...incoming].slice(-800));
+  if (debugMetrics) debugMetrics.linesReceived += entries.length;
+  if (store.timer === undefined) store.timer = setTimeout(flush, 100);
+}
 
-  const clear = useCallback((projectId: string, remove = false) => {
-    delete pending.current[projectId];
-    setLogs(previous => {
-      const next = { ...previous };
-      if (remove) delete next[projectId];
-      else next[projectId] = [];
-      return next;
-    });
-  }, []);
+function clear(projectId: string, remove = false) {
+  store.pending.delete(projectId);
+  if (remove) store.lines.delete(projectId);
+  else store.lines.set(projectId, emptyLines);
+  notify(projectId);
+}
 
-  useEffect(() => () => {
-    clearTimeout(timer.current);
-    timer.current = undefined;
-    pending.current = {};
-  }, []);
+function subscribe(projectId: string, subscriber: () => void) {
+  let subscribers = store.subscribers.get(projectId);
+  if (!subscribers) store.subscribers.set(projectId, subscribers = new Set());
+  subscribers.add(subscriber);
+  return () => {
+    subscribers.delete(subscriber);
+    if (!subscribers.size) store.subscribers.delete(projectId);
+  };
+}
 
-  return { logs, enqueue, flush, clear };
+export const projectLogs = { enqueue, flush, clear };
+
+export function useHasProjectLogs(projectId: string) {
+  return useSyncExternalStore(
+    useCallback(subscriber => subscribe(projectId, subscriber), [projectId]),
+    useCallback(() => (store.lines.get(projectId)?.length ?? 0) > 0, [projectId]),
+  );
+}
+
+export function useProjectLogLines(projectId: string) {
+  return useSyncExternalStore(
+    useCallback(subscriber => subscribe(projectId, subscriber), [projectId]),
+    useCallback(() => store.lines.get(projectId) ?? emptyLines, [projectId]),
+  );
 }
