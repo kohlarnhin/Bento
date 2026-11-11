@@ -169,7 +169,7 @@ export function ProjectFormDialog({ project, initialInspection, projects, status
       const draft: ProjectDraft = { ...values, port: values.port.trim() ? Number(values.port) : null };
       const saved = await invoke<ProjectConfig>(project ? 'update_project' : 'add_project', { ...(project ? { id: project.id } : {}), project: draft });
       toast.success(project ? '已保存修改' : `已添加项目「${saved.displayName || saved.name}」`);
-      if (project && saved.path !== project.path && getTerminalSnapshot()[project.id]?.alive) toast('终端仍在原目录，可在侧边栏重启终端');
+      if (project && saved.path !== project.path && Object.values(getTerminalSnapshot()).some(terminal => terminal.projectId === project.id && terminal.alive)) toast('终端仍在原目录，可在侧边栏重启终端');
       await onSaved(saved);
     } catch (error) {
       setSaveError(String(error));
