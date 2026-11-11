@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { PointerEvent as ReactPointerEvent, ReactNode, RefObject } from 'react';
 import { ChevronRight, ChevronsDownUp, ChevronsUpDown, GripVertical, LayoutDashboard, Plus, RefreshCw, RotateCcw, Search, Square, Terminal, X } from 'lucide-react';
 import { toast } from 'sonner';
 import type { PortConflict, ProjectConfig, ProjectSelection, ProjectStatus } from '../types';
 import { closeTerminal, getProjectTerminalSlots, getTerminalSnapshot, restartTerminal, subscribeTerminals, terminalKey, type TerminalStatus } from '../lib/terminalRegistry';
 import { cn } from '../lib/utils';
+import { recordRender } from '../lib/renderMetrics';
 import logo from '../assets/logo.svg';
 import Button from './ui/button';
 import { ActionTooltip } from './ui/tooltip';
@@ -181,7 +182,8 @@ function TerminalStatusDot({ projectId, slot, status }: { projectId: string; slo
     aria-label={label} title={label} data-terminal-attention={status.attention ? projectId : undefined} data-sidebar-terminal-slot={slot} />;
 }
 
-export function ProjectSidebar({ projects, visibleProjects, searchQuery, searchInputRef, onSearchChange, onReorder, reordering, statuses, conflicts, selection, activeSlots, maxPerProject, loading, projectsLoaded, onSelect, onSelectTerminal, onCreateTerminal, onRefresh, onCreate, managedCount, onStopAll, updateFooter }: Props) {
+export const ProjectSidebar = memo(function ProjectSidebar({ projects, visibleProjects, searchQuery, searchInputRef, onSearchChange, onReorder, reordering, statuses, conflicts, selection, activeSlots, maxPerProject, loading, projectsLoaded, onSelect, onSelectTerminal, onCreateTerminal, onRefresh, onCreate, managedCount, onStopAll, updateFooter }: Props) {
+  recordRender('projectSidebar');
   const [collapsed, setCollapsed] = useState(readCollapsedProjects);
   const [runningCollapsed, setRunningCollapsed] = useState(readRunningCollapsed);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
@@ -550,4 +552,4 @@ export function ProjectSidebar({ projects, visibleProjects, searchQuery, searchI
       <div ref={indicator} hidden={!draggingId} aria-hidden="true" data-reorder-indicator className="pointer-events-none fixed z-[70] h-0.5 rounded-full bg-primary" />
     </aside>
   );
-}
+});

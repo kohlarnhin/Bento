@@ -4,6 +4,8 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod listeners;
+
 fn lsof() -> Command {
     #[cfg(debug_assertions)]
     crate::debug_e2e::record_lsof();
@@ -34,10 +36,20 @@ pub fn parse_listening_ports(text: &str) -> HashMap<u16, Vec<u32>> {
             }
         }
     }
+    for pids in ports.values_mut() {
+        pids.sort_unstable();
+        pids.dedup();
+    }
     ports
 }
 
 pub fn listening_ports() -> HashMap<u16, Vec<u32>> {
+    // Individual inaccessible/exiting processes are skipped by libproc. Only a
+    // failure of the process-list enumeration itself warrants spawning lsof.
+    listeners::listening_ports().unwrap_or_else(|_| listening_ports_lsof())
+}
+
+fn listening_ports_lsof() -> HashMap<u16, Vec<u32>> {
     lsof()
         .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpn"])
         .output()
@@ -234,21 +246,7 @@ pub fn terminate_trees_blocking(trees: &[Arc<ProcessTree>]) {
 }
 
 pub fn port_pids(port: u16) -> Vec<u32> {
-    let mut pids: Vec<_> = lsof()
-        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-t"])
-        .output()
-        .ok()
-        .map(|out| {
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .filter_map(|s| s.trim().parse::<u32>().ok())
-                .filter(|pid| *pid > 1)
-                .collect()
-        })
-        .unwrap_or_default();
-    pids.sort_unstable();
-    pids.dedup();
-    pids
+    listening_ports().remove(&port).unwrap_or_default()
 }
 
 #[derive(Debug, Serialize)]

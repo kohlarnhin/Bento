@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { Play, Square, RefreshCw, ExternalLink, Folder, Terminal, AlertCircle, Loader2, Check, Copy, Globe, AppWindow, Pencil, Trash2, GitBranch } from 'lucide-react';
 import { toast } from 'sonner';
-import type { ProjectConfig, ProjectStatus, ProjectRuntimeStatus, LogEntry, PortConflict, GitInfo } from '../types';
+import type { ProjectConfig, ProjectStatus, ProjectRuntimeStatus, PortConflict, GitInfo } from '../types';
 import { useGitInfo } from '../lib/useGitInfo';
+import { useHasProjectLogs } from '../lib/useProjectLogs';
 import Button from './ui/button';
 import { ActionTooltip } from './ui/tooltip';
 import { Badge } from './ui/badge';
@@ -14,7 +15,6 @@ interface ProjectCardProps {
   project: ProjectConfig;
   status: ProjectStatus;
   runtime?: ProjectRuntimeStatus;
-  logs: LogEntry[];
   conflict?: PortConflict;
   onStart: (id: string) => void;
   onStop: (id: string) => void;
@@ -49,7 +49,8 @@ function GitSummary({ git }: { git: GitInfo }) {
   );
 }
 
-export function ProjectCard({ project, status, runtime, logs, conflict, onStart, onStop, onRestart, onOpenBrowser, onRevealPath, onOpenLogs, onEdit, onDelete, onRunCommand }: ProjectCardProps) {
+export function ProjectCard({ project, status, runtime, conflict, onStart, onStop, onRestart, onOpenBrowser, onRevealPath, onOpenLogs, onEdit, onDelete, onRunCommand }: ProjectCardProps) {
+  const hasLogs = useHasProjectLogs(project.id);
   const [copiedPath, setCopiedPath] = useState(false);
   const git = useGitInfo(project.id, project.path);
   const isRunning = status === 'running';
@@ -145,7 +146,7 @@ export function ProjectCard({ project, status, runtime, logs, conflict, onStart,
             <Button size="sm" variant="outline" disabled={isStarting} onClick={() => onRestart(project.id)} data-project-action="restart"><RefreshCw data-icon="inline-start" />重启</Button>
           </>}
           {isRunning && !isApp && project.port && <Button size="sm" variant="outline" onClick={() => onOpenBrowser(project.port!)} data-project-action="open"><ExternalLink data-icon="inline-start" />打开网页</Button>}
-          <Button size="sm" variant="outline" onClick={onOpenLogs} className="ml-auto" data-open-logs><Terminal data-icon="inline-start" />终端日志{logs.length > 0 && <span className="size-1.5 rounded-full bg-success" />}</Button>
+          <Button size="sm" variant="outline" onClick={onOpenLogs} className="ml-auto" data-open-logs><Terminal data-icon="inline-start" />终端日志{hasLogs && <span className="size-1.5 rounded-full bg-success" />}</Button>
         </CardFooter>
       </Card>
     </div>

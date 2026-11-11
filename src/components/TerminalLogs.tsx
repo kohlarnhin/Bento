@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { Trash2, Copy, Check, ArrowDown, Terminal } from 'lucide-react';
 import { toast } from 'sonner';
-import type { LogEntry, ProjectConfig } from '../types';
+import type { ProjectConfig } from '../types';
 import { TERMINAL_THEME } from '../lib/terminalAppearance';
+import { useProjectLogLines } from '../lib/useProjectLogs';
 import Button from './ui/button';
 import { Badge } from './ui/badge';
 import { ActionTooltip } from './ui/tooltip';
@@ -10,7 +11,6 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 
 interface TerminalLogsModalProps {
   project: ProjectConfig;
-  logs: LogEntry[];
   onClose: () => void;
   onClear: () => void;
 }
@@ -19,7 +19,8 @@ function cleanAnsi(text: string): string {
   return text.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
 }
 
-export function TerminalLogsModal({ project, logs, onClose, onClear }: TerminalLogsModalProps) {
+export function TerminalLogsModal({ project, onClose, onClear }: TerminalLogsModalProps) {
+  const logs = useProjectLogLines(project.id);
   const containerRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const [copied, setCopied] = useState(false);
