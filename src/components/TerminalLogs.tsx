@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import { Trash2, Copy, Check, ArrowDown, Terminal } from 'lucide-react';
 import { toast } from 'sonner';
 import type { ProjectConfig } from '../types';
 import { TERMINAL_THEME } from '../lib/terminalAppearance';
+import { cleanTerminalText } from '../lib/dashboard';
 import { useProjectLogLines } from '../lib/useProjectLogs';
 import Button from './ui/button';
 import { Badge } from './ui/badge';
@@ -13,24 +14,32 @@ interface TerminalLogsModalProps {
   project: ProjectConfig;
   onClose: () => void;
   onClear: () => void;
+  focusEntry?: string;
 }
 
-function cleanAnsi(text: string): string {
-  return text.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
-}
-
-export function TerminalLogsModal({ project, onClose, onClear }: TerminalLogsModalProps) {
+export function TerminalLogsModal({ project, onClose, onClear, focusEntry }: TerminalLogsModalProps) {
   const logs = useProjectLogLines(project.id);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [autoScroll, setAutoScroll] = useState(true);
+  const [autoScroll, setAutoScroll] = useState(!focusEntry);
   const [copied, setCopied] = useState(false);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (autoScroll && containerRef.current) containerRef.current.scrollTop = containerRef.current.scrollHeight;
   }, [logs, autoScroll]);
+  useLayoutEffect(() => {
+    if (!focusEntry) return;
+    const frame = requestAnimationFrame(() => {
+      const container = containerRef.current;
+      const row = container?.querySelector<HTMLElement>('[data-focused-log]');
+      if (!container || !row) return;
+      container.scrollTop += row.getBoundingClientRect().top - container.getBoundingClientRect().top - container.clientHeight / 2;
+      row.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [focusEntry]);
 
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(logs.map((log) => `[${log.stream}] ${cleanAnsi(log.text)}`).join('\n'));
+      await navigator.clipboard.writeText(logs.map((log) => `[${log.stream}] ${cleanTerminalText(log.text)}`).join('\n'));
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
       toast.success('日志已复制');
@@ -60,8 +69,9 @@ export function TerminalLogsModal({ project, onClose, onClear }: TerminalLogsMod
           setAutoScroll(scrollHeight - scrollTop - clientHeight < 40);
         }} className="min-h-0 flex-1 overflow-y-auto bg-terminal p-5 font-mono text-xs leading-relaxed text-terminal-foreground select-text">
           {logs.length === 0 ? <div className="flex h-full flex-col items-center justify-center gap-3 text-terminal-muted select-none"><Terminal className="size-7" /><span>暂无启动日志</span></div> : logs.map((log) => (
-            <div key={log.id} className="break-all" style={{ color: log.stream === 'stderr' ? TERMINAL_THEME.red : log.stream === 'system' ? TERMINAL_THEME.blue : undefined }}>
-              <span className="mr-3 text-terminal-muted select-none">{new Date(log.timestamp).toLocaleTimeString()}</span>{cleanAnsi(log.text)}
+            <div key={log.id} data-focused-log={log.id === focusEntry || undefined} tabIndex={log.id === focusEntry ? -1 : undefined}
+              className="break-all data-[focused-log=true]:bg-destructive/20" style={{ color: log.stream === 'stderr' ? TERMINAL_THEME.red : log.stream === 'system' ? TERMINAL_THEME.blue : undefined }}>
+              <span className="mr-3 text-terminal-muted select-none">{new Date(log.timestamp).toLocaleTimeString()}</span>{cleanTerminalText(log.text)}
             </div>
           ))}
         </div>

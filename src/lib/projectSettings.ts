@@ -1,6 +1,6 @@
 import type { EnvVar, ExtraCommand } from '../types';
 
-const reserved = new Set(['TERM', 'COLORTERM', 'SHELL', 'HOME', 'USER', 'PWD']);
+const reserved = new Set(['TERM', 'COLORTERM', 'SHELL', 'HOME', 'USER', 'PWD', '__BENTO_MANAGED_RUN']);
 export interface AdvancedErrors {
   env: { key?: string }[];
   commands: { name?: string; command?: string }[];

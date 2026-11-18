@@ -34,7 +34,9 @@ export function ExternalProcessDialog({ project, owners, restart, onClose, onCom
       }}>
         <DialogHeader>
           <DialogTitle>结束外部进程？</DialogTitle>
-          <DialogDescription>端口 :{project.port} 由不是 Bento 启动的进程占用。</DialogDescription>
+          <DialogDescription>{project.services?.length
+            ? '下列进程正在监听该项目的服务端口，由 Bento 之外的程序启动。'
+            : <>端口 :{project.port} 由外部进程占用。</>}</DialogDescription>
         </DialogHeader>
         <div className="min-h-0 space-y-3 overflow-y-auto">
           {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}

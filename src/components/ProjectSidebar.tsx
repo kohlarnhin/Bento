@@ -5,6 +5,7 @@ import { Archive, ArchiveRestore, ArrowDownToLine, ChevronRight, FolderOpen, Fol
 import { toast } from 'sonner';
 import type { PortConflict, ProjectConfig, ProjectGroup, ProjectSelection, ProjectStatus } from '../types';
 import { groupColor, matchesSidebarFilter, moveProjectOrder, sidebarDensity, sidebarSections, type SidebarFilter, type SidebarSection } from '../lib/sidebarModel';
+import { projectPorts } from '../lib/projectServices';
 import { closeTerminal, getProjectTerminalSlots, getTerminalSnapshot, restartTerminal, subscribeTerminals, terminalKey, type TerminalStatus } from '../lib/terminalRegistry';
 import { cn } from '../lib/utils';
 import { recordRender } from '../lib/renderMetrics';
@@ -12,6 +13,7 @@ import logo from '../assets/logo.svg';
 import Button from './ui/button';
 import { ActionTooltip } from './ui/tooltip';
 import { ScrollArea } from './ui/scroll-area';
+import { SegmentedControl } from './ui/segmented-control';
 import { Input } from './ui/input';
 import { ProjectAvatar } from './ProjectAvatar';
 import { SidebarMenu, type SidebarMenuItem } from './SidebarMenu';
@@ -189,8 +191,8 @@ function NewTerminalButton({ projectId, atLimit, maxPerProject, onCreate }: {
 
 function TerminalStatusDot({ projectId, slot, status }: { projectId: string; slot: number; status?: TerminalStatus }) {
   if (!status?.attention && !status?.alive) return null;
-  const label = status.attention ? '终端有新动静' : '终端运行中';
-  return <span className={cn('ml-auto size-1.5 shrink-0 rounded-full', status.attention ? 'bg-attention' : 'bg-success')}
+  const label = status.attention ? '终端有新动静' : '终端会话已打开';
+  return <span className={cn('ml-auto size-1.5 shrink-0 rounded-full', status.attention ? 'bg-attention' : 'bg-[var(--sidebar-port)]')}
     aria-label={label} title={label} data-terminal-attention={status.attention ? projectId : undefined} data-sidebar-terminal-slot={slot} />;
 }
 
@@ -200,6 +202,14 @@ function TerminalRowLabel({ slot, title }: { slot: number; title?: string }) {
     {title && <span className="min-w-0 truncate text-label font-normal text-muted-foreground">
       <span aria-hidden="true">· </span><span data-terminal-title>{title}</span>
     </span>}
+  </span>;
+}
+
+function SidebarPort({ project, hideOnHover }: { project: ProjectConfig; hideOnHover?: boolean }) {
+  const extra = projectPorts(project).filter(port => port !== project.port).length;
+  if (project.port == null && !extra) return null;
+  return <span className={cn('sidebar-number sidebar-port', hideOnHover && 'group-hover/project:opacity-0 group-focus-within/project:opacity-0')}>
+    {project.port ?? '—'}{extra > 0 && <small title={`另有 ${extra} 个服务端口`}>+{extra}</small>}
   </span>;
 }
 
@@ -218,6 +228,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
   const rows = useRef(new Map<string, HTMLDivElement>());
   const buckets = useRef(new Map<string, HTMLDivElement>());
   const scrollArea = useRef<HTMLDivElement>(null);
+  const runningSection = useRef<HTMLElement>(null);
   const indicator = useRef<HTMLDivElement>(null);
   const drag = useRef<ProjectDrag | null>(null);
   const suppressClick = useRef(false);
@@ -230,8 +241,12 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
   const sections = useMemo(() => sidebarSections(projects, projectGroups), [projects, projectGroups]);
   const density = sidebarDensity(projects);
   const orderedGroups = [...projectGroups].sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
-  const running = projects.filter(project => statuses[project.id] === 'running').length;
-  const runningProjects = projects.filter(project => !project.archived && !project.pinned && ['running', 'starting'].includes(statuses[project.id]));
+  const runningProjects = projects.filter(project => matchesSidebarFilter(project, 'running', statuses, attentionProjects, changedProjects));
+  const running = runningProjects.length;
+  const runningIds = new Set(runningProjects.map(project => project.id));
+  const ungrouped = sections.find(section => section.id === 'ungrouped')?.projects ?? [];
+  const runningUngrouped = !filtering && !runningCollapsed ? ungrouped.filter(project => runningIds.has(project.id)) : [];
+  const runningUngroupedIds = new Set(runningUngrouped.map(project => project.id));
   const versionLabel = currentVersion ? `v${currentVersion}` : '检查更新';
   const updateLabel = availableVersion ? `更新到 v${availableVersion}` : '检查更新';
   useEffect(() => {
@@ -288,22 +303,32 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
       top = before?.rect.top ?? remaining.at(-1)?.rect.bottom ?? area.top;
     } else {
       const project = projects.find(project => project.id === current.id)!;
+      const summary = runningSection.current;
+      const summaryBounds = summary?.getBoundingClientRect();
+      const inSummary = !!summaryBounds && current.y >= summaryBounds.top && current.y <= summaryBounds.bottom;
+      if (inSummary && !runningUngroupedIds.has(current.id)) {
+        current.valid = false;
+        line.style.visibility = 'hidden';
+        return;
+      }
       const available = sections.filter(section => project.archived ? section.id === 'archived' : section.id !== 'archived' && (section.id !== 'pinned' || project.pinned)).flatMap(section => {
         const element = buckets.current.get(section.id);
         return element ? [{ section, element, rect: element.getBoundingClientRect() }] : [];
       });
       const target = available.find(item => current.y >= item.rect.top && current.y <= item.rect.bottom)
         ?? available.find(item => current.y < item.rect.top) ?? available.at(-1);
-      if (!target) { current.valid = false; line.style.visibility = 'hidden'; return; }
-      current.targetGroupId = target.section.group?.id ?? (target.section.id === 'ungrouped' ? null : project.groupId);
-      const remaining = target.section.projects.filter(project => project.id !== current.id).flatMap(project => {
+      const container = inSummary ? summary : target?.element;
+      if (!container) { current.valid = false; line.style.visibility = 'hidden'; return; }
+      const peers = inSummary ? runningUngrouped : target!.section.projects;
+      current.targetGroupId = inSummary || target!.section.id === 'ungrouped' ? null : target!.section.group?.id ?? project.groupId;
+      const remaining = peers.filter(project => project.id !== current.id).flatMap(project => {
         const element = rows.current.get(project.id);
-        return element ? [{ id: project.id, rect: element.getBoundingClientRect() }] : [];
+        return element && container.contains(element) ? [{ id: project.id, rect: element.getBoundingClientRect() }] : [];
       });
       const before = remaining.find(item => current.y < item.rect.top + item.rect.height / 2);
       current.beforeId = before?.id ?? null;
       current.afterId = remaining.at(-1)?.id ?? null;
-      top = before?.rect.top ?? remaining.at(-1)?.rect.bottom ?? target.element.querySelector('[data-group-heading]')?.getBoundingClientRect().bottom ?? target.rect.bottom;
+      top = before?.rect.top ?? remaining.at(-1)?.rect.bottom ?? container.querySelector('.sidebar-group-heading')?.getBoundingClientRect().bottom ?? container.getBoundingClientRect().bottom;
     }
     line.style.top = `${Math.max(area.top, Math.min(area.bottom - 2, top))}px`;
     line.style.left = `${area.left + 8}px`;
@@ -406,7 +431,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
     { label: '删除分组', icon: <Trash2 />, destructive: true, onSelect: () => onGroupAction('delete', group) },
   ] });
 
-  const renderProject = (project: ProjectConfig, peers: ProjectConfig[]) => {
+  const renderProject = (project: ProjectConfig, peers: ProjectConfig[], inRunning = false) => {
     const selectedView = selection?.projectId === project.id ? selection.view : null;
     const selected = selectedView !== null;
     const slots = getProjectTerminalSlots(project.id, terminals);
@@ -415,7 +440,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
     const name = project.displayName || project.name;
     const shortcutIndex = visibleProjects.filter(project => !project.archived).findIndex(item => item.id === project.id);
     return <div key={project.id} ref={node => { if (node) rows.current.set(project.id, node); else rows.current.delete(project.id); }}
-      data-project-id={project.id} data-project-dragging={draggingId === project.id || undefined} className={cn(draggingId === project.id && 'opacity-40')}>
+      data-project-id={project.id} data-project-dragging={draggingId === project.id || undefined} className={cn('flex flex-col', draggingId === project.id && 'opacity-40')}>
       <div className="sidebar-project-item sidebar-project-surface group/project relative flex items-center"
         data-selected={selected || undefined} data-highlighted={searchFocused && highlighted === project.id || undefined}
         onContextMenu={event => { event.preventDefault(); projectMenu(project, event.clientX, event.clientY); }}>
@@ -441,13 +466,13 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
             selectOverview(project.id);
           }}
           title={`${name}${shortcutIndex >= 0 && shortcutIndex < 9 ? ` · ⌘${shortcutIndex + 1}` : ''}\n${filtering ? '清除搜索和筛选后可拖动排序' : '拖动排序 · ⌥↑ / ⌥↓'}`}
-          data-project-row={project.id} aria-current={selected ? 'page' : undefined} data-search-highlighted={searchFocused && highlighted === project.id || undefined} data-reorder-draggable={canReorder || undefined}>
+          data-project-row={project.id} data-running-project={inRunning ? project.id : undefined} aria-current={selected ? 'page' : undefined} data-search-highlighted={searchFocused && highlighted === project.id || undefined} data-reorder-draggable={canReorder || undefined}>
           <ProjectAvatar project={project} status={status} conflict={conflict} />
           <span className="min-w-0 flex-1 truncate">{name}</span>
           {attentionProjects.has(project.id) && <span className="size-1.5 shrink-0 rounded-full bg-attention" aria-label="终端有新动静" title="终端有新动静" data-terminal-attention={project.id} />}
-          {project.port != null && <span className="sidebar-number sidebar-port group-hover/project:opacity-0 group-focus-within/project:opacity-0">{project.port}</span>}
+          <SidebarPort project={project} hideOnHover />
         </button>
-        <div className="pointer-events-none absolute right-1 flex shrink-0 items-center rounded-control bg-sidebar opacity-0 group-data-[selected=true]/project:bg-background group-hover/project:pointer-events-auto group-hover/project:opacity-100 group-focus-within/project:pointer-events-auto group-focus-within/project:opacity-100">
+        <div className="pointer-events-none absolute right-1 flex shrink-0 items-center rounded-control opacity-0 group-hover/project:pointer-events-auto group-hover/project:opacity-100 group-focus-within/project:pointer-events-auto group-focus-within/project:opacity-100">
           <NewTerminalButton projectId={project.id} atLimit={slots.length >= maxPerProject} maxPerProject={maxPerProject} onCreate={() => onCreateTerminal(project.id)} />
           <Button size="icon-sm" variant="ghost" className="size-6 opacity-0 group-hover/project:opacity-100 group-focus-within/project:opacity-100" aria-label={`${name} 的更多操作`}
             onClick={event => { const rect = event.currentTarget.getBoundingClientRect(); projectMenu(project, rect.left, rect.bottom); }}><MoreHorizontal className="size-3.5" /></Button>
@@ -455,22 +480,25 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
       </div>
       {selected && (
         <div className="sidebar-subitems flex flex-col">
-          <button data-project-view="overview" data-project-target={project.id} aria-current={selectedView === 'overview' ? 'page' : undefined}
+          <button data-project-view="overview" data-project-target={project.id} aria-current={selectedView === 'overview' ? 'page' : undefined} data-current={selectedView === 'overview' || undefined}
             onClick={() => onSelect({ projectId: project.id, view: 'overview' })}
-            className="sidebar-subrow sidebar-project-surface flex min-w-0 items-center gap-[9px] px-2 text-left text-[color:var(--sidebar-muted)] outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/50 aria-[current=page]:font-semibold aria-[current=page]:text-[#18181b]">
+            className="sidebar-subrow sidebar-subitem sidebar-project-surface flex min-w-0 items-center gap-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/50">
             <LayoutDashboard className="size-[13px] shrink-0 stroke-[1.8]" /><span className="truncate">概览</span>
           </button>
           {slots.map(slot => {
             const active = selectedView === 'terminal' && (activeSlots[project.id] ?? 1) === slot;
             const terminal = terminals[terminalKey(project.id, slot)];
-            return <div key={slot} className={cn('sidebar-project-surface group/terminal flex min-w-0 items-center rounded-control pr-1', active && 'bg-[var(--sidebar-hover)] text-foreground')}>
+            return <div key={slot} data-current={active || undefined} className="sidebar-subitem sidebar-project-surface group/terminal relative flex min-w-0 items-center">
               <button data-project-view="terminal" data-project-target={project.id} data-project-terminal-slot={slot} aria-current={active ? 'page' : undefined}
                 title={terminal?.title ? `终端 ${slot} · ${terminal.title}` : undefined} onClick={() => onSelectTerminal(project.id, slot)}
-                className={cn('sidebar-subrow flex min-w-0 flex-1 items-center gap-[9px] rounded-control px-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/50', active ? 'font-semibold' : 'text-[color:var(--sidebar-muted)]')}>
-                <Terminal className="size-[13px] shrink-0 stroke-[1.8]" /><TerminalRowLabel slot={slot} title={terminal?.title} /><TerminalStatusDot projectId={project.id} slot={slot} status={terminal} />
+                className={cn('sidebar-subrow flex min-w-0 flex-1 items-center gap-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/50', active && (slot === 1 ? 'pr-8' : 'pr-14'))}>
+                <Terminal className="size-[13px] shrink-0 stroke-[1.8]" /><TerminalRowLabel slot={slot} title={terminal?.title} />
+                <span className="ml-auto flex shrink-0 group-hover/terminal:opacity-0 group-focus-within/terminal:opacity-0"><TerminalStatusDot projectId={project.id} slot={slot} status={terminal} /></span>
               </button>
-              <RestartTerminalButton projectId={project.id} slot={slot} status={terminal} active={active} onSelect={onSelectTerminal} />
-              {slot > 1 ? <CloseTerminalButton projectId={project.id} slot={slot} status={terminal} active={active} /> : <span aria-hidden="true" className="w-7 shrink-0" />}
+              <div className={cn('absolute right-1 flex items-center rounded-control bg-[var(--sidebar-background)]', !active && 'invisible group-hover/terminal:visible group-focus-within/terminal:visible')}>
+                <RestartTerminalButton projectId={project.id} slot={slot} status={terminal} active={active} onSelect={onSelectTerminal} />
+                {slot > 1 && <CloseTerminalButton projectId={project.id} slot={slot} status={terminal} active={active} />}
+              </div>
             </div>;
           })}
         </div>
@@ -479,12 +507,12 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
   };
 
   const renderSection = (section: SidebarSection) => {
-    const visible = section.projects.filter(project => visibleIds.has(project.id));
+    const visible = section.projects.filter(project => visibleIds.has(project.id) && !runningUngroupedIds.has(project.id));
     if (filtering && !visible.length) return null;
-    if (section.id === 'ungrouped' && !projectGroups.length && !section.projects.length && projects.length) return null;
+    if (section.id === 'ungrouped' && !projectGroups.length && !visible.length && projects.length) return null;
     const open = filtering ? !temporaryCollapsed.has(section.id) : section.id === 'archived' ? !archivedCollapsed : !section.group?.collapsed;
-    const members = section.group ? projects.filter(project => !project.archived && project.groupId === section.group!.id) : section.projects;
-    const runningCount = members.filter(project => statuses[project.id] === 'running').length;
+    const members = section.group ? projects.filter(project => !project.archived && project.groupId === section.group!.id) : section.projects.filter(project => !runningUngroupedIds.has(project.id));
+    const runningCount = members.filter(project => runningIds.has(project.id)).length;
     const collapsible = !!section.group || section.id === 'archived';
     return <div key={section.id} ref={node => { if (node) buckets.current.set(section.id, node); else buckets.current.delete(section.id); }}
       data-sidebar-bucket={section.id} className={cn('min-w-0', draggingId === section.id && 'opacity-40')}>
@@ -526,23 +554,24 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
       </div>}
     </div>;
   };
-  const renderRunning = () => !filtering && runningProjects.length > 0 && <section aria-labelledby="sidebar-running-heading" data-running-section>
+  const renderRunning = () => !filtering && runningProjects.length > 0 && <section ref={runningSection} aria-labelledby="sidebar-running-heading" data-running-section>
     <button className="sidebar-group-heading flex w-full items-center gap-[7px] text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
       aria-label={runningCollapsed ? '展开运行中项目' : '收起运行中项目'} aria-expanded={!runningCollapsed} aria-controls="sidebar-running-projects" data-running-toggle onClick={() => setRunningCollapsed(previous => !previous)}>
       <GroupHeadingMarker color="#10b981" expanded={!runningCollapsed} /><span id="sidebar-running-heading">运行中</span>
-      <span className="sidebar-number ml-auto font-medium" data-running-count>{runningProjects.length}</span>
+      <span className="sidebar-number ml-auto font-medium" data-running-count>{running}</span>
     </button>
     {!runningCollapsed && <ScrollArea className="[&>[data-radix-scroll-area-viewport]]:max-h-[28vh]">
       <nav id="sidebar-running-projects" aria-label="运行中的项目" className="sidebar-project-list">
         {runningProjects.map(project => {
+          if (runningUngroupedIds.has(project.id)) return renderProject(project, runningUngrouped, true);
           const selected = selection?.projectId === project.id;
-          return <button key={project.id} data-running-project={project.id} aria-current={selected && selection.view === 'overview' ? 'page' : undefined}
+          return <button key={project.id} data-running-project={project.id} data-selected={selected || undefined} aria-current={selected && selection.view === 'overview' ? 'page' : undefined}
             className="sidebar-project-item sidebar-project-row sidebar-project-surface flex w-full shrink-0 items-center gap-2.5 px-2.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
             onClick={() => selectOverview(project.id)} onContextMenu={event => { event.preventDefault(); projectMenu(project, event.clientX, event.clientY); }}>
             <ProjectAvatar project={project} status={statuses[project.id]} />
             <span className="min-w-0 flex-1 truncate">{project.displayName || project.name}</span>
             {attentionProjects.has(project.id) && <span className="size-1.5 shrink-0 rounded-full bg-attention" aria-label="终端有新动静" />}
-            {project.port != null && <span className="sidebar-number sidebar-port">{project.port}</span>}
+            <SidebarPort project={project} />
           </button>;
         })}
       </nav>
@@ -556,7 +585,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
     <header data-tauri-drag-region className="flex shrink-0 items-center gap-2.5 px-4 pb-3.5">
       <img src={logo} alt="" className="pointer-events-none size-8 shrink-0" />
       <div className="pointer-events-none min-w-0 flex-1"><h1 className="text-brand font-heading leading-[21px] tracking-title text-foreground">Bento</h1>
-        <p className="mt-px truncate text-meta leading-4 text-muted-foreground">{projects.length} 个项目 · <span className="font-semibold text-[#059669]">{running} 运行中</span></p></div>
+        <p className="mt-px truncate text-meta leading-4 text-muted-foreground">{projects.length} 个项目 · <span className="font-semibold text-success" data-running-header>{running} 运行中</span></p></div>
       <div className="no-drag flex shrink-0 items-center gap-2.5">
         <ActionTooltip label="刷新项目状态" side="bottom"><Button variant="ghost" size="icon-sm" aria-label="刷新项目状态" onClick={onRefresh} disabled={loading}><RefreshCw className={cn(loading && 'animate-spin')} /></Button></ActionTooltip>
         <ActionTooltip label="添加项目 ⌘N" side="bottom" align="end"><Button size="sm" className="h-[31px] gap-1 rounded-[8px] px-3 font-semibold shadow-none hover:ring-[3px] hover:ring-primary/15" aria-label="添加项目" aria-keyshortcuts="Meta+n" onClick={onCreate} data-create-project><Plus data-icon="inline-start" />添加</Button></ActionTooltip>
@@ -580,15 +609,13 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
       {searchQuery ? <Button variant="ghost" size="icon-sm" className="absolute right-1 top-1/2 -translate-y-1/2" aria-label="清除搜索" onClick={() => { onSearchChange(''); setHighlightedId(null); searchInputRef.current?.focus(); }}><X className="size-3.5" /></Button>
         : <button aria-label="快速切换项目 (⌘P)" aria-keyshortcuts="Meta+p" title="快速切换项目 (⌘P)" className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded border border-black/[.08] px-[5px] py-px text-keycap leading-[15px] text-muted-foreground hover:bg-[var(--sidebar-hover)]" onClick={onQuickSwitch}>⌘P</button>}
     </div>
-    {projects.length > 0 && <div role="group" aria-label="项目状态筛选" className="mx-3 mb-1 mt-2.5 flex shrink-0 rounded-md bg-[var(--sidebar-segment)] p-0.5">
-      {([{ id: 'all', label: '全部' }, { id: 'running', label: '运行中' }, { id: 'attention', label: '提醒' }, { id: 'changes', label: '改动' }] as const).map(item => {
-        const count = item.id === 'all' ? null : projects.filter(project => matchesSidebarFilter(project, item.id, statuses, attentionProjects, changedProjects)).length;
-        return <button key={item.id} aria-pressed={filter === item.id} data-sidebar-filter={item.id} onClick={() => onFilterChange(item.id)}
-          className="sidebar-filter flex min-w-0 flex-1 items-center justify-center gap-[3px] rounded-[6px] px-0.5 py-[5px] text-xs leading-[17px] text-[color:var(--sidebar-muted)] outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50">
-          {item.label}{count != null && <span className="sidebar-filter-count tabular-nums">{count}</span>}
-        </button>;
-      })}
-    </div>}
+    {projects.length > 0 && <SegmentedControl label="项目状态筛选" className="mx-3 mb-1 mt-2.5 shrink-0" value={filter} onChange={onFilterChange}
+      options={([{ id: 'all', label: '全部', count: null }, { id: 'running', label: '运行中', count: running },
+        { id: 'attention', label: '提醒', count: projects.filter(project => attentionProjects.has(project.id)).length },
+        { id: 'changes', label: '改动', count: projects.filter(project => changedProjects.has(project.id)).length }] as const).map(item => ({
+          value: item.id, attributes: { 'data-sidebar-filter': item.id },
+          label: <>{item.label}{item.count != null && <span className="sidebar-filter-count tabular-nums">{item.count}</span>}</>,
+        }))} />}
     <ScrollArea ref={scrollArea} className="min-h-0 flex-1 px-3 pb-2">
       <nav id="project-list" aria-label="项目列表" className="flex min-h-full flex-col">
         {projectsLoaded && !loading && projects.length === 0 ? <div className="mx-2 mt-6 rounded-lg border border-dashed border-muted-foreground/35 px-3 py-5 text-center" data-sidebar-empty>
@@ -607,9 +634,9 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
     </ScrollArea>
     <footer className="sidebar-footer mx-3 flex shrink-0 items-center gap-2 px-1.5 pb-3 pt-2.5 text-meta text-muted-foreground" data-update-footer data-managed-footer={managedCount > 0 || undefined}>
       <div className="flex min-w-0 items-center gap-1">
-        {managedCount > 0 && <>
+        {running > 0 && <>
           <span aria-hidden="true" className="mr-0.5 size-1.5 shrink-0 rounded-full bg-[#10b981]" />
-          <span className="whitespace-nowrap">{managedCount} 运行中</span>
+          <span className="whitespace-nowrap" data-running-footer>{running} 运行中</span>
           <span aria-hidden="true">·</span>
         </>}
         <ActionTooltip label={updateLabel} side="right">
@@ -620,7 +647,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
         </ActionTooltip>
       </div>
       <div className="ml-auto flex shrink-0 items-center gap-1.5">
-        {managedCount > 0 && <Button variant="outline" size="sm" className="h-6 border-0 bg-white/70 px-[9px] text-meta font-normal text-[#3a3a3c] shadow-[0_0_0_.5px_rgba(0,0,0,.12)]" onClick={onStopAll} data-stop-all>全部停止</Button>}
+        {managedCount > 0 && <Button variant="outline" size="sm" className="h-6 border-0 bg-background/70 px-[9px] text-meta font-normal text-foreground shadow-[0_0_0_.5px_rgba(0,0,0,.12)]" onClick={onStopAll} data-stop-all>全部停止</Button>}
         <ActionTooltip label="设置" side="right">
           <Button variant="ghost" size="icon-sm" className="size-6 hover:bg-[var(--sidebar-hover)]" aria-label="设置" onClick={onOpenSettings} data-open-settings><Settings /></Button>
         </ActionTooltip>

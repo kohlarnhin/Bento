@@ -719,7 +719,7 @@ fn size(cols: u16, rows: u16) -> PtySize {
     }
 }
 
-fn configure_environment(command: &mut CommandBuilder) {
+pub(crate) fn configure_environment(command: &mut CommandBuilder) {
     let keys: Vec<_> = command
         .iter_full_env_as_str()
         .map(|(key, _)| key.to_string())

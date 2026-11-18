@@ -2,6 +2,22 @@ export interface EnvVar { key: string; value: string }
 export interface ExtraCommand { name: string; command: string }
 export interface ProjectGroup { id: string; name: string; sortOrder: number; collapsed: boolean }
 
+export interface Service {
+  id: string;
+  name: string;
+  dir: string;
+  port: number | null;
+  key: string;
+  kind?: string;
+  openWeb: boolean;
+}
+
+export interface ScannedService extends Service { portCandidate: PortCandidate | null }
+export interface StartScript { command: string; source: string }
+export interface ServicePortCheck { serviceId: string; variable: string; references: string[] }
+export interface PortStandardCheck { checkedFiles: string[]; services: ServicePortCheck[] }
+export interface StandardScript { relativePath: string; script: string; preserved: string[]; notes: string[] }
+
 export interface ProjectConfig {
   id: string;
   name: string;
@@ -9,6 +25,8 @@ export interface ProjectConfig {
   description?: string;
   path: string;
   port?: number | null;
+  services: Service[];
+  injectPorts: boolean;
   startCommand: string;
   type?: 'web' | 'app' | string;
   env: EnvVar[];
@@ -25,6 +43,8 @@ export interface ProjectDraft {
   description?: string;
   path: string;
   port?: number | null;
+  services: Service[];
+  injectPorts: boolean;
   startCommand: string;
   type: 'web' | 'app';
   env: EnvVar[];
@@ -45,6 +65,9 @@ export interface ProjectDirInspection {
   portSource: string | null;
   portCandidates: PortCandidate[];
   existingProject: { id: string; name: string } | null;
+  services: ScannedService[];
+  startScripts: StartScript[];
+  standard?: PortStandardCheck | null;
 }
 
 export interface PortCandidate {
@@ -91,7 +114,16 @@ export interface ProjectRuntimeStatus {
   pid?: number | null;
   exitCode?: number | null;
   exitSignal?: number | null;
+  startedAt?: number | null;
   revision: number;
+  services: ServiceRuntimeStatus[];
+}
+
+export interface ServiceRuntimeStatus {
+  serviceId: string;
+  port: number | null;
+  listening: boolean;
+  owner?: { pid: number | null; inProject: boolean } | null;
 }
 
 export interface PortOwner {
@@ -150,4 +182,48 @@ export interface GitInfo {
   ahead: number;
   behind: number;
   changes: number;
+}
+
+export interface DashboardGit extends GitInfo {
+  files: { path: string; status: string; added: number | null; removed: number | null }[];
+  latest: { subject: string; timestamp: number } | null;
+}
+
+export interface DashboardCpuPoint { at: number; value: number }
+export interface DashboardUsage { cpu: number; rssKib: number; process: string | null }
+export interface DashboardHealth { port: number; path: string; code: number | null; elapsedMs: number }
+export type DashboardListener = 'idle' | 'listening' | 'occupied';
+export interface DashboardServiceSample {
+  id: string;
+  port: number | null;
+  state: DashboardListener;
+  usage: DashboardUsage | null;
+}
+export interface DashboardConflict {
+  serviceId: string;
+  port: number;
+  owner: PortOwner | null;
+  identity: string | null;
+  suggestion: number | null;
+}
+export interface DashboardRun {
+  startedAt: number;
+  endedAt: number;
+  exitCode: number | null;
+  signal: number | null;
+  peakKib: number | null;
+  errors: number;
+  external: boolean;
+  services: Record<string, { port: number | null; process: string | null; health: DashboardHealth | null }>;
+  releasedPorts: number[];
+}
+export interface DashboardSnapshot {
+  sampledAt: number;
+  startedAt: number | null;
+  external: boolean;
+  services: DashboardServiceSample[];
+  total: DashboardUsage | null;
+  history: Record<string, DashboardCpuPoint[]>;
+  conflicts: DashboardConflict[];
+  lastRun: DashboardRun | null;
 }

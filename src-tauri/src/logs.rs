@@ -19,6 +19,37 @@ pub struct Batch {
     pub entries: Vec<Entry>,
 }
 
+pub fn is_error(line: &str) -> bool {
+    let mut clean = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            clean.push(ch);
+        } else if chars.next_if_eq(&'[').is_some() {
+            for byte in chars.by_ref() {
+                if ('@'..='~').contains(&byte) { break; }
+            }
+        } else if chars.next_if_eq(&']').is_some() {
+            while let Some(byte) = chars.next() {
+                if byte == '\u{7}' || (byte == '\u{1b}' && chars.next_if_eq(&'\\').is_some()) { break; }
+            }
+        }
+    }
+    let words = clean.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_');
+    if words.clone().any(|word| {
+        let word = word.to_ascii_lowercase();
+        matches!(word.as_str(), "traceback" | "failed") || word.ends_with("error") || word.ends_with("exception")
+    }) {
+        return true;
+    }
+    let http = words.clone().any(|word| matches!(word.to_ascii_uppercase().as_str(),
+        "HTTP" | "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS" | "STATUS"));
+    http && clean.split_whitespace().any(|part| {
+        let code = part.trim_matches(|ch| matches!(ch, '"' | '\'' | '(' | ')' | ',' | ':' | ']'));
+        code.len() == 3 && code.parse::<u16>().is_ok_and(|code| (500..600).contains(&code))
+    })
+}
+
 fn flush(batch: &mut Vec<Entry>, emit: &mut impl FnMut(Vec<Entry>)) {
     if !batch.is_empty() {
         emit(std::mem::take(batch));
@@ -78,6 +109,16 @@ mod tests {
         Entry {
             text: number.to_string(),
             stream: if number % 2 == 0 { "stdout" } else { "stderr" }.into(),
+        }
+    }
+
+    #[test]
+    fn identifies_colored_errors_and_server_responses_once() {
+        for line in ["\x1b[31mERROR\x1b[0m", "OperationalError: deadlock", "Traceback (most recent call last)", "request failed", "[API] GET /orders 503 · 10ms"] {
+            assert!(is_error(line), "{line}");
+        }
+        for line in ["port 5000", "finished in 503 ms", "[WEB] GET /500 200", "[APP] WARNING changed"] {
+            assert!(!is_error(line), "{line}");
         }
     }
 

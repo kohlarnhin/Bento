@@ -82,6 +82,24 @@ test('CLI validates the port range and permits multiple apps without ports', (t)
   assert.match(result.stderr, /1–65535/);
 });
 
+test('CLI port checks include secondary services and port updates follow the default service', (t) => {
+  const { run, add, database } = fixture(t);
+  assert.equal(add('one', 5173).status, 0);
+  const seed = spawnSync('python3', ['-c', `
+import json, sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as conn:
+    rows = [{'id': 'web', 'port': 5173, 'openWeb': True}, {'id': 'api', 'port': 8000, 'openWeb': False}]
+    conn.execute("UPDATE projects SET services=? WHERE id='one'", (json.dumps(rows),))
+`, database], { encoding: 'utf8' });
+  assert.equal(seed.status, 0, seed.stderr);
+  assert.equal(run('check-port', '8000').status, 1);
+  assert.match(add('two', 8000).stderr, /项目one/);
+  assert.match(run('update', '--id', 'one', '--port', '8000').stderr, /服务端口必须唯一/);
+  assert.equal(run('update', '--id', 'one', '--port', '5174').status, 0);
+  assert.equal(run('check-port', '5173').status, 0);
+  assert.equal(run('check-port', '5174').status, 1);
+});
+
 test('CLI group add/list/update creates or reuses names and omitted options preserve sidebar metadata', (t) => {
   const { run, database } = fixture(t);
   const add = (id, group) => run('add', '--id', id, '--name', id, '--path', '/tmp', '--command', 'sleep 1', '--type', 'app', '--group', group);

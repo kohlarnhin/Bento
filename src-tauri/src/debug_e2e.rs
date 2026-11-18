@@ -160,13 +160,23 @@ pub fn record_command(command: &str) {
         && matches!(
             command,
             "get_projects"
+                | "dashboard_snapshot"
+                | "dashboard_health"
+                | "dashboard_git"
+                | "dashboard_open_editor"
+                | "dashboard_release_port"
                 | "add_project"
                 | "reorder_projects"
                 | "update_project"
                 | "delete_project"
                 | "inspect_project_dir"
+                | "check_project_port_standard"
+                | "preview_project_standard_script"
+                | "generate_project_standard_script"
                 | "check_port_occupied"
                 | "check_port_conflicts"
+                | "check_service_port_conflicts"
+                | "set_default_service"
                 | "get_projects_runtime_status"
                 | "start_project"
                 | "stop_project"
@@ -280,6 +290,9 @@ pub fn e2e_window(
             .map_err(|err| err.to_string())?,
         "quit" => app.exit(0),
         "quit-request" => crate::quit::request(&app),
+        "theme-dark" => window.set_theme(Some(tauri::Theme::Dark)).map_err(|err| err.to_string())?,
+        "theme-light" => window.set_theme(Some(tauri::Theme::Light)).map_err(|err| err.to_string())?,
+        "theme-system" => window.set_theme(None).map_err(|err| err.to_string())?,
         "status" => {}
         _ => return Err("Unknown E2E window action".into()),
     }

@@ -1,171 +1,327 @@
-import { useState } from 'react';
-import type { ReactNode } from 'react';
-import { Play, Folder, Terminal, AlertCircle, Loader2, Check, Copy, Globe, AppWindow, Pencil, Trash2, GitBranch } from 'lucide-react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { ArrowUpRight, Ellipsis, Play } from 'lucide-react';
 import { toast } from 'sonner';
-import type { ProjectConfig, ProjectStatus, ProjectRuntimeStatus, PortConflict, GitInfo } from '../types';
-import { useGitInfo } from '../lib/useGitInfo';
-import { useHasProjectLogs } from '../lib/useProjectLogs';
-import { cn } from '../lib/utils';
+import type {
+  DashboardConflict, DashboardCpuPoint, DashboardHealth, DashboardRun, DashboardServiceSample, DashboardUsage,
+  PortConflict, ProjectConfig, ProjectRuntimeStatus, ProjectStatus, Service,
+} from '../types';
+import { cpuChart, dashboardServices, dashboardStatus, durationText, relativeTime, runInterval } from '../lib/dashboard';
+import { injectedPortVariables } from '../lib/projectServices';
+import { useDashboard } from '../lib/useDashboard';
+import { DashboardGitCard, DashboardOutput, DashboardStandard } from './DashboardPanels';
 import { ProjectAvatar } from './ProjectAvatar';
+import { ProjectWebMenu } from './ProjectServices';
 import Button from './ui/button';
-import { ActionTooltip } from './ui/tooltip';
-import { Badge } from './ui/badge';
-import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from './ui/card';
-import { Alert, AlertDescription, AlertTitle } from './ui/alert';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
+import './dashboard.css';
 
 interface ProjectCardProps {
   project: ProjectConfig;
   status: ProjectStatus;
   runtime?: ProjectRuntimeStatus;
-  conflict?: PortConflict;
-  onStart: (id: string) => void;
-  onStop: (id: string) => void;
-  onRestart: (id: string) => void;
+  conflicts: PortConflict[];
+  onStart: (id: string) => Promise<void>;
+  onStop: (id: string) => Promise<void>;
+  onRestart: (id: string) => Promise<void>;
   onOpenBrowser: (port: number) => void;
+  onSetDefaultService: (serviceId: string) => Promise<void>;
   onRevealPath: (path: string) => void;
-  onOpenLogs: () => void;
-  onEdit: () => void;
+  onOpenTerminal: () => void;
+  onOpenLogs: (id?: string) => void;
+  onClearLogs: () => void;
+  onEdit: (conflict?: DashboardConflict) => void;
   onDelete: () => void;
   onRunCommand: (command: string) => void;
 }
 
-const statusNames: Record<ProjectStatus, string> = { running: '运行中', starting: '启动中', stopped: '未运行', error: '运行异常' };
+const listenerLabels = { listening: '监听中', idle: '未监听', occupied: '端口被占用' };
+const mb = (kib: number) => Math.round(kib / 1024);
 
-function ProjectMetric({ label, children }: { label: string; children: ReactNode }) {
-  return <Card className="min-w-0 px-4 py-3.5">
-    <dt className="text-meta leading-4 text-muted-foreground">{label}</dt>
-    <dd className="mt-1.5 min-w-0 break-words font-mono text-base font-semibold leading-[22px] select-text">{children}</dd>
-  </Card>;
+function Sparkline({ points = [], tone }: { points?: DashboardCpuPoint[]; tone: 'web' | 'api' | 'total' | 'other' }) {
+  const line = cpuChart(points, 300, 26);
+  return <svg className="dash-spark" data-tone={tone} data-sample-count={points.length} viewBox="0 0 300 26" preserveAspectRatio="none" aria-hidden="true">
+    {line && <>
+      <polygon points={'0,26 ' + line + ' 300,26'} fill="currentColor" opacity=".1" />
+      <polyline points={line} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+    </>}
+  </svg>;
 }
 
-function GitSummary({ git }: { git: GitInfo }) {
-  const divergence = [git.ahead && `↑${git.ahead}`, git.behind && `↓${git.behind}`].filter(Boolean).join(' ');
-  const divergenceLabel = [git.ahead && `领先 ${git.ahead} 个提交`, git.behind && `落后 ${git.behind} 个提交`].filter(Boolean).join('，');
-  const branch = git.branch ?? `分离的 HEAD · ${git.head ?? '未知'}`;
-  return <>
-    <ProjectMetric label="分支">
-      <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="flex min-w-0 items-center gap-1.5">
-          <GitBranch aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
-          <code className="truncate" title={branch}>{branch}</code>
-        </span>
-        {git.initial && <span className="font-sans text-label font-normal text-muted-foreground">尚无提交</span>}
-        {divergence && <ActionTooltip label={`相对 ${git.upstream ?? '上游分支'}：${divergenceLabel}`}>
-          <span className="text-label font-normal tabular-nums text-muted-foreground" data-git-divergence>{divergence}</span>
-        </ActionTooltip>}
-      </span>
-    </ProjectMetric>
-    <ProjectMetric label="未提交改动">
-      <span className={cn(git.changes > 0 && 'text-warning-foreground')} data-git-changes={git.changes}>{git.changes}</span>
-    </ProjectMetric>
-  </>;
+function healthText(health: DashboardHealth, active: boolean) {
+  const endpoint = health.path === '/' ? 'HTTP' : health.path;
+  if (!active) return health.code == null ? '上次无响应' : '上次 ' + endpoint + ' ' + health.code;
+  return health.code == null ? '无响应' : endpoint + ' ' + health.code + ' · ' + health.elapsedMs + 'ms';
 }
 
-export function ProjectCard({ project, status, runtime, conflict, onStart, onStop, onRestart, onOpenBrowser, onRevealPath, onOpenLogs, onEdit, onDelete, onRunCommand }: ProjectCardProps) {
-  const hasLogs = useHasProjectLogs(project.id);
-  const [copiedPath, setCopiedPath] = useState(false);
-  const git = useGitInfo(project.id, project.path);
-  const isRunning = status === 'running';
-  const isStarting = status === 'starting';
-  const isApp = project.type === 'app';
-  const TypeIcon = isApp ? AppWindow : Globe;
-  const handleCopyPath = async () => {
-    try {
-      await navigator.clipboard.writeText(project.path);
-      setCopiedPath(true);
-      toast.success('项目路径已复制');
-      setTimeout(() => setCopiedPath(false), 2000);
-    } catch (error) {
-      toast.error(`复制路径失败：${error}`);
-    }
+function ServiceTile({ service, sample, health, last, history, active, onOpen }: {
+  service: Service;
+  sample?: DashboardServiceSample;
+  health?: DashboardHealth;
+  history?: DashboardCpuPoint[];
+  last?: DashboardRun['services'][string];
+  active: boolean;
+  onOpen: (port: number) => void;
+}) {
+  const serviceSample = sample?.port === service.port ? sample : undefined;
+  const state = serviceSample?.state ?? 'idle';
+  const live = state === 'listening' && active;
+  const previous = last?.port === service.port ? last : undefined;
+  const check = live ? (health?.port === service.port ? health : undefined) : previous?.health;
+  const usage = live ? serviceSample?.usage : undefined;
+  return <section className="dash-tile" data-dashboard-service={service.id} data-service={service.id} data-listener={state} data-idle={!live || undefined}>
+    <div className="dash-tile-heading">
+      <h2 className="dash-truncate" title={service.name}>{service.name}</h2>
+      <code className="dash-key" data-key={service.key}>{service.key}</code>
+      <span className="dash-listener dash-right" data-state={state}>{listenerLabels[state]}</span>
+    </div>
+    <div className="dash-port">
+      <span>{service.port == null ? '—' : ':' + service.port}</span>
+      {check && <small className={check.code == null || check.code < 200 || check.code >= 300 ? 'dash-error' : undefined}
+        data-health={check.code ?? 'no-response'}>{healthText(check, live)}</small>}
+      {live && !check && <small>检查中…</small>}
+      {live && service.openWeb && service.port != null && <button type="button" className="dash-link dash-right"
+        onClick={() => onOpen(service.port!)}>打开 <ArrowUpRight size={12} aria-hidden="true" /></button>}
+    </div>
+    <div className="dash-service-meta">
+      {usage ? <>
+        <span>CPU <b>{usage.cpu.toFixed(1)}%</b></span><span>内存 <b>{mb(usage.rssKib)} MB</b></span>
+        {usage.process && <span className="dash-truncate" title={usage.process}>{usage.process}</span>}
+      </> : <>
+        {previous?.process && <span className="dash-truncate" title={previous.process}>{previous.process}</span>}
+        <span className="dash-truncate" title={service.dir}>{service.dir === '.' ? './' : service.dir.replace(/\/+$/u, '') + '/'}</span>
+      </>}
+    </div>
+    {live && <Sparkline points={history} tone={service.key === 'WEB' ? 'web' : service.key === 'API' ? 'api' : 'other'} />}
+  </section>;
+}
+
+function ResourceTile({ usage, history, external }: { usage?: DashboardUsage | null; history?: DashboardCpuPoint[]; external: boolean }) {
+  return <section className="dash-tile dash-resource" data-dashboard-resource>
+    <div className="dash-tile-heading"><h2>资源</h2><span className="dash-faint">· {external ? '外部进程' : '整个进程树'}，近 10 分钟</span></div>
+    <div className="dash-resource-values">
+      <div><span>CPU</span><strong>{usage?.cpu.toFixed(1) ?? '—'} <small>%</small></strong></div>
+      <div><span>内存</span><strong>{usage ? mb(usage.rssKib) : '—'} <small>MB</small></strong></div>
+    </div>
+    <Sparkline points={history} tone="total" />
+  </section>;
+}
+
+function LastRunTile({ run, now }: { run?: DashboardRun | null; now: number }) {
+  return <section className="dash-tile" data-dashboard-last-run>
+    <div className="dash-tile-heading"><h2>上次运行</h2>
+      {run && <span className="dash-faint dash-truncate">· {runInterval(run.startedAt, run.endedAt, now)}</span>}
+    </div>
+    {run ? <dl className="dash-last">
+      <div><dt>时长</dt><dd>{durationText(run.endedAt - run.startedAt)}</dd></div>
+      <div><dt>退出</dt><dd className={run.exitCode === 0 ? 'dash-positive' : run.exitCode != null || run.signal != null ? 'dash-error' : undefined}>
+        {run.exitCode === 0 ? '正常 · 0' : run.exitCode != null ? '异常 · ' + run.exitCode : run.signal != null ? '信号 · ' + run.signal : '未知'}
+      </dd></div>
+      <div><dt>峰值内存</dt><dd>{run.peakKib == null ? '—' : mb(run.peakKib) + ' MB'}</dd></div>
+      <div><dt>问题</dt><dd className={run.errors ? 'dash-error' : undefined}>{run.external ? '—' : run.errors + ' 错误'}</dd></div>
+    </dl> : <p className="dash-no-history">暂无运行记录</p>}
+  </section>;
+}
+
+function processLabel(conflict: DashboardConflict) {
+  const owner = conflict.owner;
+  if (!owner) return '有其他进程';
+  const command = owner.command.trim().split(/\s+/u)[0].split('/').at(-1) || '进程';
+  return command + '（PID ' + owner.pid + (owner.cwd ? '，' + owner.cwd : '') + '）';
+}
+
+function ConflictDialog({ conflict, onClose, onConfirm }: {
+  conflict: DashboardConflict;
+  onClose: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  return <Dialog open onOpenChange={open => { if (!open && !busy) onClose(); }}>
+    <DialogContent hideClose={busy} data-dashboard-conflict-dialog>
+      <DialogHeader>
+        <DialogTitle>结束占用端口的进程</DialogTitle>
+        <DialogDescription>将向 {processLabel(conflict)} 发送 SIGTERM，以释放端口 {conflict.port}。</DialogDescription>
+      </DialogHeader>
+      {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+      <div className="flex flex-wrap justify-end gap-2">
+        <Button variant="outline" disabled={busy} onClick={onClose}>取消</Button>
+        <Button variant="destructive" disabled={busy} data-confirm-stop-listener onClick={() => {
+          setBusy(true);
+          setError('');
+          void onConfirm().catch(reason => setError(String(reason))).finally(() => setBusy(false));
+        }}>{busy ? '等待进程退出…' : '发送 SIGTERM'}</Button>
+      </div>
+    </DialogContent>
+  </Dialog>;
+}
+
+export function ProjectCard({ project, status: runtimeStatus, runtime, conflicts, onStart, onStop, onRestart, onOpenBrowser,
+  onSetDefaultService, onRevealPath, onOpenTerminal, onOpenLogs, onClearLogs, onEdit, onDelete, onRunCommand }: ProjectCardProps) {
+  const { snapshot, snapshotError, git, health, now, refresh } = useDashboard(project, runtime);
+  const status = dashboardStatus(runtimeStatus, runtime, snapshot);
+  const active = status === 'running' || status === 'starting';
+  const running = status === 'running';
+  const services = useMemo(() => dashboardServices(project), [project.services, project.port]);
+  const blocked = !active && (conflicts.length > 0 || !!snapshot?.conflicts.length);
+  const [occupied, setOccupied] = useState<DashboardConflict>();
+  const [pending, setPending] = useState(false);
+  const busy = useRef(false);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const firstPort = project.port;
+  const liveServices = new Set(snapshot?.services.filter(service => service.state === 'listening').map(service => service.id));
+  const startedAt = runtime?.startedAt ?? snapshot?.startedAt;
+  const last = snapshot?.lastRun;
+  const statusText = running ? '运行中' + (startedAt == null ? '' : ' · ' + durationText(now - startedAt))
+    : status === 'starting' ? '启动中' : '未运行' + (last ? ' · ' + relativeTime(last.endedAt, now) + '停止' : '');
+  const branch = git?.branch ?? git?.head;
+  const envCount = new Set([...project.env, ...injectedPortVariables(project)].map(variable => variable.key)).size;
+
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    const content = contentRef.current;
+    if (!viewport || !content) return;
+    const syncScroll = () => {
+      const narrow = viewport.getBoundingClientRect().width < 820;
+      viewport.toggleAttribute('data-narrow-overflow', narrow && viewport.scrollHeight > viewport.clientHeight);
+    };
+    const observer = new ResizeObserver(syncScroll);
+    observer.observe(viewport);
+    observer.observe(content);
+    syncScroll();
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!active && startedAt != null) refresh();
+  }, [active, startedAt, refresh]);
+
+  const act = (kind: 'start' | 'restart' | 'stop') => {
+    if (busy.current || (kind === 'start' && blocked)) return;
+    busy.current = true;
+    setPending(true);
+    const action = kind === 'start' ? onStart : kind === 'restart' ? onRestart : onStop;
+    void action(project.id).finally(() => {
+      setPending(false);
+      busy.current = false;
+      refresh();
+    });
   };
+  const invokeShortcut = useRef(act);
+  invokeShortcut.current = act;
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (!event.metaKey || event.shiftKey || event.ctrlKey || event.altKey || event.repeat || event.isComposing
+        || event.keyCode === 229 || document.querySelector('[role="dialog"][data-state="open"]')
+        || (event.target instanceof HTMLElement && (event.target.matches('input, textarea') || event.target.isContentEditable))) return;
+      const action = event.key.toLowerCase() === 'r' ? running ? 'restart' : active ? undefined : 'start'
+        : event.key === '.' && active ? 'stop' : undefined;
+      if (!action) return;
+      event.preventDefault();
+      event.stopPropagation();
+      invokeShortcut.current(action);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [active, running]);
 
-  return (
-    <div className="flex min-w-0 flex-col gap-3.5" data-project-details={project.id} data-project-runtime={status}>
-      <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 border-b border-[#f2f2f4] pb-5">
-        <div className="flex min-w-0 flex-1 basis-60 items-center gap-[13px]">
-          <ProjectAvatar project={project} status={status} conflict={!!conflict} className="size-10 rounded-[10px] text-[17px]" />
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-              <h1 className="min-w-0 break-words text-xl font-heading tracking-[-.015em] select-text">{project.displayName || project.name}</h1>
-              <Badge className={cn('rounded-full px-2.5 py-[3px] text-meta', isRunning && !conflict && 'border-0 bg-[#ecfdf5] text-[#047857]')} variant={conflict ? 'warning' : isRunning ? 'success' : status === 'error' ? 'destructive' : 'outline'}>
-                {isStarting ? <Loader2 className="size-3 animate-spin" /> : <span className={cn('size-1.5 rounded-full', isRunning && !conflict ? 'bg-[#10b981]' : 'bg-current opacity-70')} />}
-                {conflict ? '端口冲突' : statusNames[status]}
-                {isRunning && !conflict && project.port != null && <span>· {project.port}</span>}
-              </Badge>
-              {runtime?.external && <Badge variant="outline" data-external-badge>外部进程运行</Badge>}
-            </div>
-            <code className="mt-[3px] block truncate text-xs leading-[17px] text-muted-foreground" title={project.path}>{project.path}</code>
+  const seeEditor = () => {
+    void invoke('dashboard_open_editor', { id: project.id }).catch(error => toast.error(String(error)));
+  };
+  const verifyRelease = async () => {
+    if (!occupied?.owner || !occupied.identity) return;
+    await invoke('dashboard_release_port', { id: project.id, port: occupied.port, pid: occupied.owner.pid, identity: occupied.identity });
+    setOccupied(undefined);
+    refresh();
+  };
+  const showWeb = (serviceId: string) => liveServices.has(serviceId);
+  const openDefault = running && firstPort != null && !!snapshot?.services.some(service => service.port === firstPort && service.state === 'listening');
+
+  return <div className="dashboard" ref={viewportRef} data-project-overview={project.id}>
+    <div className="dash-main" ref={contentRef} data-project-details={project.id} data-project-runtime={status}>
+      <div className="dash-drag-region" data-tauri-drag-region aria-hidden="true" />
+      <header className="dash-top">
+        <ProjectAvatar project={project} className="dash-avatar" />
+        <div className="dash-heading">
+          <div className="dash-title-row">
+            <h1 className="dash-truncate" title={project.displayName || project.name}>{project.displayName || project.name}</h1>
+            <span className="dash-badge" data-status={status}>{statusText}</span>
+          </div>
+          <div className="dash-subtitle">
+            <code className="dash-truncate" title={project.path}>{project.path}</code>
+            {branch && <><span className="dash-sep">·</span><span className="dash-branch">分支 <b>{branch}</b>
+              {git!.ahead > 0 && ' ↑' + git!.ahead}{git!.behind > 0 && ' ↓' + git!.behind}</span></>}
+            <span className="dash-sep">·</span><code className="dash-truncate" title={project.startCommand}>{project.startCommand}</code>
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {isRunning && !isApp && project.port && <Button size="sm" variant="outline" onClick={() => onOpenBrowser(project.port!)} data-project-action="open">打开网页</Button>}
-          {status === 'stopped' || status === 'error' ? (
-            <Button size="sm" disabled={!!conflict} onClick={() => onStart(project.id)} data-project-action="start"><Play data-icon="inline-start" />启动</Button>
-          ) : <>
-            <Button size="sm" variant="outline" disabled={isStarting} onClick={() => onRestart(project.id)} data-project-action="restart">重启</Button>
-            <Button size="sm" onClick={() => onStop(project.id)} data-project-action="stop">停止</Button>
-          </>}
+        <div className="dash-actions">
+          {services.length > 1 ? <ProjectWebMenu project={project} disabled={!running} canOpen={showWeb}
+            onOpenBrowser={onOpenBrowser} onSetDefault={onSetDefaultService} />
+            : <button type="button" className="dash-button" disabled={!openDefault} data-project-action="open"
+                onClick={() => { if (firstPort != null) onOpenBrowser(firstPort); }}>打开网页{firstPort != null && ' :' + firstPort}</button>}
+          {active ? <>
+            <button type="button" className="dash-button" disabled={pending || !running} onClick={() => act('restart')}
+              aria-keyshortcuts="Meta+R" data-project-action="restart">重启 <kbd>⌘R</kbd></button>
+            <button type="button" className="dash-button dash-primary" disabled={pending} onClick={() => act('stop')}
+              aria-keyshortcuts="Meta+." data-project-action="stop">停止 <kbd>⌘.</kbd></button>
+          </> : <button type="button" className="dash-button dash-primary" disabled={pending || blocked}
+            onClick={() => act('start')} aria-keyshortcuts="Meta+R" data-project-action="start"><Play size={12} fill="currentColor" aria-hidden="true" />启动 <kbd>⌘R</kbd></button>}
         </div>
       </header>
 
-      {conflict && <Alert variant="warning">
-        <AlertCircle /><AlertTitle>端口 <code>:{project.port}</code> 存在冲突</AlertTitle>
-        <AlertDescription>与 {conflict.projectNames.filter((name) => name !== (project.displayName || project.name)).join('、')} 使用相同端口，已限制启动。请为其中一个项目更换端口。</AlertDescription>
-      </Alert>}
+      {!active && (snapshot?.conflicts ?? []).map(conflict => <section key={conflict.port} className="dash-alert" role="alert" data-dashboard-conflict={conflict.port}>
+        <p title={conflict.owner?.command}><strong>端口 {conflict.port} 已被占用</strong>　{processLabel(conflict)} 正在监听，启动会失败</p>
+        <div className="dash-right">
+          <button type="button" className="dash-button" disabled={!conflict.owner || !conflict.identity}
+            onClick={() => setOccupied(conflict)} data-dashboard-release>结束该进程</button>
+          <button type="button" className="dash-button" onClick={() => onEdit(conflict)} data-dashboard-change-port>换一个端口</button>
+        </div>
+      </section>)}
+      {!active && conflicts.map(conflict => <section key={'configs-' + conflict.port} className="dash-alert" role="alert">
+        <p><strong>端口 {conflict.port} 配置重复</strong>　{conflict.projectNames.join('、')}</p>
+        <button type="button" className="dash-button dash-right" onClick={() => onEdit()}>编辑配置</button>
+      </section>)}
+      {snapshotError && <p className="dash-alert" role="status">无法读取仪表盘 · {snapshotError}</p>}
 
-      {status === 'error' && <Alert variant="destructive" data-project-error>
-        <AlertCircle /><AlertTitle>进程异常退出（{runtime?.exitSignal != null ? `信号 ${runtime.exitSignal}` : runtime?.exitCode != null ? `状态码 ${runtime.exitCode}` : '未知状态'}）</AlertTitle>
-        <AlertDescription><Button variant="outline" size="sm" onClick={onOpenLogs}>查看日志</Button></AlertDescription>
-      </Alert>}
+      <div className="dash-tiles">
+        {services.map(service => <ServiceTile key={service.id} service={service} active={active}
+          sample={snapshot?.services.find(sample => sample.id === service.id)} health={health[service.id]}
+          last={last?.services[service.id]} history={snapshot?.history[service.id]} onOpen={onOpenBrowser} />)}
+        {active ? <ResourceTile usage={snapshot?.total} external={snapshot?.external ?? runtime?.external ?? false} history={snapshot?.history.project} />
+          : <LastRunTile run={last} now={now} />}
+      </div>
 
-      <dl className={cn('mt-2 grid grid-cols-2 gap-3', git && 'lg:grid-cols-4')} data-git-summary={git ? '' : undefined}>
-        {git && <GitSummary git={git} />}
-        <ProjectMetric label="启动命令"><code title={project.startCommand}>{project.startCommand}</code></ProjectMetric>
-        <ProjectMetric label="配置端口">{project.port ?? <span className="font-sans text-sm font-normal text-muted-foreground">未设置</span>}</ProjectMetric>
-      </dl>
+      <div className="dash-columns">
+        <DashboardOutput project={project} services={services} active={active} last={last} now={now}
+          onTerminal={onOpenTerminal} onJump={onOpenLogs} onClear={onClearLogs} />
+        <div className="dash-rail">
+          {git && <DashboardGitCard git={git} now={now} onEditor={seeEditor} />}
+          <DashboardStandard project={project} services={services} />
+        </div>
+      </div>
 
-      <Card>
-        <CardHeader className="flex-row items-center justify-between gap-3 p-[18px]">
-          <div className="flex min-w-0 flex-col gap-1.5">
-            <CardTitle className="text-[13.5px]">项目配置</CardTitle>
-            <CardDescription className="flex flex-wrap items-center gap-x-1.5 gap-y-1 break-words">
-              <TypeIcon aria-hidden="true" className="size-3.5 shrink-0" />
-              <span>{isApp ? '桌面应用' : 'Web 项目'}</span>
-              {project.displayName && <span className="min-w-0">· {project.name}</span>}
-              {project.autoOpen && !isApp && <span data-auto-open-note>· 启动就绪后自动打开网页</span>}
-            </CardDescription>
-          </div>
-          <div className="flex shrink-0 items-center gap-1">
-            <ActionTooltip label="编辑项目"><Button variant="outline" size="sm" onClick={onEdit} data-edit-project><Pencil data-icon="inline-start" />编辑</Button></ActionTooltip>
-            <ActionTooltip label="删除项目"><Button variant="ghost-destructive" size="icon" aria-label="删除项目" onClick={onDelete} data-delete-project><Trash2 /></Button></ActionTooltip>
-          </div>
-        </CardHeader>
-        {(project.description || !!project.env?.length || !!project.commands?.length) && <CardContent className="flex flex-col gap-3 px-[18px] pb-4">
-          {project.description && <p className="max-w-2xl break-words text-sm text-[#6e6e73] select-text">{project.description}</p>}
-          {(!!project.env?.length || !!project.commands?.length) && <dl className="flex min-w-0 flex-col gap-3 text-xs">
-            {!!project.env?.length && <div className="flex items-start gap-4" data-env-summary>
-              <dt className="w-16 shrink-0 text-muted-foreground">环境变量</dt>
-              <dd className="min-w-0 flex-1 break-words select-text">{project.env.map(entry => entry.key).join('、')}<span className="ml-2 text-muted-foreground">（{project.env.length} 个）</span></dd>
-            </div>}
-            {!!project.commands?.length && <div className="flex items-center gap-4">
-              <dt className="w-16 shrink-0 text-muted-foreground">其他命令</dt>
-              <dd className="flex min-w-0 flex-1 flex-wrap gap-2">{project.commands.map(entry =>
-                <ActionTooltip key={entry.name} label={entry.command}><Button size="sm" variant="outline" onClick={() => onRunCommand(entry.command)} title={entry.command} data-run-command={entry.name}><Play data-icon="inline-start" />运行 {entry.name}</Button></ActionTooltip>
-              )}</dd>
-            </div>}
-          </dl>}
-        </CardContent>}
-        <CardFooter className="flex-wrap gap-2 px-[18px] pb-[18px]">
-          <ActionTooltip label="在 Finder 中定位">
-            <Button variant="outline" size="sm" onClick={() => onRevealPath(project.path)} data-reveal-path><Folder data-icon="inline-start" />Finder</Button>
-          </ActionTooltip>
-          <ActionTooltip label={copiedPath ? '已复制' : '复制路径'}>
-            <Button variant="ghost" size="icon-sm" aria-label="复制路径" onClick={handleCopyPath} data-copy-path>{copiedPath ? <Check /> : <Copy />}</Button>
-          </ActionTooltip>
-          <Button size="sm" variant="outline" onClick={onOpenLogs} className="ml-auto" data-open-logs><Terminal data-icon="inline-start" />终端日志{hasLogs && <span className="size-1.5 rounded-full bg-success" />}</Button>
-        </CardFooter>
-      </Card>
+      <section className="dash-config" aria-label="启动配置" data-dashboard-config>
+        <span>启动配置</span><code className="dash-truncate" title={project.startCommand}>{project.startCommand}</code>
+        <code>{services.length} 个服务</code><code>{envCount} 个环境变量</code>
+        <div className="dash-config-actions dash-right">
+          <button type="button" className="dash-link" onClick={onOpenTerminal}>在终端打开</button>
+          <button type="button" className="dash-link dash-config-edit" onClick={() => onEdit()} data-edit-project>编辑配置</button>
+          <details className="dash-more">
+            <summary className="dash-link dash-config-edit" aria-label="更多项目操作"><Ellipsis size={15} aria-hidden="true" /></summary>
+            <div className="dash-more-menu" onClick={event => { if ((event.target as HTMLElement).closest('button')) event.currentTarget.parentElement!.removeAttribute('open'); }}>
+              <button type="button" onClick={() => onRevealPath(project.path)} data-reveal-path>在 Finder 中定位</button>
+              <button type="button" onClick={() => {
+                void navigator.clipboard.writeText(project.path).then(() => toast.success('项目路径已复制')).catch(error => toast.error(String(error)));
+              }}>复制路径</button>
+              <button type="button" onClick={() => onOpenLogs()} data-open-logs>查看启动日志</button>
+              {project.commands.map(entry => <button type="button" key={entry.name} onClick={() => onRunCommand(entry.command)} data-run-command={entry.name}>运行 {entry.name}</button>)}
+              <button type="button" className="dash-error" onClick={onDelete} data-delete-project>删除项目</button>
+            </div>
+          </details>
+        </div>
+      </section>
+      {occupied && <ConflictDialog conflict={occupied} onClose={() => setOccupied(undefined)} onConfirm={verifyRelease} />}
     </div>
-  );
+  </div>;
 }

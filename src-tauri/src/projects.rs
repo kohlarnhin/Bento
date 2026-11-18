@@ -6,6 +6,12 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+mod services;
+mod standard;
+pub use services::{default_inject_ports, launch_environment, Service};
+pub use standard::{check_port_standard, standard_script_preview, write_standard_script, PortStandardCheck, StandardScript};
+use services::{fill_service_keys, normalize_services, scan_services, ScannedService, StartScript};
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct EnvVar {
     pub key: String,
@@ -34,7 +40,7 @@ pub fn validate_env(env: &[EnvVar]) -> Result<(), String> {
         }
         if matches!(
             entry.key.as_str(),
-            "TERM" | "COLORTERM" | "SHELL" | "HOME" | "USER" | "PWD"
+            "TERM" | "COLORTERM" | "SHELL" | "HOME" | "USER" | "PWD" | processes::MANAGED_RUN_ENV
         ) {
             return Err(format!("不能覆盖终端保留变量 {}", entry.key));
         }
@@ -78,6 +84,10 @@ pub struct ProjectDraft {
     pub description: Option<String>,
     pub path: String,
     pub port: Option<i64>,
+    #[serde(default)]
+    pub services: Vec<Service>,
+    #[serde(default = "default_inject_ports")]
+    pub inject_ports: bool,
     pub start_command: String,
     #[serde(rename = "type")]
     pub project_type: Option<String>,
@@ -106,7 +116,7 @@ pub enum PortConfidence {
     Low,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PortCandidate {
     port: u16,
@@ -117,16 +127,16 @@ pub struct PortCandidate {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PortInUse {
-    owners: Vec<processes::PortOwner>,
+    pub(crate) owners: Vec<processes::PortOwner>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PortConflictCheck {
     project_conflict: Option<ExistingProject>,
-    in_use: Option<PortInUse>,
+    pub(crate) in_use: Option<PortInUse>,
     reserved: Vec<String>,
-    suggestion: Option<u16>,
+    pub(crate) suggestion: Option<u16>,
 }
 
 #[derive(Debug, Serialize)]
@@ -143,6 +153,28 @@ pub struct ProjectDirInspection {
     port_source: Option<String>,
     port_candidates: Vec<PortCandidate>,
     existing_project: Option<ExistingProject>,
+    services: Vec<ScannedService>,
+    start_scripts: Vec<StartScript>,
+    standard: Option<PortStandardCheck>,
+}
+
+pub fn migrate_service_keys(conn: &Connection) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare("SELECT id, services FROM projects WHERE services != '[]'")?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+    let mut updates = Vec::new();
+    for row in rows {
+        let (id, raw) = row?;
+        let Ok(mut services) = serde_json::from_str::<Vec<Service>>(&raw) else { continue };
+        if services.iter().any(|service| service.key.is_empty()) {
+            fill_service_keys(&mut services);
+            let json = serde_json::to_string(&services).map_err(|err| rusqlite::Error::ToSqlConversionFailure(Box::new(err)))?;
+            updates.push((id, json));
+        }
+    }
+    for (id, services) in updates {
+        conn.execute("UPDATE projects SET services=?1 WHERE id=?2", params![services, id])?;
+    }
+    Ok(())
 }
 
 fn optional_text(value: Option<String>) -> Option<String> {
@@ -164,7 +196,11 @@ fn expanded_path(path: &str) -> PathBuf {
 
 fn stored_path(path: &Path) -> String {
     if let Some(home) = dirs::home_dir() {
-        if let Ok(rest) = path.strip_prefix(home) {
+        let relative = path.strip_prefix(&home).ok().or_else(|| {
+            let canonical_home = home.canonicalize().ok()?;
+            path.strip_prefix(canonical_home).ok()
+        });
+        if let Some(rest) = relative {
             return if rest.as_os_str().is_empty() {
                 "~".into()
             } else {
@@ -198,11 +234,16 @@ fn normalize_project(
     if !matches!(project_type, "web" | "app") {
         return Err("项目类型必须为 Web 项目或桌面应用".into());
     }
-    let port = match draft.port {
-        Some(port) if (1..=65535).contains(&port) => Some(port as u16),
-        Some(_) => return Err("端口必须是 1–65535 之间的整数".into()),
-        None if project_type == "web" => return Err("Web 项目需要填写端口".into()),
-        None => None,
+    let services = normalize_services(draft.services)?;
+    let port = if services.is_empty() {
+        match draft.port {
+            Some(port) if (1..=65535).contains(&port) => Some(port as u16),
+            Some(_) => return Err("端口必须是 1–65535 之间的整数".into()),
+            None if project_type == "web" => return Err("Web 项目需要填写端口".into()),
+            None => None,
+        }
+    } else {
+        services.iter().find(|service| service.open_web).and_then(|service| service.port)
     };
     if draft.path.trim().is_empty() {
         return Err("请输入项目目录".into());
@@ -214,13 +255,10 @@ fn normalize_project(
     if !path.is_dir() {
         return Err("不是文件夹".into());
     }
-    if let Some(port) = port {
-        if let Some(existing) = project_using_port(conn, port, id)? {
-            return Err(format!(
-                "端口 {} 已被项目「{}」使用！各项目端口必须唯一，请更换端口。",
-                port, existing.name
-            ));
-        }
+    let ports = port.filter(|_| services.is_empty()).into_iter()
+        .chain(services.iter().filter_map(|service| service.port));
+    for port in ports {
+        validate_project_port(conn, port, id)?;
     }
     validate_env(&draft.env)?;
     if draft.commands.len() > 10 {
@@ -261,6 +299,8 @@ fn normalize_project(
         description: optional_text(draft.description),
         path: stored_path(&path),
         port,
+        services,
+        inject_ports: draft.inject_ports,
         start_command,
         project_type: Some(project_type.into()),
         env: draft.env,
@@ -322,8 +362,8 @@ pub fn insert_project(conn: &Connection, draft: ProjectDraft) -> Result<ProjectC
     }
     project.id = id;
     transaction.execute(
-        "INSERT INTO projects (id, name, display_name, description, path, port, start_command, type, sort_order, env, commands, auto_open, group_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects), ?9, ?10, ?11, ?12)",
-        params![project.id, project.name, project.display_name, project.description, project.path, project.port, project.start_command, project.project_type, serde_json::to_string(&project.env).map_err(|err| err.to_string())?, serde_json::to_string(&project.commands).map_err(|err| err.to_string())?, project.auto_open, project.group_id],
+        "INSERT INTO projects (id, name, display_name, description, path, port, start_command, type, sort_order, env, commands, auto_open, group_id, services, inject_ports) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects), ?9, ?10, ?11, ?12, ?13, ?14)",
+        params![project.id, project.name, project.display_name, project.description, project.path, project.port, project.start_command, project.project_type, serde_json::to_string(&project.env).map_err(|err| err.to_string())?, serde_json::to_string(&project.commands).map_err(|err| err.to_string())?, project.auto_open, project.group_id, serde_json::to_string(&project.services).map_err(|err| err.to_string())?, project.inject_ports],
     ).map_err(|e| format!("新增项目失败：{e}"))?;
     transaction
         .commit()
@@ -385,8 +425,8 @@ pub fn update_project_row(
     }
     let project = normalize_project(&transaction, draft, Some(id))?;
     transaction.execute(
-        "UPDATE projects SET name=?1, display_name=?2, description=?3, path=?4, port=?5, start_command=?6, type=?7, env=?9, commands=?10, auto_open=?11, group_id=?12, updated_at=CURRENT_TIMESTAMP WHERE id=?8",
-        params![project.name, project.display_name, project.description, project.path, project.port, project.start_command, project.project_type, id, serde_json::to_string(&project.env).map_err(|err| err.to_string())?, serde_json::to_string(&project.commands).map_err(|err| err.to_string())?, project.auto_open, project.group_id],
+        "UPDATE projects SET name=?1, display_name=?2, description=?3, path=?4, port=?5, start_command=?6, type=?7, env=?9, commands=?10, auto_open=?11, group_id=?12, services=?13, inject_ports=?14, updated_at=CURRENT_TIMESTAMP WHERE id=?8",
+        params![project.name, project.display_name, project.description, project.path, project.port, project.start_command, project.project_type, id, serde_json::to_string(&project.env).map_err(|err| err.to_string())?, serde_json::to_string(&project.commands).map_err(|err| err.to_string())?, project.auto_open, project.group_id, serde_json::to_string(&project.services).map_err(|err| err.to_string())?, project.inject_ports],
     ).map_err(|e| format!("更新项目失败：{e}"))?;
     transaction
         .commit()
@@ -394,8 +434,42 @@ pub fn update_project_row(
     Ok(project)
 }
 
+pub fn set_default_service_row(conn: &Connection, id: &str, service_id: &str) -> Result<(), String> {
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+            .map_err(|err| format!("设置默认服务失败：{err}"))?;
+    let raw: String = transaction.query_row("SELECT services FROM projects WHERE id=?1", [id], |row| row.get(0))
+        .optional().map_err(|err| err.to_string())?.ok_or("未找到项目")?;
+    let mut services: Vec<Service> = serde_json::from_str(&raw).map_err(|err| err.to_string())?;
+    let port = services.iter().find(|service| service.id == service_id).ok_or("未找到服务")?.port;
+    if let Some(port) = port {
+        validate_project_port(&transaction, port, Some(id))?;
+    }
+    for service in &mut services {
+        service.open_web = service.id == service_id;
+    }
+    transaction.execute(
+        "UPDATE projects SET services=?1, port=?2, auto_open=auto_open AND ?2 IS NOT NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?3",
+        params![serde_json::to_string(&services).map_err(|err| err.to_string())?, port, id]
+    ).map_err(|err| format!("设置默认服务失败：{err}"))?;
+    transaction.commit().map_err(|err| format!("设置默认服务失败：{err}"))
+}
+
 fn read_json(path: &Path) -> Option<Value> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+fn package_manager(path: &Path, package: &Value) -> Option<String> {
+    package["packageManager"].as_str()
+        .and_then(|s| s.split('@').next())
+        .filter(|s| matches!(*s, "pnpm" | "yarn" | "bun" | "npm"))
+        .map(String::from)
+        .or_else(|| {
+            [("pnpm-lock.yaml", "pnpm"), ("yarn.lock", "yarn"), ("bun.lockb", "bun"),
+                ("bun.lock", "bun"), ("package-lock.json", "npm")]
+                .iter().find(|(file, _)| path.join(file).is_file()).map(|(_, pm)| pm.to_string())
+        })
+        .or_else(|| path.join("package.json").is_file().then(|| "npm".into()))
 }
 
 fn dependency(package: &Value, name: &str) -> bool {
@@ -449,7 +523,7 @@ fn env_ports(config: &str) -> Vec<u16> {
         .filter_map(|line| {
             let line = line.trim().strip_prefix("export ").unwrap_or(line.trim());
             let (key, value) = line.split_once('=')?;
-            if !matches!(key.trim(), "PORT" | "VITE_PORT") {
+            if !matches!(key.trim(), "PORT" | "VITE_PORT" | "UVICORN_PORT" | "FLASK_RUN_PORT" | "SERVER_PORT" | "GIN_PORT") {
                 return None;
             }
             literal_port(value.split('#').next()?)
@@ -600,16 +674,52 @@ fn add_port_candidate(
     }
 }
 
+const CONFIGURED_PORTS: &str = "WITH configured_ports AS (
+    SELECT id, port FROM projects WHERE port IS NOT NULL
+    UNION
+    SELECT p.id, j.atom FROM projects p,
+        json_tree(CASE WHEN json_valid(p.services) THEN p.services ELSE '[]' END) j
+    WHERE j.key = 'port' AND j.type = 'integer' AND j.atom BETWEEN 1 AND 65535
+)";
+
 fn project_using_port(
     conn: &Connection,
     port: u16,
     exclude_id: Option<&str>,
 ) -> Result<Option<ExistingProject>, String> {
     conn.query_row(
-        "SELECT id, COALESCE(NULLIF(display_name, ''), name) FROM projects WHERE port = ?1 AND (?2 IS NULL OR id != ?2) ORDER BY id LIMIT 1",
+        &format!("{CONFIGURED_PORTS} SELECT p.id, COALESCE(NULLIF(p.display_name, ''), p.name)
+        FROM configured_ports c JOIN projects p ON p.id=c.id
+        WHERE c.port=?1 AND (?2 IS NULL OR p.id != ?2) ORDER BY p.id LIMIT 1"),
         params![port, exclude_id],
         |row| Ok(ExistingProject { id: row.get(0)?, name: row.get(1)? }),
     ).optional().map_err(|err| format!("检查端口失败：{err}"))
+}
+
+fn validate_project_port(conn: &Connection, port: u16, exclude_id: Option<&str>) -> Result<(), String> {
+    if let Some(existing) = project_using_port(conn, port, exclude_id)? {
+        return Err(format!("端口 {port} 已被项目「{}」使用！各项目端口必须唯一，请更换端口。", existing.name));
+    }
+    Ok(())
+}
+
+fn configured_ports(conn: &Connection, exclude_id: Option<&str>) -> Result<HashSet<u16>, String> {
+    // Directory inspection can open a pre-migration database read-only.
+    let has_services: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('projects') WHERE name = 'services')",
+        [], |row| row.get(0),
+    ).map_err(|err| format!("检查端口失败：{err}"))?;
+    let sql = if has_services {
+        format!("{CONFIGURED_PORTS} SELECT port FROM configured_ports WHERE ?1 IS NULL OR id != ?1")
+    } else {
+        "SELECT port FROM projects WHERE port IS NOT NULL AND (?1 IS NULL OR id != ?1)".into()
+    };
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|err| format!("检查端口失败：{err}"))?;
+    let rows = statement.query_map([exclude_id], |row| row.get::<_, u16>(0))
+        .map_err(|err| format!("检查端口失败：{err}"))?;
+    rows.collect::<rusqlite::Result<_>>().map_err(|err| format!("检查端口失败：{err}"))
 }
 
 fn suggest_port(
@@ -650,10 +760,18 @@ pub fn check_port_conflicts(
     exclude_id: Option<&str>,
     managed_pids: &HashSet<u32>,
 ) -> Result<PortConflictCheck, String> {
-    if port == 0 {
+    Ok(check_ports(conn, &[port], exclude_id, managed_pids)?.remove(&port).unwrap())
+}
+
+pub fn check_ports(
+    conn: &Connection,
+    ports: &[u16],
+    exclude_id: Option<&str>,
+    managed_pids: &HashSet<u32>,
+) -> Result<std::collections::HashMap<u16, PortConflictCheck>, String> {
+    if ports.contains(&0) {
         return Err("端口必须是 1–65535 之间的整数".into());
     }
-    let project_conflict = project_using_port(conn, port, exclude_id)?;
     let project_path: Option<String> = if let Some(id) = exclude_id {
         conn.query_row("SELECT path FROM projects WHERE id = ?1", [id], |row| {
             row.get(0)
@@ -663,128 +781,38 @@ pub fn check_port_conflicts(
     } else {
         None
     };
-    let mut statement = conn
-        .prepare("SELECT port FROM projects WHERE port IS NOT NULL AND (?1 IS NULL OR id != ?1)")
-        .map_err(|err| format!("检查端口失败：{err}"))?;
-    let used_ports = statement
-        .query_map([exclude_id], |row| row.get::<_, u16>(0))
-        .map_err(|err| format!("检查端口失败：{err}"))?
-        .collect::<rusqlite::Result<HashSet<_>>>()
-        .map_err(|err| format!("检查端口失败：{err}"))?;
+    let mut used_ports = configured_ports(conn, exclude_id)?;
+    used_ports.extend(ports);
     let listeners = processes::listening_ports();
-    let pids = listeners.get(&port).cloned().unwrap_or_default();
-    let unknown_listener = pids.is_empty() && processes::probe_loopback(port);
-    let owners = conflicting_owners(
-        processes::owners_for_pids(pids, project_path.as_deref()),
-        managed_pids,
-    );
-    let in_use = (unknown_listener || !owners.is_empty()).then_some(PortInUse { owners });
-    Ok(PortConflictCheck {
-        project_conflict,
-        in_use,
-        reserved: reserved_port_warnings(port),
-        suggestion: suggest_port(port, &used_ports, |candidate| {
-            listeners.contains_key(&candidate) || processes::probe_loopback(candidate)
-        }),
-    })
+    ports.iter().copied().collect::<HashSet<_>>().into_iter().map(|port| {
+        let pids = listeners.get(&port).cloned().unwrap_or_default();
+        let unknown_listener = pids.is_empty() && processes::probe_loopback(port);
+        let owners = conflicting_owners(
+            processes::owners_for_pids(pids, project_path.as_deref()),
+            managed_pids,
+        );
+        let in_use = (unknown_listener || !owners.is_empty()).then_some(PortInUse { owners });
+        Ok((port, PortConflictCheck {
+            project_conflict: project_using_port(conn, port, exclude_id)?,
+            in_use,
+            reserved: reserved_port_warnings(port),
+            suggestion: suggest_port(port, &used_ports, |candidate| {
+                listeners.contains_key(&candidate) || processes::probe_loopback(candidate)
+            }),
+        }))
+    }).collect()
 }
 
-pub fn inspect_project_dir(
-    conn: &Connection,
-    input: &str,
-    exclude_id: Option<&str>,
-) -> Result<ProjectDirInspection, String> {
-    let path = expanded_path(input);
-    let exists = !input.trim().is_empty() && path.exists();
-    let is_dir = exists && path.is_dir();
-    let mut result = ProjectDirInspection {
-        path: if input.trim().is_empty() {
-            String::new()
-        } else {
-            stored_path(&path)
-        },
-        exists,
-        is_dir,
-        name: path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into(),
-        project_type: "web".into(),
-        package_manager: None,
-        commands: Vec::new(),
-        port: None,
-        port_source: None,
-        port_candidates: Vec::new(),
-        existing_project: None,
-    };
-    if !is_dir {
-        return Ok(result);
-    }
-    let package_path = path.join("package.json");
-    let package = read_json(&package_path).unwrap_or(Value::Null);
-    if let Some(name) = package["name"]
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        result.name = name.into();
-    }
-    let tauri_path = path.join("src-tauri/tauri.conf.json");
-    if tauri_path.is_file()
-        || dependency(&package, "electron")
-        || dependency(&package, "@tauri-apps/cli")
-    {
-        result.project_type = "app".into();
-    }
-    result.package_manager = package["packageManager"]
-        .as_str()
-        .and_then(|s| s.split('@').next())
-        .filter(|s| matches!(*s, "pnpm" | "yarn" | "bun" | "npm"))
-        .map(String::from)
-        .or_else(|| {
-            [
-                ("pnpm-lock.yaml", "pnpm"),
-                ("yarn.lock", "yarn"),
-                ("bun.lockb", "bun"),
-                ("bun.lock", "bun"),
-                ("package-lock.json", "npm"),
-            ]
-            .iter()
-            .find(|(file, _)| path.join(file).is_file())
-            .map(|(_, pm)| pm.to_string())
-        })
-        .or_else(|| package_path.is_file().then(|| "npm".into()));
-    let mut chosen_script = None;
-    if let Some(pm) = &result.package_manager {
-        for (script, suffix) in [("tauri", " dev"), ("dev", ""), ("start", "")] {
-            if script == "tauri" && result.project_type != "app" {
-                continue;
-            }
-            if let Some(value) = package["scripts"][script]
-                .as_str()
-                .filter(|s| !s.trim().is_empty())
-            {
-                result
-                    .commands
-                    .push(format!("{}{suffix}", script_command(pm, script)));
-                if chosen_script.is_none() {
-                    chosen_script = Some(value);
-                }
-            }
-        }
-    }
-    if path.join("start.sh").is_file() {
-        result.commands.push("./start.sh".into());
-    }
-    result.commands.dedup();
-    result.commands.truncate(4);
-    let tauri_port = read_json(&tauri_path).and_then(|config| {
+fn probe_project_ports(
+    path: &Path, package: &Value, chosen_script: Option<&str>, start_sh_primary: bool,
+) -> (Vec<PortCandidate>, Option<PortCandidate>) {
+    let tauri_port = read_json(&path.join("src-tauri/tauri.conf.json")).and_then(|config| {
         tauri::Url::parse(config["build"]["devUrl"].as_str()?)
             .ok()?
             .port()
     });
-    let candidates = &mut result.port_candidates;
+    let mut candidates = Vec::new();
+    let candidates = &mut candidates;
     if let Some(port) = tauri_port {
         add_port_candidate(
             candidates,
@@ -847,11 +875,7 @@ pub fn inspect_project_dir(
         }
     }
     if let Ok(script) = std::fs::read_to_string(path.join("start.sh")) {
-        let confidence = if result
-            .commands
-            .first()
-            .is_some_and(|command| command == "./start.sh")
-        {
+        let confidence = if start_sh_primary {
             PortConfidence::High
         } else {
             PortConfidence::Medium
@@ -898,7 +922,7 @@ pub fn inspect_project_dir(
                 .and_then(|(_, port, _)| candidates.iter().find(|candidate| candidate.port == port))
         })
         .or_else(|| candidates.first());
-    let mut detected = recommended.map(|candidate| {
+    let detected = recommended.map(|candidate| {
         let source = candidate.source.split("、").next().unwrap_or_default();
         let source = match source {
             "src-tauri/tauri.conf.json" => "tauri.conf.json",
@@ -907,41 +931,135 @@ pub fn inspect_project_dir(
                 .unwrap_or(source),
             _ => source,
         };
-        (candidate.port, source.to_string())
+        PortCandidate { port: candidate.port, source: source.to_string(), confidence: candidate.confidence }
     });
-    let mut stmt = conn.prepare("SELECT id, COALESCE(display_name, name), path, port FROM projects WHERE ?1 IS NULL OR id != ?1")
-        .map_err(|e| format!("查询项目失败：{e}"))?;
-    let rows = stmt
-        .query_map([exclude_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<u16>>(3)?,
-            ))
-        })
-        .map_err(|e| format!("读取项目失败：{e}"))?;
-    let mut used_ports = HashSet::new();
-    for row in rows {
-        let (id, name, other_path, port) = row.map_err(|e| format!("读取项目失败：{e}"))?;
-        if let Some(port) = port {
-            used_ports.insert(port);
-        }
-        if result.existing_project.is_none() && expanded_path(&other_path) == path {
-            result.existing_project = Some(ExistingProject { id, name });
+    (std::mem::take(candidates), detected)
+}
+
+pub fn inspect_project_dir(
+    conn: &Connection,
+    input: &str,
+    exclude_id: Option<&str>,
+) -> Result<ProjectDirInspection, String> {
+    let path = expanded_path(input);
+    let exists = !input.trim().is_empty() && path.exists();
+    let is_dir = exists && path.is_dir();
+    let mut result = ProjectDirInspection {
+        path: if input.trim().is_empty() {
+            String::new()
+        } else {
+            stored_path(&path)
+        },
+        exists,
+        is_dir,
+        name: path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into(),
+        project_type: "web".into(),
+        package_manager: None,
+        commands: Vec::new(),
+        port: None,
+        port_source: None,
+        port_candidates: Vec::new(),
+        existing_project: None,
+        services: Vec::new(),
+        start_scripts: Vec::new(),
+        standard: None,
+    };
+    if !is_dir {
+        return Ok(result);
+    }
+    let package_path = path.join("package.json");
+    let package = read_json(&package_path).unwrap_or(Value::Null);
+    if let Some(name) = package["name"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        result.name = name.into();
+    }
+    let tauri_path = path.join("src-tauri/tauri.conf.json");
+    if tauri_path.is_file()
+        || dependency(&package, "electron")
+        || dependency(&package, "@tauri-apps/cli")
+    {
+        result.project_type = "app".into();
+    }
+    result.package_manager = package_manager(&path, &package);
+    let mut chosen_script = None;
+    if let Some(pm) = &result.package_manager {
+        for (script, suffix) in [("tauri", " dev"), ("dev", ""), ("start", "")] {
+            if script == "tauri" && result.project_type != "app" {
+                continue;
+            }
+            if let Some(value) = package["scripts"][script]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+            {
+                result
+                    .commands
+                    .push(format!("{}{suffix}", script_command(pm, script)));
+                if chosen_script.is_none() {
+                    chosen_script = Some(value);
+                }
+            }
         }
     }
-    if detected.is_none() && result.project_type == "web" {
+    if path.join("start.sh").is_file() {
+        result.commands.push("./start.sh".into());
+    }
+    result.commands.dedup();
+    result.commands.truncate(4);
+    let (port_candidates, mut detected) = probe_project_ports(&path, &package, chosen_script,
+        result.commands.first().is_some_and(|command| command == "./start.sh"));
+    result.port_candidates = port_candidates;
+    (result.services, result.start_scripts) = scan_services(&path, &package, result.package_manager.as_deref());
+    if result.services.len() >= 2 {
+        if let Some(script) = result.start_scripts.first() {
+            result.commands.retain(|command| command != &script.command);
+            result.commands.insert(0, script.command.clone());
+            result.commands.truncate(4);
+        }
+        detected = result.services.iter().find(|row| row.service.open_web).and_then(|row| row.port_candidate.clone());
+    }
+    let mut stmt = conn.prepare("SELECT id, COALESCE(display_name, name), path FROM projects WHERE ?1 IS NULL OR id != ?1")
+        .map_err(|e| format!("查询项目失败：{e}"))?;
+    let rows = stmt.query_map([exclude_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+    }).map_err(|e| format!("读取项目失败：{e}"))?;
+    for row in rows {
+        let (id, name, other_path) = row.map_err(|e| format!("读取项目失败：{e}"))?;
+        if expanded_path(&other_path) == path {
+            result.existing_project = Some(ExistingProject { id, name });
+            break;
+        }
+    }
+    if detected.is_none() && result.project_type == "web" && result.services.len() < 2 {
+        let used_ports = configured_ports(conn, exclude_id)?;
         for port in 5173..5373 {
             if !used_ports.contains(&port) && !check_port_in_use_sync(port).0 {
-                detected = Some((port, "推荐空闲端口".into()));
+                detected = Some(PortCandidate { port, source: "推荐空闲端口".into(), confidence: PortConfidence::Low });
                 break;
             }
         }
     }
-    if let Some((port, source)) = detected {
-        result.port = Some(port);
-        result.port_source = Some(source);
+    if let Some(port) = detected {
+        result.port = Some(port.port);
+        result.port_source = Some(port.source);
+    }
+    let audit_services: Vec<_> = if result.services.len() >= 2 {
+        result.services.iter().map(|row| row.service.clone()).collect()
+    } else {
+        result.port.into_iter().map(|port| Service {
+            id: "legacy:root".into(), name: result.name.clone(), dir: ".".into(), port: Some(port),
+            key: "ROOT".into(), kind: None, open_web: true,
+        }).collect()
+    };
+    if !audit_services.is_empty() {
+        let command = result.commands.first().map(String::as_str).unwrap_or_default();
+        result.standard = Some(standard::audit(&path, command, &audit_services));
     }
     Ok(result)
 }
@@ -975,6 +1093,8 @@ mod tests {
                 description: Some("  描述  ".into()),
                 path: format!("{}/", self.0.display()),
                 port: Some(5199),
+                services: Vec::new(),
+                inject_ports: true,
                 start_command: "  pnpm dev  ".into(),
                 project_type: None,
                 env: Vec::new(),
@@ -996,6 +1116,154 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::init_db(&conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn scans_frontends_backends_and_workspace_directories_with_provenance() {
+        let fixture = Fixture::new();
+        fixture.write("apps/frontend/package.json", r#"{"scripts":{"dev":"vite --port 5177"}}"#);
+        fixture.write("packages/backend/pyproject.toml", r#"dependencies = ["uvicorn"]"#);
+        fixture.write("packages/backend/.env", "PORT=8040\n");
+        fixture.write("services/spring/pom.xml", "<artifactId>spring-boot</artifactId>");
+        fixture.write("services/spring/src/main/resources/application.yml", "server:\n  port: 8093\n");
+        fixture.write("gin/go.mod", "require github.com/gin-gonic/gin v1.0.0");
+        fixture.write("gin/main.go", r#"func main() { router.Run(":8094") }"#);
+        fixture.write("flask/requirements.txt", "Flask");
+        fixture.write("flask/.flaskenv", "FLASK_RUN_PORT=8095\n");
+        fixture.write("worker/Cargo.toml", "[package]");
+        fixture.write("scripts/dev.sh", "#!/bin/sh\nwait\n");
+        fixture.write("Makefile", "dev: boot\nstart: dev\n");
+        fixture.write("Procfile.dev", "web: pnpm dev\n");
+        fixture.write("package.json", r#"{"packageManager":"pnpm@9","scripts":{"dev":"vite","start":"concurrently web api"}}"#);
+        for dir in ["node_modules", ".git", "dist", "build", "target", ".venv", "vendor"] {
+            fixture.write(&format!("{dir}/package.json"), "{}");
+            fixture.write(&format!("apps/{dir}/package.json"), "{}");
+        }
+        let result = fixture.inspect(&database());
+        assert_eq!(result.services.len(), 6);
+        let front = &result.services[0];
+        assert_eq!(front.service.dir, "apps/frontend");
+        assert_eq!(front.service.name, "前端");
+        assert!(front.service.open_web);
+        assert_eq!(result.port, Some(5177));
+        let candidates = [
+            ("apps/frontend", 5177, "package.json"),
+            ("packages/backend", 8040, ".env"),
+            ("services/spring", 8093, "src/main/resources/application.yml"),
+            ("gin", 8094, "main.go"),
+            ("flask", 8095, ".flaskenv"),
+        ];
+        for (dir, port, source) in candidates {
+            let service = result.services.iter().find(|row| row.service.dir == dir).unwrap();
+            let candidate = service.port_candidate.as_ref().unwrap();
+            assert_eq!((candidate.port, candidate.source.as_str(), candidate.confidence), (port, source, PortConfidence::High));
+        }
+        assert!(result.services.iter().find(|row| row.service.dir == "worker").unwrap().service.port.is_none());
+        assert_eq!(result.commands[0], "./scripts/dev.sh");
+        assert_eq!(result.start_scripts.iter().map(|script| script.command.as_str()).collect::<Vec<_>>(),
+            ["./scripts/dev.sh", "make dev", "make start", "foreman start -f Procfile.dev", "pnpm start", "pnpm dev"]);
+    }
+
+    #[test]
+    fn scans_prefixed_service_directories_and_literal_environment_fallbacks() {
+        let fixture = Fixture::new();
+        fixture.write("demo-frontend/package.json", r#"{"devDependencies":{"vite":"*"},"scripts":{"dev":"vite"}}"#);
+        fixture.write("demo-frontend/vite.config.ts", "const port = Number(env.DEMO_WEB_PORT || 3100);");
+        fixture.write("demo-api/pyproject.toml", r#"dependencies = ["uvicorn"]"#);
+        fixture.write("scripts/dev.sh", r#"api_port = int(os.environ.get("DEMO_API_PORT", "8100"))"#);
+        let result = fixture.inspect(&database());
+        assert_eq!(result.services.iter().map(|row| (row.service.dir.as_str(), row.service.port, row.service.open_web)).collect::<Vec<_>>(),
+            [("demo-frontend", Some(3100), true), ("demo-api", Some(8100), false)]);
+        let api = result.services[1].port_candidate.as_ref().unwrap();
+        assert_eq!(api.confidence, PortConfidence::Medium);
+        assert_eq!(api.source, "scripts/dev.sh · DEMO_API_PORT");
+    }
+
+    #[test]
+    fn service_ports_round_trip_are_unique_and_follow_the_default_choice() {
+        let conn = database();
+        let fixture = Fixture::new();
+        let mut draft = fixture.draft();
+        draft.port = Some(9999);
+        draft.services = vec![
+            Service { key: String::new(), id: "web".into(), name: "前端".into(), dir: "./apps/frontend/".into(), port: Some(5199), kind: Some("web".into()), open_web: true },
+            Service { key: String::new(), id: "api".into(), name: "后端".into(), dir: "packages/back-end".into(), port: Some(8500), kind: None, open_web: false },
+        ];
+        draft.inject_ports = false;
+        let project = insert_project(&conn, draft.clone()).unwrap();
+        assert_eq!(project.port, Some(5199));
+        assert_eq!(project.services[0].dir, "apps/frontend");
+        assert_eq!(crate::read_projects(&conn).unwrap()[0].services, project.services);
+        assert!(!crate::read_projects(&conn).unwrap()[0].inject_ports);
+        let mut other = fixture.draft();
+        other.port = Some(8500);
+        assert!(insert_project(&conn, other).unwrap_err().contains("8500"));
+        assert_eq!(project_using_port(&conn, 8500, None).unwrap().unwrap().id, project.id);
+        assert!(project_using_port(&conn, 8500, Some(&project.id)).unwrap().is_none());
+        set_default_service_row(&conn, &project.id, "api").unwrap();
+        let project = crate::read_projects(&conn).unwrap().remove(0);
+        assert_eq!(project.port, Some(8500));
+        assert!(project.services[1].open_web && !project.services[0].open_web);
+        draft.services[1].open_web = true;
+        assert!(update_project_row(&conn, &project.id, draft.clone()).unwrap_err().contains("请选择"));
+        draft.services[0].open_web = false;
+        draft.services[0].dir = "../frontend".into();
+        assert!(update_project_row(&conn, &project.id, draft).unwrap_err().contains("相对目录"));
+    }
+
+    #[test]
+    fn injected_environment_preserves_explicit_values_and_supports_legacy_ports() {
+        let conn = database();
+        let fixture = Fixture::new();
+        let mut project = insert_project(&conn, fixture.draft()).unwrap();
+        assert_eq!(launch_environment(&project), [EnvVar { key: "PORT".into(), value: "5199".into() }]);
+        project.services = vec![
+            Service { key: "WEB".into(), id: "web".into(), name: "前端".into(), dir: "apps/front-end".into(), port: Some(5199), kind: Some("web".into()), open_web: true },
+            Service { key: "API".into(), id: "api".into(), name: "后端".into(), dir: "server".into(), port: Some(8110), kind: Some("api".into()), open_web: false },
+            Service { key: "WORKER".into(), id: "worker".into(), name: "Worker".into(), dir: "worker".into(), port: None, kind: None, open_web: false },
+        ];
+        project.env = vec![EnvVar { key: "PORT".into(), value: "explicit".into() }, EnvVar { key: "BENTO_PORT_API".into(), value: "8111".into() }];
+        let env = launch_environment(&project);
+        assert_eq!(env.into_iter().map(|entry| (entry.key, entry.value)).collect::<Vec<_>>(), [
+            ("PORT".into(), "explicit".into()),
+            ("BENTO_PORT_API".into(), "8111".into()),
+            ("BENTO_PORT_WEB".into(), "5199".into()),
+            ("BENTO_PORTS".into(), "WEB:5199,API:8110".into()),
+        ]);
+        project.inject_ports = false;
+        assert_eq!(launch_environment(&project), project.env);
+        project.services.truncate(1);
+        project.inject_ports = true;
+        project.env.clear();
+        assert_eq!(launch_environment(&project), [EnvVar { key: "PORT".into(), value: "5199".into() }]);
+    }
+
+    #[test]
+    fn v6_service_key_migration_preserves_explicit_keys_and_numbers_role_duplicates() {
+        let conn = database();
+        let entries = serde_json::json!([
+            {"id":"web-1","name":"Web","dir":"apps/front","port":3100,"kind":"web","openWeb":true},
+            {"id":"web-2","name":"Admin","dir":"apps/admin","port":null,"kind":"web","openWeb":false},
+            {"id":"api","name":"API","dir":"services/api","port":8100,"kind":"api","openWeb":false},
+            {"id":"worker","name":"Worker","dir":"my.worker","port":null,"openWeb":false},
+            {"id":"custom","name":"Custom","dir":"existing","port":8120,"key":"WEB","openWeb":false}
+        ]);
+        conn.execute("INSERT INTO projects(id,name,path,port,start_command,services) VALUES('v6','V6','/path',3100,'./dev.sh',?1)",
+            [entries.to_string()]).unwrap();
+        crate::init_db(&conn).unwrap();
+        let read = || conn.query_row("SELECT services FROM projects WHERE id='v6'", [], |row| row.get::<_, String>(0)).unwrap();
+        let migrated = read();
+        let services: Vec<Service> = serde_json::from_str(&migrated).unwrap();
+        assert_eq!(services.iter().map(|service| service.key.as_str()).collect::<Vec<_>>(), ["WEB_2", "WEB_3", "API", "MY_WORKER", "WEB"]);
+        assert_eq!(normalize_services(services.clone()).unwrap(), services);
+        crate::init_db(&conn).unwrap();
+        assert_eq!(read(), migrated);
+        let mut duplicate = services.clone();
+        duplicate[1].key = duplicate[0].key.clone();
+        assert!(normalize_services(duplicate).unwrap_err().contains("重复"));
+        let mut invalid = services;
+        invalid[0].key = "web-key".into();
+        assert!(normalize_services(invalid).unwrap_err().contains("大写字母"));
     }
 
     #[test]
@@ -1117,7 +1385,9 @@ mod tests {
         let config: ProjectConfig = serde_json::from_value(old.clone()).unwrap();
         let draft: ProjectDraft = serde_json::from_value(old).unwrap();
         assert!(config.env.is_empty() && config.commands.is_empty() && !config.auto_open);
+        assert!(config.services.is_empty() && config.inject_ports);
         assert!(draft.env.is_empty() && draft.commands.is_empty() && !draft.auto_open);
+        assert!(draft.services.is_empty() && draft.inject_ports);
     }
 
     #[test]
