@@ -230,6 +230,13 @@ pub fn capture_trees(roots: &[ManagedRoot]) -> Vec<Arc<ProcessTree>> {
         .collect()
 }
 
+pub fn managed_pids(root: &ManagedRoot) -> HashSet<u32> {
+    ProcessTree::capture(root, &process_table())
+        .members
+        .into_keys()
+        .collect()
+}
+
 pub fn terminate_trees_blocking(trees: &[Arc<ProcessTree>]) {
     for tree in trees {
         tree.signal(libc::SIGTERM);
@@ -253,17 +260,22 @@ pub fn port_pids(port: u16) -> Vec<u32> {
 #[serde(rename_all = "camelCase")]
 pub struct PortOwner {
     pub pid: u32,
-    command: String,
-    cwd: Option<String>,
-    in_project: bool,
+    pub command: String,
+    pub cwd: Option<String>,
+    pub in_project: bool,
 }
 
 pub fn port_owners(port: u16, project_path: &str) -> Vec<PortOwner> {
-    let project = std::path::PathBuf::from(crate::expand_tilde(project_path))
-        .canonicalize()
-        .ok();
-    port_pids(port)
-        .into_iter()
+    owners_for_pids(port_pids(port), Some(project_path))
+}
+
+pub fn owners_for_pids(pids: Vec<u32>, project_path: Option<&str>) -> Vec<PortOwner> {
+    let project = project_path.and_then(|path| {
+        std::path::PathBuf::from(crate::expand_tilde(path))
+            .canonicalize()
+            .ok()
+    });
+    pids.into_iter()
         .map(|pid| {
             let command = Command::new("ps")
                 .args(["-o", "command=", "-p", &pid.to_string()])

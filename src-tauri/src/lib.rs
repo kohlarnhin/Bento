@@ -17,9 +17,10 @@ mod quit;
 mod tray;
 mod git;
 mod settings;
+mod sidebar;
 mod autostart;
 use lifecycle::ProcessMap;
-use projects::{ProjectDraft, ProjectDirInspection};
+use projects::{PortConflictCheck, ProjectDraft, ProjectDirInspection};
 #[cfg(debug_assertions)]
 mod debug_e2e;
 
@@ -48,6 +49,12 @@ pub struct ProjectConfig {
     pub commands: Vec<projects::ExtraCommand>,
     #[serde(default)]
     pub auto_open: bool,
+    #[serde(default)]
+    pub group_id: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub archived: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -62,6 +69,7 @@ pub struct PortConflict {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectsResponse {
     pub projects: Vec<ProjectConfig>,
+    pub groups: Vec<sidebar::ProjectGroup>,
     pub conflicts: Vec<PortConflict>,
     pub config_path: String,
 }
@@ -114,6 +122,14 @@ pub fn init_db(conn: &Connection) -> Result<(), rusqlite::Error> {
         )", [],
     )?;
     transaction.execute(
+        "CREATE TABLE IF NOT EXISTS groups (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            sort_order INTEGER NOT NULL,
+            collapsed INTEGER NOT NULL DEFAULT 0
+        )", [],
+    )?;
+    transaction.execute(
         "CREATE TABLE IF NOT EXISTS projects (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -152,7 +168,11 @@ pub fn init_db(conn: &Connection) -> Result<(), rusqlite::Error> {
             transaction.execute("UPDATE projects SET sort_order = ?1 WHERE id = ?2", params![position as i64, id])?;
         }
     }
-    for (column, definition) in [("env", "TEXT"), ("commands", "TEXT"), ("auto_open", "INTEGER NOT NULL DEFAULT 0")] {
+    for (column, definition) in [
+        ("env", "TEXT"), ("commands", "TEXT"), ("auto_open", "INTEGER NOT NULL DEFAULT 0"),
+        ("group_id", "TEXT REFERENCES groups(id) ON DELETE SET NULL"),
+        ("pinned", "INTEGER NOT NULL DEFAULT 0"), ("archived", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
         if !columns.contains(column) {
             transaction.execute(&format!("ALTER TABLE projects ADD COLUMN {column} {definition}"), [])?;
         }
@@ -226,6 +246,7 @@ pub fn get_projects_sync() -> Result<ProjectsResponse, String> {
     let projects = read_projects(&conn)?;
     let conflicts = calculate_conflicts(&projects);
     Ok(ProjectsResponse {
+        groups: sidebar::read_groups(&conn)?,
         projects,
         conflicts,
         config_path: db_path.to_string_lossy().to_string(),
@@ -234,7 +255,7 @@ pub fn get_projects_sync() -> Result<ProjectsResponse, String> {
 
 fn read_projects(conn: &Connection) -> Result<Vec<ProjectConfig>, String> {
     let mut stmt = conn
-        .prepare("SELECT id, name, display_name, description, path, port, start_command, type, env, commands, auto_open FROM projects ORDER BY sort_order IS NULL, sort_order, created_at, id")
+        .prepare("SELECT id, name, display_name, description, path, port, start_command, type, env, commands, auto_open, group_id, pinned, archived FROM projects ORDER BY sort_order IS NULL, sort_order, created_at, id")
         .map_err(|e| format!("查询失败: {}", e))?;
 
     let project_iter = stmt
@@ -248,6 +269,9 @@ fn read_projects(conn: &Connection) -> Result<Vec<ProjectConfig>, String> {
                 env: projects::parse_list(env.as_deref(), &id, "env"),
                 commands: projects::parse_list(commands.as_deref(), &id, "commands"),
                 auto_open: row.get::<_, i64>(10).unwrap_or(0) != 0,
+                group_id: row.get(11)?,
+                pinned: row.get(12)?,
+                archived: row.get(13)?,
                 id,
                 name: row.get(1)?,
                 display_name: row.get(2)?,
@@ -355,6 +379,22 @@ async fn check_port_occupied(port: u16) -> Result<bool, String> {
 }
 
 #[tauri::command]
+async fn check_port_conflicts(
+    port: u16,
+    exclude_project_id: Option<String>,
+    state: State<'_, ProcessMap>,
+) -> Result<PortConflictCheck, String> {
+    let root = {
+        let data = state.lock().await;
+        exclude_project_id.as_ref().and_then(|id| data.managed.get(id).map(|info| info.root()))
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let managed_pids = root.as_ref().map(processes::managed_pids).unwrap_or_default();
+        projects::check_port_conflicts(&open_project_db()?, port, exclude_project_id.as_deref(), &managed_pids)
+    }).await.map_err(|err| format!("检查端口失败：{err}"))?
+}
+
+#[tauri::command]
 async fn open_url(url: String) -> Result<(), String> {
     open_url_sync(&url)
 }
@@ -425,12 +465,19 @@ pub fn run() {
         get_projects,
         add_project,
         reorder_projects,
+        sidebar::add_group,
+        sidebar::update_group,
+        sidebar::delete_group,
+        sidebar::reorder_groups,
+        sidebar::move_project,
+        sidebar::set_project_flags,
         update_project,
         delete_project,
         inspect_project_dir,
         lifecycle::get_running_projects,
         lifecycle::get_projects_runtime_status,
         check_port_occupied,
+        check_port_conflicts,
         lifecycle::start_project,
         lifecycle::stop_project,
         lifecycle::stop_all_projects,
@@ -673,6 +720,7 @@ mod tests {
                 start_command: "npm run dev".to_string(),
                 project_type: Some("web".to_string()),
                 env: Vec::new(), commands: Vec::new(), auto_open: false,
+                group_id: None, pinned: false, archived: false,
             },
             ProjectConfig {
                 id: "p2".to_string(),
@@ -684,6 +732,7 @@ mod tests {
                 start_command: "npm run dev".to_string(),
                 project_type: Some("web".to_string()),
                 env: Vec::new(), commands: Vec::new(), auto_open: false,
+                group_id: None, pinned: false, archived: false,
             },
         ];
         let conflicts = calculate_conflicts(&projects);
@@ -703,6 +752,7 @@ mod tests {
                 start_command: "npm run dev".to_string(),
                 project_type: Some("web".to_string()),
                 env: Vec::new(), commands: Vec::new(), auto_open: false,
+                group_id: None, pinned: false, archived: false,
             },
             ProjectConfig {
                 id: "p2".to_string(),
@@ -714,6 +764,7 @@ mod tests {
                 start_command: "npm run dev".to_string(),
                 project_type: Some("web".to_string()),
                 env: Vec::new(), commands: Vec::new(), auto_open: false,
+                group_id: None, pinned: false, archived: false,
             },
         ];
         let conflicts = calculate_conflicts(&projects);

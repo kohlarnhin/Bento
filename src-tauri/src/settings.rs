@@ -5,9 +5,12 @@ use serde_json::Value;
 const FONT_SIZE: &str = "terminal.fontSize";
 const MAX_PER_PROJECT: &str = "terminal.maxPerProject";
 const DEFAULT_APPLIED: &str = "autostart.defaultApplied";
+const COMPACT_SIDEBAR: &str = "sidebar.compact";
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Settings {
+    #[serde(rename = "sidebar.compact")]
+    pub compact_sidebar: bool,
     #[serde(rename = "terminal.fontSize")]
     pub terminal_font_size: u8,
     #[serde(rename = "terminal.maxPerProject")]
@@ -22,7 +25,9 @@ pub fn read(conn: &Connection) -> Result<Settings, String> {
     ).optional().map_err(|error| error.to_string())?;
     let terminal_font_size = saved.and_then(|value| value.parse::<u8>().ok())
         .filter(|size| (12..=20).contains(size)).unwrap_or(14);
-    Ok(Settings { terminal_font_size, terminal_max_per_project: max_per_project(conn)?, autostart_default_applied: default_applied(conn)? })
+    let compact: Option<String> = conn.query_row("SELECT value FROM settings WHERE key=?1", [COMPACT_SIDEBAR], |row| row.get(0))
+        .optional().map_err(|error| error.to_string())?;
+    Ok(Settings { compact_sidebar: compact.as_deref() != Some("false"), terminal_font_size, terminal_max_per_project: max_per_project(conn)?, autostart_default_applied: default_applied(conn)? })
 }
 
 pub fn max_per_project(conn: &Connection) -> Result<u8, String> {
@@ -52,6 +57,10 @@ fn save(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
 
 pub fn set(conn: &Connection, key: &str, value: Value) -> Result<(), String> {
     match key {
+        COMPACT_SIDEBAR => {
+            let enabled = value.as_bool().ok_or("紧凑侧边栏设置必须是布尔值")?;
+            save(conn, key, if enabled { "true" } else { "false" })
+        }
         FONT_SIZE => {
             let size = value.as_u64().filter(|size| (12..=20).contains(size))
                 .ok_or("终端字号必须是 12–20 的整数")?;
@@ -102,7 +111,7 @@ mod tests {
         crate::init_db(&conn).unwrap();
         crate::init_db(&conn).unwrap();
         assert_eq!(project_rows(&conn), before);
-        assert_eq!(read(&conn).unwrap(), Settings { terminal_font_size: 14, terminal_max_per_project: 2, autostart_default_applied: false });
+        assert_eq!(read(&conn).unwrap(), Settings { compact_sidebar: true, terminal_font_size: 14, terminal_max_per_project: 2, autostart_default_applied: false });
         set(&conn, FONT_SIZE, json!(18)).unwrap();
         assert_eq!(read(&conn).unwrap().terminal_font_size, 18);
         assert_eq!(project_rows(&conn), before);
@@ -114,6 +123,14 @@ mod tests {
         crate::init_db(&conn).unwrap();
         assert_eq!(read(&conn).unwrap().terminal_font_size, 14);
         assert_eq!(max_per_project(&conn).unwrap(), 2);
+        assert!(read(&conn).unwrap().compact_sidebar);
+        set(&conn, COMPACT_SIDEBAR, json!(false)).unwrap();
+        assert!(!read(&conn).unwrap().compact_sidebar);
+        set(&conn, COMPACT_SIDEBAR, json!(true)).unwrap();
+        assert!(read(&conn).unwrap().compact_sidebar);
+        for value in [json!(0), json!("false"), Value::Null] {
+            assert!(set(&conn, COMPACT_SIDEBAR, value).is_err());
+        }
         for value in [json!(0), json!(7), json!(-1), json!(2.5), json!(2.0), json!("2"), json!(true), Value::Null] {
             assert!(set(&conn, MAX_PER_PROJECT, value).is_err());
         }

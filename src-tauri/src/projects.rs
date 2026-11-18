@@ -1,4 +1,4 @@
-use crate::{check_port_in_use_sync, expand_tilde, ProjectConfig};
+use crate::{check_port_in_use_sync, expand_tilde, processes, ProjectConfig};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -87,6 +87,8 @@ pub struct ProjectDraft {
     pub commands: Vec<ExtraCommand>,
     #[serde(default)]
     pub auto_open: bool,
+    #[serde(default)]
+    pub group_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -94,6 +96,37 @@ pub struct ProjectDraft {
 pub struct ExistingProject {
     id: String,
     name: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum PortConfidence {
+    High,
+    Medium,
+    Low,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortCandidate {
+    port: u16,
+    source: String,
+    confidence: PortConfidence,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortInUse {
+    owners: Vec<processes::PortOwner>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortConflictCheck {
+    project_conflict: Option<ExistingProject>,
+    in_use: Option<PortInUse>,
+    reserved: Vec<String>,
+    suggestion: Option<u16>,
 }
 
 #[derive(Debug, Serialize)]
@@ -108,6 +141,7 @@ pub struct ProjectDirInspection {
     commands: Vec<String>,
     port: Option<u16>,
     port_source: Option<String>,
+    port_candidates: Vec<PortCandidate>,
     existing_project: Option<ExistingProject>,
 }
 
@@ -181,14 +215,10 @@ fn normalize_project(
         return Err("不是文件夹".into());
     }
     if let Some(port) = port {
-        let existing: Option<String> = conn.query_row(
-            "SELECT COALESCE(display_name, name) FROM projects WHERE port = ?1 AND (?2 IS NULL OR id != ?2)",
-            params![port, id], |row| row.get(0),
-        ).optional().map_err(|e| format!("检查端口失败：{e}"))?;
-        if let Some(existing) = existing {
+        if let Some(existing) = project_using_port(conn, port, id)? {
             return Err(format!(
                 "端口 {} 已被项目「{}」使用！各项目端口必须唯一，请更换端口。",
-                port, existing
+                port, existing.name
             ));
         }
     }
@@ -218,6 +248,12 @@ fn normalize_project(
     if draft.auto_open && (project_type != "web" || port.is_none()) {
         return Err("仅填写端口的 Web 项目可在启动就绪后自动打开网页".into());
     }
+    crate::sidebar::validate_group(conn, draft.group_id.as_deref())?;
+    let (pinned, archived) = match id {
+        Some(id) => conn.query_row("SELECT pinned, archived FROM projects WHERE id=?1", [id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|err| format!("读取项目状态失败：{err}"))?,
+        None => (false, false),
+    };
     Ok(ProjectConfig {
         id: id.unwrap_or_default().into(),
         name,
@@ -230,6 +266,9 @@ fn normalize_project(
         env: draft.env,
         commands,
         auto_open: draft.auto_open,
+        group_id: draft.group_id,
+        pinned,
+        archived,
     })
 }
 
@@ -251,7 +290,10 @@ fn slug(value: &str) -> String {
 }
 
 pub fn insert_project(conn: &Connection, draft: ProjectDraft) -> Result<ProjectConfig, String> {
-    let mut project = normalize_project(conn, draft, None)?;
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+            .map_err(|err| format!("新增项目失败：{err}"))?;
+    let mut project = normalize_project(&transaction, draft, None)?;
     let mut base = slug(&project.name);
     if base.is_empty() {
         base = slug(
@@ -267,7 +309,7 @@ pub fn insert_project(conn: &Connection, draft: ProjectDraft) -> Result<ProjectC
     }
     let mut id = base.clone();
     let mut suffix = 2;
-    while conn
+    while transaction
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
             [&id],
@@ -279,10 +321,13 @@ pub fn insert_project(conn: &Connection, draft: ProjectDraft) -> Result<ProjectC
         suffix += 1;
     }
     project.id = id;
-    conn.execute(
-        "INSERT INTO projects (id, name, display_name, description, path, port, start_command, type, sort_order, env, commands, auto_open) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects), ?9, ?10, ?11)",
-        params![project.id, project.name, project.display_name, project.description, project.path, project.port, project.start_command, project.project_type, serde_json::to_string(&project.env).map_err(|err| err.to_string())?, serde_json::to_string(&project.commands).map_err(|err| err.to_string())?, project.auto_open],
+    transaction.execute(
+        "INSERT INTO projects (id, name, display_name, description, path, port, start_command, type, sort_order, env, commands, auto_open, group_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects), ?9, ?10, ?11, ?12)",
+        params![project.id, project.name, project.display_name, project.description, project.path, project.port, project.start_command, project.project_type, serde_json::to_string(&project.env).map_err(|err| err.to_string())?, serde_json::to_string(&project.commands).map_err(|err| err.to_string())?, project.auto_open, project.group_id],
     ).map_err(|e| format!("新增项目失败：{e}"))?;
+    transaction
+        .commit()
+        .map_err(|err| format!("新增项目失败：{err}"))?;
     Ok(project)
 }
 
@@ -290,8 +335,13 @@ pub fn reorder_project_rows(conn: &mut Connection, ids: &[String]) -> Result<(),
     let transaction = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|error| format!("保存项目排序失败：{error}"))?;
+    write_project_order(&transaction, ids)?;
+    transaction.commit().map_err(|error| format!("保存项目排序失败：{error}"))
+}
+
+pub fn write_project_order(conn: &Connection, ids: &[String]) -> Result<(), String> {
     let current = {
-        let mut statement = transaction
+        let mut statement = conn
             .prepare("SELECT id FROM projects")
             .map_err(|error| format!("读取项目列表失败：{error}"))?;
         let rows = statement
@@ -305,16 +355,14 @@ pub fn reorder_project_rows(conn: &mut Connection, ids: &[String]) -> Result<(),
         return Err("项目列表已变化，请刷新后重试".into());
     }
     for (position, id) in ids.iter().enumerate() {
-        transaction
+        conn
             .execute(
                 "UPDATE projects SET sort_order = ?1 WHERE id = ?2",
                 params![position as i64, id],
             )
             .map_err(|error| format!("保存项目排序失败：{error}"))?;
     }
-    transaction
-        .commit()
-        .map_err(|error| format!("保存项目排序失败：{error}"))
+    Ok(())
 }
 
 pub fn update_project_row(
@@ -322,7 +370,10 @@ pub fn update_project_row(
     id: &str,
     draft: ProjectDraft,
 ) -> Result<ProjectConfig, String> {
-    let exists: bool = conn
+    let transaction =
+        rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+            .map_err(|err| format!("更新项目失败：{err}"))?;
+    let exists: bool = transaction
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
             [id],
@@ -332,11 +383,14 @@ pub fn update_project_row(
     if !exists {
         return Err("未找到项目".into());
     }
-    let project = normalize_project(conn, draft, Some(id))?;
-    conn.execute(
-        "UPDATE projects SET name=?1, display_name=?2, description=?3, path=?4, port=?5, start_command=?6, type=?7, env=?9, commands=?10, auto_open=?11, updated_at=CURRENT_TIMESTAMP WHERE id=?8",
-        params![project.name, project.display_name, project.description, project.path, project.port, project.start_command, project.project_type, id, serde_json::to_string(&project.env).map_err(|err| err.to_string())?, serde_json::to_string(&project.commands).map_err(|err| err.to_string())?, project.auto_open],
+    let project = normalize_project(&transaction, draft, Some(id))?;
+    transaction.execute(
+        "UPDATE projects SET name=?1, display_name=?2, description=?3, path=?4, port=?5, start_command=?6, type=?7, env=?9, commands=?10, auto_open=?11, group_id=?12, updated_at=CURRENT_TIMESTAMP WHERE id=?8",
+        params![project.name, project.display_name, project.description, project.path, project.port, project.start_command, project.project_type, id, serde_json::to_string(&project.env).map_err(|err| err.to_string())?, serde_json::to_string(&project.commands).map_err(|err| err.to_string())?, project.auto_open, project.group_id],
     ).map_err(|e| format!("更新项目失败：{e}"))?;
+    transaction
+        .commit()
+        .map_err(|err| format!("更新项目失败：{err}"))?;
     Ok(project)
 }
 
@@ -358,30 +412,98 @@ fn script_command(pm: &str, script: &str) -> String {
     }
 }
 
-fn script_port(script: &str) -> Option<u16> {
-    let mut words = script.split_whitespace();
+fn literal_port(value: &str) -> Option<u16> {
+    value
+        .trim()
+        .trim_matches(['\'', '"'])
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port > 0)
+}
+
+fn script_ports(script: &str) -> Vec<u16> {
+    let mut ports = Vec::new();
+    let mut words = script
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, ';' | '&' | '|'))
+        .filter(|word| !word.is_empty());
     while let Some(word) = words.next() {
+        let word = word.trim_matches(['\'', '"']);
         let value = if matches!(word, "--port" | "-p") {
             words.next()
         } else {
             word.strip_prefix("--port=")
+                .or_else(|| word.strip_prefix("-p="))
+                .or_else(|| word.strip_prefix("PORT="))
+                .or_else(|| word.strip_prefix("VITE_PORT="))
         };
-        if let Some(port) = value
-            .and_then(|s| s.trim_matches(['\'', '"', ';']).parse::<u16>().ok())
-            .filter(|p| *p > 0)
-        {
-            return Some(port);
+        if let Some(port) = value.and_then(literal_port) {
+            ports.push(port);
         }
     }
-    None
+    ports
 }
 
-fn vite_port(config: &str) -> Option<u16> {
-    // Read a literal `port: NNNN` without evaluating JavaScript or walking the project.
-    for line in config
+fn env_ports(config: &str) -> Vec<u16> {
+    config
         .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-    {
+        .filter_map(|line| {
+            let line = line.trim().strip_prefix("export ").unwrap_or(line.trim());
+            let (key, value) = line.split_once('=')?;
+            if !matches!(key.trim(), "PORT" | "VITE_PORT") {
+                return None;
+            }
+            literal_port(value.split('#').next()?)
+        })
+        .collect()
+}
+
+fn without_js_comments(config: &str) -> String {
+    let mut result = String::new();
+    let mut chars = config.chars().peekable();
+    let mut quote = None;
+    while let Some(ch) = chars.next() {
+        if let Some(delimiter) = quote {
+            result.push(ch);
+            if ch == '\\' {
+                if let Some(escaped) = chars.next() {
+                    result.push(escaped);
+                }
+            } else if ch == delimiter {
+                quote = None;
+            }
+        } else if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+            result.push(ch);
+        } else if ch == '/' && chars.peek() == Some(&'/') {
+            for next in chars.by_ref() {
+                if next == '\n' {
+                    result.push('\n');
+                    break;
+                }
+            }
+        } else if ch == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            while let Some(next) = chars.next() {
+                if next == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    break;
+                }
+                if next == '\n' {
+                    result.push('\n');
+                }
+            }
+            result.push(' ');
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+fn config_ports(config: &str) -> Vec<u16> {
+    // Read literal port properties without evaluating JavaScript or walking the project.
+    let mut ports = Vec::new();
+    for line in without_js_comments(config).lines() {
         for (index, _) in line.match_indices("port") {
             if index > 0
                 && line[..index]
@@ -391,20 +513,180 @@ fn vite_port(config: &str) -> Option<u16> {
             {
                 continue;
             }
-            let Some(rest) = line[index + 4..].trim_start().strip_prefix(':') else {
+            let rest = line[index + 4..]
+                .trim_start()
+                .trim_start_matches(['\'', '"']);
+            let Some(rest) = rest.trim_start().strip_prefix(':') else {
                 continue;
             };
-            let digits: String = rest
-                .trim_start()
-                .chars()
-                .take_while(char::is_ascii_digit)
-                .collect();
-            if let Some(port) = digits.parse::<u16>().ok().filter(|p| *p > 0) {
-                return Some(port);
+            let value = rest.trim_start().trim_start_matches(['\'', '"']);
+            let digits: String = value.chars().take_while(char::is_ascii_digit).collect();
+            if !value[digits.len()..].starts_with(|ch: char| {
+                ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '+' | '-')
+            }) {
+                if let Some(port) = literal_port(&digits) {
+                    ports.push(port);
+                }
             }
         }
     }
-    None
+    ports
+}
+
+fn compose_ports(config: &str) -> Vec<u16> {
+    let mut ports = Vec::new();
+    let mut ports_indent = None;
+    for line in config.lines() {
+        let text = line.split('#').next().unwrap_or_default().trim();
+        if text.is_empty() {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        let mappings = if let Some(value) = text.strip_prefix("ports:") {
+            ports_indent = Some(indent);
+            value
+        } else if ports_indent
+            .is_some_and(|parent| indent > parent || (indent == parent && text.starts_with('-')))
+        {
+            text.strip_prefix('-').unwrap_or_default()
+        } else {
+            ports_indent = None;
+            continue;
+        };
+        for mapping in mappings
+            .split(|ch: char| ch.is_whitespace() || matches!(ch, '\'' | '"' | ',' | '[' | ']'))
+        {
+            let mut fields = mapping.rsplit(':');
+            let container = fields
+                .next()
+                .unwrap_or_default()
+                .split('/')
+                .next()
+                .unwrap_or_default();
+            if literal_port(container).is_some() {
+                if let Some(host) = fields.next().and_then(literal_port) {
+                    ports.push(host);
+                }
+            }
+        }
+    }
+    ports
+}
+
+fn add_port_candidate(
+    candidates: &mut Vec<PortCandidate>,
+    port: u16,
+    source: &str,
+    confidence: PortConfidence,
+) {
+    if port == 0 {
+        return;
+    }
+    if let Some(existing) = candidates
+        .iter_mut()
+        .find(|candidate| candidate.port == port)
+    {
+        if !existing.source.split("、").any(|item| item == source) {
+            existing.source.push_str("、");
+            existing.source.push_str(source);
+        }
+        existing.confidence = existing.confidence.min(confidence);
+    } else {
+        candidates.push(PortCandidate {
+            port,
+            source: source.into(),
+            confidence,
+        });
+    }
+}
+
+fn project_using_port(
+    conn: &Connection,
+    port: u16,
+    exclude_id: Option<&str>,
+) -> Result<Option<ExistingProject>, String> {
+    conn.query_row(
+        "SELECT id, COALESCE(NULLIF(display_name, ''), name) FROM projects WHERE port = ?1 AND (?2 IS NULL OR id != ?2) ORDER BY id LIMIT 1",
+        params![port, exclude_id],
+        |row| Ok(ExistingProject { id: row.get(0)?, name: row.get(1)? }),
+    ).optional().map_err(|err| format!("检查端口失败：{err}"))
+}
+
+fn suggest_port(
+    port: u16,
+    used_ports: &HashSet<u16>,
+    mut listening: impl FnMut(u16) -> bool,
+) -> Option<u16> {
+    (port.checked_add(1)?..=u16::MAX)
+        .find(|candidate| !used_ports.contains(candidate) && !listening(*candidate))
+}
+
+fn conflicting_owners(
+    owners: Vec<processes::PortOwner>,
+    managed_pids: &HashSet<u32>,
+) -> Vec<processes::PortOwner> {
+    owners
+        .into_iter()
+        .filter(|owner| !owner.in_project && !managed_pids.contains(&owner.pid))
+        .collect()
+}
+
+fn reserved_port_warnings(port: u16) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if port < 1024 {
+        warnings.push("1024 以下的端口可能需要管理员权限".into());
+    }
+    if cfg!(target_os = "macos") && matches!(port, 5000 | 7000) {
+        warnings.push(format!(
+            "macOS 的 AirPlay 接收器常占用端口 {port}，可在系统设置中关闭 AirPlay 接收器"
+        ));
+    }
+    warnings
+}
+
+pub fn check_port_conflicts(
+    conn: &Connection,
+    port: u16,
+    exclude_id: Option<&str>,
+    managed_pids: &HashSet<u32>,
+) -> Result<PortConflictCheck, String> {
+    if port == 0 {
+        return Err("端口必须是 1–65535 之间的整数".into());
+    }
+    let project_conflict = project_using_port(conn, port, exclude_id)?;
+    let project_path: Option<String> = if let Some(id) = exclude_id {
+        conn.query_row("SELECT path FROM projects WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(|err| format!("查询项目失败：{err}"))?
+    } else {
+        None
+    };
+    let mut statement = conn
+        .prepare("SELECT port FROM projects WHERE port IS NOT NULL AND (?1 IS NULL OR id != ?1)")
+        .map_err(|err| format!("检查端口失败：{err}"))?;
+    let used_ports = statement
+        .query_map([exclude_id], |row| row.get::<_, u16>(0))
+        .map_err(|err| format!("检查端口失败：{err}"))?
+        .collect::<rusqlite::Result<HashSet<_>>>()
+        .map_err(|err| format!("检查端口失败：{err}"))?;
+    let listeners = processes::listening_ports();
+    let pids = listeners.get(&port).cloned().unwrap_or_default();
+    let unknown_listener = pids.is_empty() && processes::probe_loopback(port);
+    let owners = conflicting_owners(
+        processes::owners_for_pids(pids, project_path.as_deref()),
+        managed_pids,
+    );
+    let in_use = (unknown_listener || !owners.is_empty()).then_some(PortInUse { owners });
+    Ok(PortConflictCheck {
+        project_conflict,
+        in_use,
+        reserved: reserved_port_warnings(port),
+        suggestion: suggest_port(port, &used_ports, |candidate| {
+            listeners.contains_key(&candidate) || processes::probe_loopback(candidate)
+        }),
+    })
 }
 
 pub fn inspect_project_dir(
@@ -433,6 +715,7 @@ pub fn inspect_project_dir(
         commands: Vec::new(),
         port: None,
         port_source: None,
+        port_candidates: Vec::new(),
         existing_project: None,
     };
     if !is_dir {
@@ -501,47 +784,131 @@ pub fn inspect_project_dir(
             .ok()?
             .port()
     });
-    let mut detected = tauri_port.map(|p| (p, "tauri.conf.json".to_string()));
-    if detected.is_none() {
-        for file in [
-            "vite.config.ts",
-            "vite.config.mts",
-            "vite.config.js",
-            "vite.config.mjs",
-        ] {
-            if let Some(port) = std::fs::read_to_string(path.join(file))
-                .ok()
-                .and_then(|s| vite_port(&s))
-            {
-                detected = Some((port, file.into()));
-                break;
+    let candidates = &mut result.port_candidates;
+    if let Some(port) = tauri_port {
+        add_port_candidate(
+            candidates,
+            port,
+            "src-tauri/tauri.conf.json",
+            PortConfidence::High,
+        );
+    }
+    for prefix in ["vite", "next", "nuxt", "astro"] {
+        for extension in ["ts", "mts", "js", "mjs", "cjs", "cts"] {
+            let file = format!("{prefix}.config.{extension}");
+            if let Ok(config) = std::fs::read_to_string(path.join(&file)) {
+                for port in config_ports(&config) {
+                    add_port_candidate(candidates, port, &file, PortConfidence::High);
+                }
             }
         }
     }
-    if detected.is_none() {
-        // Tauri's command launches the frontend dev script; its port belongs to that server.
-        let dev_script = package["scripts"]["dev"]
-            .as_str()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| {
-                package["scripts"]["start"]
-                    .as_str()
-                    .filter(|s| !s.trim().is_empty())
-            })
-            .or(chosen_script);
-        detected = dev_script
-            .and_then(script_port)
-            .map(|p| (p, "package.json".into()));
+    if let Some(angular) = read_json(&path.join("angular.json")) {
+        if let Some(projects) = angular["projects"].as_object() {
+            for project in projects.values() {
+                for key in ["architect", "targets"] {
+                    if let Some(port) = project[key]["serve"]["options"]["port"]
+                        .as_u64()
+                        .and_then(|port| u16::try_from(port).ok())
+                    {
+                        add_port_candidate(candidates, port, "angular.json", PortConfidence::High);
+                    }
+                }
+            }
+        }
     }
-    if detected.is_none() {
-        detected = if dependency(&package, "vite") {
-            Some((5173, "Vite 默认端口".into()))
-        } else if dependency(&package, "next") {
-            Some((3000, "Next.js 默认端口".into()))
+    // Tauri launches its frontend dev script; inspect it before alternate scripts.
+    let dev_script = package["scripts"]["dev"]
+        .as_str()
+        .filter(|script| !script.trim().is_empty())
+        .or_else(|| {
+            package["scripts"]["start"]
+                .as_str()
+                .filter(|script| !script.trim().is_empty())
+        })
+        .or(chosen_script);
+    if let Some(script) = dev_script {
+        for port in script_ports(script) {
+            add_port_candidate(candidates, port, "package.json", PortConfidence::High);
+        }
+    }
+    for file in [".env.development", ".env.local", ".env"] {
+        if let Ok(config) = std::fs::read_to_string(path.join(file)) {
+            for port in env_ports(&config) {
+                add_port_candidate(candidates, port, file, PortConfidence::High);
+            }
+        }
+    }
+    if let Some(scripts) = package["scripts"].as_object() {
+        for script in scripts.values().filter_map(Value::as_str) {
+            for port in script_ports(script) {
+                add_port_candidate(candidates, port, "package.json", PortConfidence::Medium);
+            }
+        }
+    }
+    if let Ok(script) = std::fs::read_to_string(path.join("start.sh")) {
+        let confidence = if result
+            .commands
+            .first()
+            .is_some_and(|command| command == "./start.sh")
+        {
+            PortConfidence::High
         } else {
-            None
+            PortConfidence::Medium
         };
+        for port in script
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .flat_map(script_ports)
+        {
+            add_port_candidate(candidates, port, "start.sh", confidence);
+        }
     }
+    for file in [
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "compose.yaml",
+        "compose.yml",
+    ] {
+        if let Ok(config) = std::fs::read_to_string(path.join(file)) {
+            for port in compose_ports(&config) {
+                add_port_candidate(candidates, port, file, PortConfidence::Medium);
+            }
+        }
+    }
+    let framework_default = [
+        ("next", 3000, "Next.js 默认端口"),
+        ("nuxt", 3000, "Nuxt 默认端口"),
+        ("astro", 4321, "Astro 默认端口"),
+        ("@angular/core", 4200, "Angular 默认端口"),
+        ("vite", 5173, "Vite 默认端口"),
+    ]
+    .into_iter()
+    .find(|(name, _, _)| dependency(&package, name));
+    if let Some((_, port, _)) = framework_default {
+        add_port_candidate(candidates, port, "框架默认", PortConfidence::Low);
+    }
+    candidates.sort_by_key(|candidate| candidate.confidence);
+    // Alternate scripts/Compose remain candidates, but must not replace the dev server's default.
+    let recommended = candidates
+        .iter()
+        .find(|candidate| candidate.confidence == PortConfidence::High)
+        .or_else(|| {
+            framework_default
+                .and_then(|(_, port, _)| candidates.iter().find(|candidate| candidate.port == port))
+        })
+        .or_else(|| candidates.first());
+    let mut detected = recommended.map(|candidate| {
+        let source = candidate.source.split("、").next().unwrap_or_default();
+        let source = match source {
+            "src-tauri/tauri.conf.json" => "tauri.conf.json",
+            "框架默认" => framework_default
+                .map(|(_, _, label)| label)
+                .unwrap_or(source),
+            _ => source,
+        };
+        (candidate.port, source.to_string())
+    });
     let mut stmt = conn.prepare("SELECT id, COALESCE(display_name, name), path, port FROM projects WHERE ?1 IS NULL OR id != ?1")
         .map_err(|e| format!("查询项目失败：{e}"))?;
     let rows = stmt
@@ -613,6 +980,7 @@ mod tests {
                 env: Vec::new(),
                 commands: Vec::new(),
                 auto_open: false,
+                group_id: None,
             }
         }
         fn inspect(&self, conn: &Connection) -> ProjectDirInspection {
@@ -1107,5 +1475,252 @@ mod tests {
         let file =
             inspect_project_dir(&conn, f.0.join("package.json").to_str().unwrap(), None).unwrap();
         assert!(file.exists && !file.is_dir);
+    }
+
+    #[test]
+    fn scan_env_scripts_compose_and_merge_sources_by_confidence() {
+        let conn = database();
+        let f = Fixture::new();
+        f.write(
+            ".env",
+            "# PORT=9999\nPORT=5300\nVITE_PORT=0\nOTHER_PORT=9998\nPORT=65536\n",
+        );
+        f.write(
+            ".env.local",
+            "export VITE_PORT = '5301' # local\nPORT=not-a-number\n",
+        );
+        f.write(".env.development", "PORT=5302\n");
+        f.write("package.json", r#"{"scripts":{"dev":"cross-env PORT=5303 vite --port   5304","preview":"vite preview -p\t5305","serve":"PORT='5306' node server.js; node other.js --port=5307"},"devDependencies":{"vite":"*"}}"#);
+        f.write("docker-compose.yml", "services:\n  web:\n    ports:\n      - \"5300:80\"\n      - '127.0.0.1:5308:8080'\n      - 5309:3000/tcp\n    volumes:\n      - \"9000:9001\"\n");
+        f.write(
+            "compose.yaml",
+            "services:\n  other:\n    ports: [\"5310:80\", \"5300:3000\"]\n",
+        );
+        let result = f.inspect(&conn);
+        assert_eq!(result.port, Some(5303));
+        assert_eq!(result.port_source.as_deref(), Some("package.json"));
+        for port in 5300..=5310 {
+            assert!(
+                result
+                    .port_candidates
+                    .iter()
+                    .any(|candidate| candidate.port == port),
+                "missing {port}"
+            );
+        }
+        let merged = result
+            .port_candidates
+            .iter()
+            .find(|candidate| candidate.port == 5300)
+            .unwrap();
+        assert_eq!(merged.source, ".env、docker-compose.yml、compose.yaml");
+        assert_eq!(merged.confidence, PortConfidence::High);
+        assert_eq!(
+            result
+                .port_candidates
+                .iter()
+                .filter(|candidate| candidate.port == 5300)
+                .count(),
+            1
+        );
+        assert!(
+            !result
+                .port_candidates
+                .iter()
+                .any(|candidate| [0, 80, 3000, 8080, 9000, 9001, 9998, 9999]
+                    .contains(&candidate.port))
+        );
+        assert!(result
+            .port_candidates
+            .windows(2)
+            .all(|pair| pair[0].confidence <= pair[1].confidence));
+        assert_eq!(result.port_candidates.last().unwrap().source, "框架默认");
+        assert_eq!(
+            result.port_candidates.last().unwrap().confidence,
+            PortConfidence::Low
+        );
+        let json = serde_json::to_value(result).unwrap();
+        assert_eq!(json["portCandidates"][0]["confidence"], "high");
+    }
+
+    #[test]
+    fn scan_framework_configs_and_all_literal_ports() {
+        let conn = database();
+        let f = Fixture::new();
+        f.write("next.config.mjs", "// port: 9999\nexport default { /* port: 9998 */ devServer: { port: 3101 }, other: { 'port': '3102' }, report: 9997, url: 'http://localhost' }; // port: 9996");
+        f.write(
+            "nuxt.config.ts",
+            "export default defineNuxtConfig({ devServer: { port: 3103 } })",
+        );
+        f.write(
+            "astro.config.mjs",
+            "export default defineConfig({ server: { port: 3104 } })",
+        );
+        f.write("angular.json", r#"{"projects":{"one":{"architect":{"serve":{"options":{"port":3105}}}},"two":{"targets":{"serve":{"options":{"port":3106}}}}}}"#);
+        f.write(
+            "start.sh",
+            "#!/bin/sh\n# PORT=9995\nPORT=3107 node server.js\n",
+        );
+        let result = f.inspect(&conn);
+        assert_eq!(result.port, Some(3101));
+        assert_eq!(
+            result
+                .port_candidates
+                .iter()
+                .map(|candidate| candidate.port)
+                .collect::<Vec<_>>(),
+            (3101..=3107).collect::<Vec<_>>()
+        );
+        assert_eq!(result.port_candidates[4].source, "angular.json");
+        assert_eq!(result.port_candidates[6].source, "start.sh");
+    }
+
+    #[test]
+    fn scan_env_precedence_tauri_sources_and_framework_defaults() {
+        let conn = database();
+        let f = Fixture::new();
+        f.write(".env", "PORT=5400");
+        f.write(".env.local", "VITE_PORT=5401");
+        f.write(".env.development", "PORT=5402");
+        assert_eq!(f.inspect(&conn).port, Some(5402));
+        f.write(
+            "src-tauri/tauri.conf.json",
+            r#"{"build":{"devUrl":"http://localhost:5400"}}"#,
+        );
+        let result = f.inspect(&conn);
+        assert_eq!(result.port, Some(5400));
+        assert_eq!(result.port_source.as_deref(), Some("tauri.conf.json"));
+        assert_eq!(
+            result.port_candidates[0].source,
+            "src-tauri/tauri.conf.json、.env"
+        );
+        for (framework, port) in [("nuxt", 3000), ("astro", 4321), ("@angular/core", 4200)] {
+            let f = Fixture::new();
+            f.write(
+                "package.json",
+                &format!(r#"{{"dependencies":{{"{framework}":"*"}}}}"#),
+            );
+            let result = f.inspect(&conn);
+            assert_eq!(result.port, Some(port));
+            assert_eq!(result.port_candidates[0].source, "框架默认");
+            assert_eq!(result.port_candidates[0].confidence, PortConfidence::Low);
+        }
+    }
+
+    #[test]
+    fn alternate_script_candidates_preserve_the_main_dev_server_default() {
+        let conn = database();
+        let f = Fixture::new();
+        f.write("package.json", r#"{"scripts":{"dev":"vite","preview":"vite preview --port 4188"},"devDependencies":{"vite":"*"}}"#);
+        let result = f.inspect(&conn);
+        assert_eq!(result.port, Some(5173));
+        assert_eq!(result.port_source.as_deref(), Some("Vite 默认端口"));
+        assert_eq!(result.port_candidates[0].port, 4188);
+        assert_eq!(result.port_candidates[0].confidence, PortConfidence::Medium);
+        assert_eq!(result.port_candidates[1].confidence, PortConfidence::Low);
+        f.write("package.json", r#"{"devDependencies":{"vite":"*"}}"#);
+        f.write("start.sh", "#!/bin/sh\nvite --port 5403\n");
+        let result = f.inspect(&conn);
+        assert_eq!(result.port, Some(5403));
+        assert_eq!(result.port_source.as_deref(), Some("start.sh"));
+    }
+
+    #[test]
+    fn port_conflicts_report_project_names_and_exclude_current_project() {
+        let conn = database();
+        let f = Fixture::new();
+        let mut draft = f.draft();
+        draft.display_name = Some("端口测试项目".into());
+        let project = insert_project(&conn, draft.clone()).unwrap();
+        let conflict =
+            check_port_conflicts(&conn, project.port.unwrap(), None, &HashSet::new()).unwrap();
+        assert_eq!(conflict.project_conflict.as_ref().unwrap().id, project.id);
+        assert_eq!(conflict.project_conflict.unwrap().name, "端口测试项目");
+        let own = check_port_conflicts(
+            &conn,
+            project.port.unwrap(),
+            Some(&project.id),
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert!(own.project_conflict.is_none());
+        assert_eq!(
+            insert_project(&conn, draft.clone()).unwrap_err(),
+            "端口 5199 已被项目「端口测试项目」使用！各项目端口必须唯一，请更换端口。"
+        );
+        update_project_row(&conn, &project.id, draft.clone()).unwrap();
+        draft.port = Some(5200);
+        let second = insert_project(&conn, draft.clone()).unwrap();
+        draft.port = Some(5199);
+        assert!(update_project_row(&conn, &second.id, draft)
+            .unwrap_err()
+            .contains("端口测试项目"));
+        assert!(check_port_conflicts(&conn, 0, None, &HashSet::new()).is_err());
+    }
+
+    #[test]
+    fn own_listeners_are_excluded_without_hiding_other_processes() {
+        let owner = |pid, in_project| processes::PortOwner {
+            pid,
+            command: format!("node {pid}"),
+            cwd: None,
+            in_project,
+        };
+        let result = conflicting_owners(
+            vec![owner(21, true), owner(22, false), owner(23, false)],
+            &HashSet::from([22]),
+        );
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].pid, 23);
+        assert!(conflicting_owners(
+            vec![owner(21, true), owner(22, false)],
+            &HashSet::from([22])
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn conflict_detection_reports_real_listener_and_ignores_project_cwd() {
+        let conn = database();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let conflict = check_port_conflicts(&conn, port, None, &HashSet::new()).unwrap();
+        let owners = conflict.in_use.unwrap().owners;
+        assert!(owners
+            .iter()
+            .any(|owner| owner.pid == std::process::id() && !owner.command.is_empty()));
+        let f = Fixture::new();
+        let mut draft = f.draft();
+        draft.path = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        draft.port = Some(port.into());
+        let project = insert_project(&conn, draft).unwrap();
+        assert!(
+            check_port_conflicts(&conn, port, Some(&project.id), &HashSet::new())
+                .unwrap()
+                .in_use
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn suggestions_skip_saved_and_listening_ports_and_stop_at_maximum() {
+        let used = HashSet::from([5174, 5176]);
+        let listening = HashSet::from([5175]);
+        assert_eq!(
+            suggest_port(5173, &used, |port| listening.contains(&port)),
+            Some(5177)
+        );
+        assert_eq!(suggest_port(65534, &HashSet::new(), |_| false), Some(65535));
+        assert_eq!(suggest_port(65535, &HashSet::new(), |_| false), None);
+        assert_eq!(suggest_port(65534, &HashSet::new(), |_| true), None);
+        assert!(!reserved_port_warnings(80).is_empty());
+        assert!(reserved_port_warnings(1024).is_empty());
+        if cfg!(target_os = "macos") {
+            assert!(reserved_port_warnings(5000)[0].contains("AirPlay"));
+            assert!(reserved_port_warnings(7000)[0].contains("AirPlay"));
+        }
     }
 }
