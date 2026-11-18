@@ -3,17 +3,21 @@ import type { FormEvent } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { homeDir } from '@tauri-apps/api/path';
 import { open } from '@tauri-apps/plugin-dialog';
-import { AlertCircle, AlertTriangle, Check, FolderOpen, Loader2 } from 'lucide-react';
+import { AlertCircle, AlertTriangle, Check, FolderOpen, Loader2, RotateCw } from 'lucide-react';
 import { toast } from 'sonner';
 import type { PortConflictCheck, ProjectConfig, ProjectDirInspection, ProjectDraft, ProjectGroup, ProjectStatus } from '../types';
 import { getTerminalSnapshot } from '../lib/terminalRegistry';
 import { cn } from '../lib/utils';
+import { applyInspectionDiff, diffProjectInspection, type RescanField } from '../lib/projectRescan';
 import { hasAdvancedErrors, validateAdvanced } from '../lib/projectSettings';
 import type { AdvancedErrors } from '../lib/projectSettings';
+import { groupColor } from '../lib/sidebarModel';
 import { ProjectAdvancedFields } from './ProjectAdvancedFields';
+import { ProjectRescanCard } from './ProjectRescanCard';
 import Button from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
+import { Select } from './ui/select';
 import { Textarea } from './ui/textarea';
 import { Alert, AlertDescription } from './ui/alert';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
@@ -31,20 +35,31 @@ interface Props {
 type Values = Omit<ProjectDraft, 'port' | 'groupId'> & { port: string; displayName: string; description: string };
 type Field = Exclude<keyof Values, 'env' | 'commands' | 'autoOpen'>;
 type Errors = Partial<Record<Field, string>>;
+type Rescan = { status: 'scanning' } | { status: 'error'; message: string } |
+  { status: 'ready'; result: ProjectDirInspection; unchecked: Set<RescanField> };
+const updatedInput = 'border-amber-300 bg-amber-50';
+
+function UpdatedBadge() {
+  return <span className="ml-1.5 rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-800">已更新</span>;
+}
 
 export function ProjectFormDialog({ project, initialInspection, projects, groups, onCreateGroup, status, onClose, onSaved }: Props) {
   const [groupId, setGroupId] = useState(project?.groupId ?? '');
-  const [newGroupName, setNewGroupName] = useState('');
   const [groupSaving, setGroupSaving] = useState(false);
-  const [groupError, setGroupError] = useState('');
-  const createGroup = async () => {
-    if (groupSaving || !newGroupName.trim()) return;
+  const createGroup = async (name: string) => {
     setGroupSaving(true);
-    setGroupError('');
-    try { const group = await onCreateGroup(newGroupName.trim()); setGroupId(group.id); setNewGroupName(''); }
-    catch (error) { setGroupError(String(error)); }
+    try { setGroupId((await onCreateGroup(name)).id); }
     finally { setGroupSaving(false); }
   };
+  const counts = new Map(groups.map(group => [group.id, 0]));
+  counts.set('', 0);
+  for (const item of projects) {
+    if (item.archived) continue;
+    const bucket = item.groupId && counts.has(item.groupId) ? item.groupId : '';
+    if (bucket || !item.pinned) counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
+  }
+  const groupOptions = [{ value: '', label: '未分组', color: groupColor(), count: counts.get('') },
+    ...groups.map(group => ({ value: group.id, label: group.name, color: groupColor(group.name), count: counts.get(group.id) }))];
   const [values, setValues] = useState<Values>(() => ({
     path: project?.path ?? initialInspection?.path ?? '', name: project?.name ?? '',
     displayName: project?.displayName ?? '', description: project?.description ?? '',
@@ -54,6 +69,8 @@ export function ProjectFormDialog({ project, initialInspection, projects, groups
   const [advancedOpen, setAdvancedOpen] = useState(!!(project?.env?.length || project?.commands?.length || project?.autoOpen));
   const [advancedErrors, setAdvancedErrors] = useState<AdvancedErrors>({ env: [], commands: [] });
   const [inspection, setInspection] = useState<ProjectDirInspection>();
+  const [rescan, setRescan] = useState<Rescan>();
+  const [updated, setUpdated] = useState<Partial<Record<RescanField, boolean>>>({});
   const [errors, setErrors] = useState<Errors>({});
   const [saveError, setSaveError] = useState('');
   const [portCheck, setPortCheck] = useState<{ port: number; result: PortConflictCheck }>();
@@ -62,6 +79,9 @@ export function ProjectFormDialog({ project, initialInspection, projects, groups
   const edited = useRef<Partial<Record<Field, boolean>>>({});
   const inspected = useRef<{ path: string; result: ProjectDirInspection }>();
   const inspectionVersion = useRef(0);
+  const rescanVersion = useRef(0);
+  const rescanButton = useRef<HTMLButtonElement>(null);
+  const rescanCard = useRef<HTMLDivElement>(null);
   const pickedPath = useRef('');
   const pathRef = useRef(values.path);
   pathRef.current = values.path;
@@ -70,7 +90,7 @@ export function ProjectFormDialog({ project, initialInspection, projects, groups
 
   const inspect = useCallback(async (path: string) => {
     const version = ++inspectionVersion.current;
-    const result = initialInspection && path === initialInspection.path
+    const result = !project && initialInspection && path === initialInspection.path
       ? initialInspection
       : await invoke<ProjectDirInspection>('inspect_project_dir', { path, excludeId: project?.id ?? null });
     if (version !== inspectionVersion.current || path !== pathRef.current) return result;
@@ -91,7 +111,9 @@ export function ProjectFormDialog({ project, initialInspection, projects, groups
   useEffect(() => {
     setInspection(undefined);
     const timer = setTimeout(() => {
-      if (values.path.trim()) void inspect(values.path).catch((error) => setErrors((previous) => ({ ...previous, path: `检查目录失败：${error}` })));
+      if (values.path.trim()) void inspect(values.path).catch((error) => {
+        if (values.path === pathRef.current) setErrors((previous) => ({ ...previous, path: `检查目录失败：${error}` }));
+      });
     }, initialInspection?.path === values.path || pickedPath.current === values.path ? 0 : 300);
     return () => { clearTimeout(timer); ++inspectionVersion.current; };
   }, [values.path, inspect, initialInspection]);
@@ -114,8 +136,73 @@ export function ProjectFormDialog({ project, initialInspection, projects, groups
   const configuredProject = projects.find((item) => item.id !== project?.id && item.port === Number(values.port));
   const projectConflict = checkedPort ? checkedPort.projectConflict : configuredProject && { id: configuredProject.id, name: configuredProject.displayName || configuredProject.name };
   const portConflictMessage = projectConflict ? `与「${projectConflict.name}」的端口 ${Number(values.port)} 重复` : undefined;
+  const canAutoOpen = values.type === 'web' && !!values.port.trim();
+
+  const rescanResult = rescan?.status === 'ready' ? rescan.result : undefined;
+  const rescanError = rescan?.status === 'error' ? rescan.message : undefined;
+  const scanning = rescan?.status === 'scanning';
+  const diff = rescanResult ? diffProjectInspection(values, rescanResult) : undefined;
+  const selectedChanges = new Set(diff?.rows.filter(row => row.changed && rescan?.status === 'ready' && !rescan.unchecked.has(row.field)).map(row => row.field));
+  const unchanged = !!diff && !diff.rows.some(row => row.changed);
+
+  useEffect(() => () => { ++rescanVersion.current; }, []);
+  useEffect(() => {
+    if (rescanResult || rescanError) rescanCard.current?.scrollIntoView({ block: 'nearest' });
+  }, [rescanResult, rescanError]);
+  useEffect(() => {
+    if (!unchanged) return;
+    const timer = setTimeout(() => setRescan(current => current?.status === 'ready' && current.result === rescanResult ? undefined : current), 2000);
+    return () => clearTimeout(timer);
+  }, [unchanged, rescanResult]);
+
+  const scanAgain = async () => {
+    if (!project || scanning || saving) return;
+    const version = ++rescanVersion.current;
+    const path = values.path;
+    if (!path.trim()) { setRescan({ status: 'error', message: '重新扫描失败：请输入项目目录' }); return; }
+    const isCurrent = () => version === rescanVersion.current && path === pathRef.current;
+    setRescan({ status: 'scanning' });
+    try {
+      const result = await inspect(path);
+      if (!isCurrent()) return;
+      if (!result.exists || !result.isDir) {
+        setRescan({ status: 'error', message: `重新扫描失败：${result.exists ? '不是文件夹' : '目录不存在'}` });
+      } else {
+        setRescan({ status: 'ready', result, unchecked: new Set() });
+      }
+    } catch (error) {
+      if (isCurrent()) setRescan({ status: 'error', message: `重新扫描失败：${error}` });
+    }
+  };
+  const dismissRescan = () => {
+    setRescan(undefined);
+    rescanButton.current?.focus({ preventScroll: true });
+  };
+  const applyRescan = () => {
+    if (!diff || !selectedChanges.size || saving) return;
+    const patch = applyInspectionDiff(diff.rows, selectedChanges);
+    setValues(current => ({ ...current, ...patch }));
+    setErrors(current => ({ ...current, ...((patch.type || patch.port !== undefined) && { port: undefined }),
+      ...(patch.startCommand !== undefined && { startCommand: undefined }) }));
+    setUpdated(current => {
+      const next = { ...current };
+      for (const field of selectedChanges) next[field] = true;
+      return next;
+    });
+    dismissRescan();
+  };
 
   const change = (field: Field, value: string) => {
+    if (field === 'path' && value !== pathRef.current) {
+      pathRef.current = value;
+      ++rescanVersion.current;
+      setRescan(undefined);
+    }
+    if (field === 'type' || field === 'port' || field === 'startCommand') {
+      setUpdated(current => current[field] ? { ...current, [field]: false } : current);
+      setRescan(current => current?.status === 'ready' && !current.unchecked.has(field)
+        ? { ...current, unchecked: new Set([...current.unchecked, field]) } : current);
+    }
     edited.current[field] = true;
     setValues((current) => ({ ...current, [field]: value, ...((field === 'type' && value !== 'web') || (field === 'port' && !value.trim()) ? { autoOpen: false } : {}) }));
     setErrors((current) => ({ ...current, [field]: undefined, ...(field === 'type' ? { port: undefined } : {}) }));
@@ -155,7 +242,6 @@ export function ProjectFormDialog({ project, initialInspection, projects, groups
       const selected = await open({ directory: true, multiple: false, defaultPath });
       if (typeof selected === 'string') {
         pickedPath.current = selected;
-        pathRef.current = selected;
         change('path', selected);
         await inspect(selected);
       }
@@ -165,8 +251,7 @@ export function ProjectFormDialog({ project, initialInspection, projects, groups
   };
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (composing.current || saving) return;
-    if (groupId === '__new__') { setGroupError('请先创建分组，或选择已有分组'); return; }
+    if (composing.current || saving || groupSaving) return;
     setSaving(true);
     setSaveError('');
     try {
@@ -187,7 +272,7 @@ export function ProjectFormDialog({ project, initialInspection, projects, groups
         });
         return;
       }
-      const draft: ProjectDraft = { ...values, port: values.port.trim() ? Number(values.port) : null, groupId: groupId || null };
+      const draft: ProjectDraft = { ...values, port: values.port.trim() ? Number(values.port) : null, groupId: groupId || null, autoOpen: canAutoOpen && values.autoOpen };
       const saved = await invoke<ProjectConfig>(project ? 'update_project' : 'add_project', { ...(project ? { id: project.id } : {}), project: draft });
       toast.success(project ? '已保存修改' : `已添加项目「${saved.displayName || saved.name}」`);
       if (project && saved.path !== project.path && Object.values(getTerminalSnapshot()).some(terminal => terminal.projectId === project.id && terminal.alive)) toast('终端仍在原目录，可在侧边栏重启终端');
@@ -218,11 +303,13 @@ export function ProjectFormDialog({ project, initialInspection, projects, groups
 
   return (
     <Dialog open onOpenChange={(isOpen) => { if (!isOpen && !saving) onClose(); }}>
-      <DialogContent className="flex max-h-[calc(100dvh-3rem)] max-w-[620px] flex-col gap-0 overflow-hidden p-0" hideClose={saving} data-project-form>
-        <form ref={form} onSubmit={submit} noValidate className="flex min-h-0 flex-col overflow-hidden"
-          onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }}
+      <DialogContent className={cn('flex max-h-[calc(100dvh-3rem)] flex-col gap-0 rounded-2xl p-0', project ? 'max-w-[680px]' : 'max-w-[620px]')}
+        overlayClassName="backdrop-blur-[1.5px]" hideClose={saving} data-project-form>
+        <form ref={form} onSubmit={submit} noValidate className="flex min-h-0 flex-col overflow-hidden rounded-[inherit]"
+          onCompositionStart={event => { if (event.currentTarget.contains(event.target as Node)) composing.current = true; }}
+          onCompositionEnd={event => { if (event.currentTarget.contains(event.target as Node)) composing.current = false; }}
           onKeyDownCapture={(event) => {
-            if (event.key === 'Enter' && (composing.current || event.nativeEvent.isComposing || event.keyCode === 229)) {
+            if (event.currentTarget.contains(event.target as Node) && event.key === 'Enter' && (composing.current || event.nativeEvent.isComposing || event.keyCode === 229)) {
               event.preventDefault();
               event.stopPropagation();
             }
@@ -237,8 +324,8 @@ export function ProjectFormDialog({ project, initialInspection, projects, groups
             <div className="space-y-2">
               <Label htmlFor="project-path">项目目录 <span className="text-destructive">*</span></Label>
               <div className="flex gap-2">
-                <Input {...fieldProps('path')} placeholder="~/Projects/my-project" autoFocus className="font-mono text-xs" />
-                <Button type="button" variant="outline" onClick={() => { void pickFolder(); }} disabled={saving}><FolderOpen />选择…</Button>
+                <Input {...fieldProps('path')} placeholder="~/Projects/my-project" autoFocus className="font-mono text-[length:var(--text-control)]" />
+                <Button type="button" variant="outline" onClick={() => { void pickFolder(); }} disabled={saving}><FolderOpen data-icon="inline-start" />选择…</Button>
               </div>
               {message('path', '支持 ~，也可以从 Finder 拖入文件夹到侧边栏')}
               {inspection?.existingProject && <p className="text-[11px] text-warning-foreground" role="status">此目录已用于项目「{inspection.existingProject.name}」，仍可继续添加。</p>}
@@ -247,26 +334,33 @@ export function ProjectFormDialog({ project, initialInspection, projects, groups
             <div className="space-y-2"><Label htmlFor="project-displayName">显示名称 <span className="font-normal text-muted-foreground">（可选）</span></Label><Input {...fieldProps('displayName')} placeholder="在侧边栏显示的名称" /></div>
             <div className="space-y-2">
               <Label htmlFor="project-group">分组</Label>
-              <select id="project-group" value={groupId} disabled={saving || groupSaving}
-                onChange={event => { setGroupId(event.target.value); setGroupError(''); }}
-                className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:opacity-50">
-                <option value="">未分组</option>
-                {groups.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}
-                <option value="__new__">＋ 新建分组…</option>
-              </select>
-              {groupId === '__new__' && <div className="flex gap-2">
-                <Input aria-label="新分组名称" placeholder="分组名称" maxLength={40} value={newGroupName} disabled={saving || groupSaving}
-                  onChange={event => setNewGroupName(event.target.value)} onKeyDown={event => {
-                    if (event.key === 'Enter' && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); void createGroup(); }
-                  }} />
-                <Button type="button" variant="outline" disabled={saving || groupSaving || !newGroupName.trim()} onClick={() => { void createGroup(); }}>{groupSaving ? '创建中…' : '创建'}</Button>
-              </div>}
-              {groupError && <p role="alert" className="text-xs text-destructive">{groupError}</p>}
+              <Select id="project-group" label="分组" value={groupId} options={groupOptions} onValueChange={setGroupId} disabled={saving}
+                search={{ placeholder: '搜索或新建分组…', creating: groupSaving, onCreate: createGroup }} />
             </div>
             <div className="space-y-2"><Label htmlFor="project-description">描述 <span className="font-normal text-muted-foreground">（可选）</span></Label><Textarea {...fieldProps('description')} rows={2} className="resize-none" placeholder="项目用途或备注" /></div>
+            {project && <section aria-label="运行配置" className="space-y-3 border-t border-dashed pt-3">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-[13px] font-semibold">运行配置</h3>
+                <Button ref={rescanButton} type="button" variant="outline" size="sm" disabled={saving || scanning} onClick={() => { void scanAgain(); }}>
+                  {scanning ? <Loader2 aria-hidden="true" className="!size-3.5 animate-spin" /> : <RotateCw aria-hidden="true" className="!size-3.5" />}
+                  {scanning ? '扫描中…' : '重新扫描'}
+                </Button>
+              </div>
+              {(diff || rescanError) && <div ref={rescanCard} className="scroll-my-3" data-project-rescan-result>
+                <ProjectRescanCard rows={diff?.rows} sourceFiles={diff?.sourceFiles} selected={selectedChanges} error={rescanError} disabled={saving}
+                  onDismiss={dismissRescan} onApply={applyRescan} onToggle={field => {
+                    setRescan(current => {
+                      if (current?.status !== 'ready') return current;
+                      const unchecked = new Set(current.unchecked);
+                      if (unchecked.has(field)) unchecked.delete(field); else unchecked.add(field);
+                      return { ...current, unchecked };
+                    });
+                  }} />
+              </div>}
+            </section>}
             <div className="space-y-2">
-              <Label id="project-type-label">类型</Label>
-              <div role="radiogroup" aria-labelledby="project-type-label" className="grid grid-cols-2 gap-1 rounded-lg border bg-muted/50 p-1"
+              <Label id="project-type-label">类型{updated.type && <UpdatedBadge />}</Label>
+              <div role="radiogroup" aria-labelledby="project-type-label" className={cn('grid grid-cols-2 gap-1 rounded-lg border bg-muted/50 p-1', updated.type && updatedInput)}
                 onKeyDown={(event) => {
                   if (saving || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
                   event.preventDefault();
@@ -278,8 +372,8 @@ export function ProjectFormDialog({ project, initialInspection, projects, groups
               </div>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="project-port">端口 {values.type === 'web' ? <span className="text-destructive">*</span> : <span className="font-normal text-muted-foreground">（可选）</span>}</Label>
-              <Input {...fieldProps('port')} inputMode="numeric" placeholder={values.type === 'web' ? '例如 5173' : '无开发服务器时可留空'} />
+              <Label htmlFor="project-port">端口 {values.type === 'web' ? <span className="text-destructive">*</span> : <span className="font-normal text-muted-foreground">（可选）</span>}{updated.port && <UpdatedBadge />}</Label>
+              <Input {...fieldProps('port')} inputMode="numeric" className={cn('font-mono text-[length:var(--text-control)]', updated.port && updatedInput)} placeholder={values.type === 'web' ? '例如 5173' : '无开发服务器时可留空'} />
               {message('port', portHint)}
               <div id="project-port-warnings" className="space-y-2" role="status" aria-live="polite">
                 {checkedPort?.inUse && <div className="flex gap-2 rounded-md border border-warning/20 bg-warning-muted p-2.5 text-[11px] text-warning-foreground">
@@ -306,18 +400,18 @@ export function ProjectFormDialog({ project, initialInspection, projects, groups
               </div>}
             </div>
             <div className="space-y-2">
-              <Label htmlFor="project-startCommand">启动命令 <span className="text-destructive">*</span></Label>
-              <Input {...fieldProps('startCommand')} className="font-mono text-xs" placeholder="例如 pnpm dev" />
+              <Label htmlFor="project-startCommand">启动命令 <span className="text-destructive">*</span>{updated.startCommand && <UpdatedBadge />}</Label>
+              <Input {...fieldProps('startCommand')} className={cn('font-mono text-[length:var(--text-control)]', updated.startCommand && updatedInput)} placeholder="例如 pnpm dev" />
               {errors.startCommand && message('startCommand')}
               {!!inspection?.commands.length && <div className="flex flex-wrap gap-1.5">{inspection.commands.slice(0, 4).map((command) => <Button type="button" key={command} variant="outline" size="sm" className="h-6 px-2 font-mono text-[11px]" disabled={saving} onClick={() => change('startCommand', command)}>{command}</Button>)}</div>}
             </div>
-            <ProjectAdvancedFields values={values} open={advancedOpen} onOpenChange={setAdvancedOpen} disabled={saving} canAutoOpen={values.type === 'web' && !!values.port.trim()}
+            <ProjectAdvancedFields values={canAutoOpen ? values : { ...values, autoOpen: false }} open={advancedOpen} onOpenChange={setAdvancedOpen} disabled={saving} canAutoOpen={canAutoOpen}
               errors={advancedErrors} onBlur={() => setAdvancedErrors(validateAdvanced(values.env, values.commands))}
               onChange={patch => { setValues(current => ({ ...current, ...patch })); setAdvancedErrors({ env: [], commands: [] }); }} />
           </div>
-          <footer className="flex shrink-0 justify-end gap-2 border-t bg-background px-6 py-4">
+          <footer className="flex shrink-0 justify-end gap-2.5 border-t border-card-border bg-background px-6 py-3.5">
             <Button type="button" variant="outline" disabled={saving} onClick={onClose}>取消</Button>
-            <Button type="submit" disabled={saving || !!projectConflict} data-project-save>{saving && <Loader2 className="animate-spin" />}{saving ? '保存中…' : project ? '保存修改' : '添加项目'}</Button>
+            <Button type="submit" disabled={saving || groupSaving || !!projectConflict} data-project-save>{saving && <Loader2 className="animate-spin" />}{saving ? '保存中…' : project ? '保存修改' : '添加项目'}</Button>
           </footer>
         </form>
       </DialogContent>

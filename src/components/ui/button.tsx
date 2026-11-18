@@ -4,7 +4,7 @@ import { cva, type VariantProps } from 'class-variance-authority';
 import { cn } from '../../lib/utils';
 
 export const buttonVariants = cva(
-  'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium outline-none transition-[color,background-color,border-color,box-shadow] focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 select-none cursor-pointer [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0',
+  'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-control text-[length:var(--text-control)] font-medium outline-none transition-[color,background-color,border-color,box-shadow] focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 select-none cursor-pointer [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0',
   {
     variants: {
       variant: {
@@ -24,8 +24,8 @@ export const buttonVariants = cva(
         terminal: 'border border-terminal-border bg-terminal text-terminal-foreground hover:bg-terminal-border',
       },
       size: {
-        default: 'h-9 px-4 py-2 text-[13px]',
-        sm: 'h-8 px-3 text-xs',
+        default: 'h-9 px-4 py-2',
+        sm: 'h-8 px-3 [&_svg]:size-3.5',
         lg: 'h-10 px-6',
         icon: 'size-8 p-0',
         'icon-sm': 'size-7 p-0 [&_svg]:size-3.5',

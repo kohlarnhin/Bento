@@ -1,7 +1,7 @@
 import type { ITheme } from '@xterm/xterm';
 
 export const DEFAULT_TERMINAL_FONT_SIZE = 14;
-export const TERMINAL_FONT_FAMILY = '"JetBrains Mono", "SF Mono", Menlo, "PingFang SC", monospace';
+export const TERMINAL_FONT_FAMILY = '"SF Mono", "JetBrains Mono", Menlo, monospace';
 export const TERMINAL_LINE_HEIGHT = 1.2;
 
 // Soft IDE-style colors; every ANSI foreground except black exceeds 4.5:1 on this background.

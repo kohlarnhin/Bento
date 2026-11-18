@@ -15,7 +15,7 @@ import { ProjectFormDialog } from './components/ProjectFormDialog';
 import { ProjectDeleteDialog } from './components/ProjectDeleteDialog';
 import { ExternalProcessDialog } from './components/ExternalProcessDialog';
 import { StopAllProjectsDialog } from './components/StopAllProjectsDialog';
-import { UpdateDialog, UpdateFooter } from './components/UpdateDialog';
+import { UpdateDialog } from './components/UpdateDialog';
 import { useUpdater } from './hooks/useUpdater';
 import { useSettings } from './hooks/useSettings';
 import { SettingsDialog } from './components/SettingsDialog';
@@ -571,11 +571,10 @@ export function App() {
   const openStopAll = useCallback(() => {
     if (!dialogOpen.current) { dialogOpen.current = true; setStopAllOpen(true); }
   }, []);
-  const updateFooter = useMemo(() => <UpdateFooter updater={updater} onOpenSettings={openSettings} />, [updater, openSettings]);
 
   return (
     <TooltipProvider delayDuration={150}>
-      <div className="flex h-screen overflow-hidden bg-background font-sans text-foreground cursor-default select-none">
+      <div className="flex h-screen overflow-hidden cursor-default select-none">
         <Toaster />
 
         <ProjectSidebar
@@ -588,7 +587,6 @@ export function App() {
           onSearchChange={setSearchQuery}
           onReorder={reorderProjects}
           reordering={reordering}
-          compact={settings.compactSidebar}
           filter={filter}
           onFilterChange={setFilter}
           attentionProjects={attentionProjects}
@@ -611,12 +609,15 @@ export function App() {
           onRefresh={loadProjects}
           onCreate={createProject}
           managedCount={managedProjects.length}
-          updateFooter={updateFooter}
           onStopAll={openStopAll}
+          currentVersion={updater.currentVersion}
+          availableVersion={updater.update?.version}
+          onCheckUpdates={updater.checkNow}
+          onOpenSettings={openSettings}
         />
 
-        <main className="flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
-          {selection?.view !== 'terminal' && <div data-tauri-drag-region className="h-8 shrink-0" aria-hidden="true" />}
+        <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background">
+          {selection?.view !== 'terminal' && <div data-tauri-drag-region className={selectedProject ? 'h-[26px] shrink-0' : 'h-8 shrink-0'} aria-hidden="true" />}
           {projects.length === 0 ? (
             <Empty className="m-6 flex-1">
               <FolderPlus className="size-8 text-muted-foreground" />
@@ -629,8 +630,8 @@ export function App() {
           ) : selectedProject && selection?.view === 'terminal' ? (
             <ProjectTerminal ref={terminalControls} key={selectedProject.id} project={selectedProject} activeSlot={activeSlots[selectedProject.id] ?? 1} />
           ) : selectedProject ? (
-            <div className="flex-1 overflow-y-auto px-7 pb-8 pt-3 lg:px-12 lg:pt-7" data-project-overview={selectedProject.id}>
-              <div className="mx-auto flex max-w-4xl flex-col gap-5">
+            <div className="flex-1 overflow-y-auto px-6 pb-8 lg:px-8" data-project-overview={selectedProject.id}>
+              <div className="mx-auto flex max-w-5xl flex-col gap-5">
                 {conflicts.length > 0 && !selectedConflict && <PortConflictBanner conflicts={conflicts} />}
                 <ProjectCard
                   key={selectedProject.id}

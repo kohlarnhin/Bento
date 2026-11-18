@@ -10,6 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "Bento",
@@ -19,6 +20,11 @@
         "height": 800,
         "minWidth": 850,
         "minHeight": 600,
+        "theme": "Light",
+        "transparent": true,
+        "windowEffects": {
+          "effects": ["sidebar"]
+        },
         "titleBarStyle": "Overlay",
         "hiddenTitle": true
       }
