@@ -1,15 +1,40 @@
-import { useEffect, useRef, useSyncExternalStore } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState, useSyncExternalStore } from 'react';
 import { FileUp, Loader2, RotateCcw, TriangleAlert } from 'lucide-react';
 import type { ProjectConfig } from '../types';
-import { attachTerminal, fitTerminal, getTerminalSnapshot, restartTerminal, retryTerminal, subscribeTerminals, terminalKey } from '../lib/terminalRegistry';
+import { attachTerminal, fitTerminal, getTerminal, getTerminalSearch, getTerminalSnapshot, restartTerminal, retryTerminal, subscribeTerminals, terminalKey } from '../lib/terminalRegistry';
+import { TerminalFindBar, type TerminalFindControls } from './TerminalFindBar';
 import Button from './ui/button';
 
-export function ProjectTerminal({ project, activeSlot }: {
+export interface ProjectTerminalControls {
+  openFind: () => void;
+  closeFind: () => void;
+  isFindOpen: () => boolean;
+  navigateFind: (previous: boolean) => void;
+}
+
+export const ProjectTerminal = forwardRef<ProjectTerminalControls, {
   project: ProjectConfig; activeSlot: number;
-}) {
+}>(function ProjectTerminal({ project, activeSlot }, ref) {
   const host = useRef<HTMLDivElement>(null);
   const terminals = useSyncExternalStore(subscribeTerminals, getTerminalSnapshot);
   const status = terminals[terminalKey(project.id, activeSlot)];
+  const find = useRef<TerminalFindControls>(null);
+  const [findRequest, setFindRequest] = useState<{ key: string; version: number }>();
+  const findKey = `${terminalKey(project.id, activeSlot)}:${status?.sessionId}`;
+  const findOpen = findRequest?.key === findKey;
+  const closeFind = () => {
+    getTerminalSearch(project.id, activeSlot)?.clearDecorations();
+    setFindRequest(undefined);
+    getTerminal(project.id, activeSlot)?.focus();
+  };
+  useImperativeHandle(ref, () => ({
+    openFind: () => setFindRequest(previous => ({ key: findKey, version: (previous?.version ?? 0) + 1 })),
+    closeFind,
+    isFindOpen: () => findOpen,
+    navigateFind: previous => find.current?.navigate(previous),
+  }));
+  // A slot change invalidates the bar even if the user later returns to it.
+  useEffect(() => { setFindRequest(undefined); }, [findKey]);
 
   useEffect(() => {
     if (!host.current || (activeSlot > 1 && !status?.sessionId)) return;
@@ -30,6 +55,9 @@ export function ProjectTerminal({ project, activeSlot }: {
       <div data-tauri-drag-region className="h-8 shrink-0" aria-hidden="true" />
       <div className="relative min-h-0 min-w-0 flex-1 p-3" data-terminal-area>
         <div ref={host} className="size-full min-h-0 min-w-0" />
+        {findOpen && getTerminalSearch(project.id, activeSlot) && <TerminalFindBar key={findKey}
+          ref={find} search={getTerminalSearch(project.id, activeSlot)!} terminal={getTerminal(project.id, activeSlot)!}
+          focusRequest={findRequest.version} onClose={closeFind} />}
         {overlay && <div className="absolute inset-0 flex items-center justify-center bg-terminal/60 p-6" data-terminal-state-overlay>
           <div className="flex max-w-md flex-col items-center gap-4 rounded-lg border border-terminal-border bg-terminal p-6 text-center shadow-xl">
             {status?.opening ? <><Loader2 className="size-5 animate-spin text-terminal-muted" /><p className="text-sm" role="status">正在打开终端…</p></> : <>
@@ -47,4 +75,4 @@ export function ProjectTerminal({ project, activeSlot }: {
       </div>
     </section>
   );
-}
+});

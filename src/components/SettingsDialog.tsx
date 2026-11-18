@@ -15,7 +15,7 @@ export function SettingsDialog({ settings, updater, onClose, onCheckUpdates }: {
     <DialogContent className="max-w-lg gap-0 p-0" data-settings-dialog>
       <DialogHeader className="px-6 pb-5 pt-6">
         <DialogTitle>设置</DialogTitle>
-        <DialogDescription>按你的习惯，安排 Bento 的启动与终端。</DialogDescription>
+        <DialogDescription>按你的习惯，设置侧边栏、启动与终端。</DialogDescription>
       </DialogHeader>
 
       <section className="border-t px-6 py-5" aria-labelledby="settings-general">
@@ -32,6 +32,16 @@ export function SettingsDialog({ settings, updater, onClose, onCheckUpdates }: {
             onCheckedChange={enabled => { void settings.changeAutostart(enabled); }} />
         </div>
         {settings.autostartError && <p role="alert" className="mt-3 break-words text-xs leading-relaxed text-destructive" data-autostart-error>{settings.autostartError}</p>}
+        <div className="mt-5 flex items-start justify-between gap-5">
+          <div>
+            <label htmlFor="settings-compact-sidebar" className="text-sm font-medium">紧凑侧边栏</label>
+            <p id="settings-compact-help" className="mt-1.5 text-xs leading-relaxed text-muted-foreground">仅展开当前项目的概览与终端，默认开启</p>
+          </div>
+          <Switch id="settings-compact-sidebar" className="mt-0.5" checked={settings.compactSidebar}
+            disabled={settings.fontLoading || settings.compactSaving} aria-describedby="settings-compact-help"
+            onCheckedChange={enabled => { void settings.changeCompactSidebar(enabled); }} />
+        </div>
+        {settings.compactError && <p role="alert" className="mt-3 text-xs text-destructive">{settings.compactError}</p>}
       </section>
 
       <section className="border-t px-6 py-5" aria-labelledby="settings-terminal">

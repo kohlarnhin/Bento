@@ -35,7 +35,7 @@ pub struct ProcessInfo {
     identity: Option<processes::ProcessIdentity>,
 }
 impl ProcessInfo {
-    fn root(&self) -> processes::ManagedRoot {
+    pub fn root(&self) -> processes::ManagedRoot {
         processes::ManagedRoot {
             pid: self.pid,
             pgid: self.pgid,

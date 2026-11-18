@@ -370,6 +370,7 @@ mod tests {
             start_command: "sleep 1".into(),
             project_type: Some("app".into()),
                 env: Vec::new(), commands: Vec::new(), auto_open: false,
+                group_id: None, pinned: false, archived: false,
         }
     }
 

@@ -1,5 +1,6 @@
 export interface EnvVar { key: string; value: string }
 export interface ExtraCommand { name: string; command: string }
+export interface ProjectGroup { id: string; name: string; sortOrder: number; collapsed: boolean }
 
 export interface ProjectConfig {
   id: string;
@@ -13,6 +14,9 @@ export interface ProjectConfig {
   env: EnvVar[];
   commands: ExtraCommand[];
   autoOpen: boolean;
+  groupId: string | null;
+  pinned: boolean;
+  archived: boolean;
 }
 
 export interface ProjectDraft {
@@ -26,6 +30,7 @@ export interface ProjectDraft {
   env: EnvVar[];
   commands: ExtraCommand[];
   autoOpen: boolean;
+  groupId?: string | null;
 }
 
 export interface ProjectDirInspection {
@@ -38,7 +43,21 @@ export interface ProjectDirInspection {
   commands: string[];
   port: number | null;
   portSource: string | null;
+  portCandidates: PortCandidate[];
   existingProject: { id: string; name: string } | null;
+}
+
+export interface PortCandidate {
+  port: number;
+  source: string;
+  confidence: 'high' | 'medium' | 'low';
+}
+
+export interface PortConflictCheck {
+  projectConflict: { id: string; name: string } | null;
+  inUse: { owners: PortOwner[] } | null;
+  reserved: string[];
+  suggestion: number | null;
 }
 
 export interface PortConflict {
@@ -49,6 +68,7 @@ export interface PortConflict {
 
 export interface ProjectsResponse {
   projects: ProjectConfig[];
+  groups: ProjectGroup[];
   conflicts: PortConflict[];
   configPath: string;
 }

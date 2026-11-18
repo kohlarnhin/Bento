@@ -6,12 +6,14 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { SearchAddon } from '@xterm/addon-search';
 import '@xterm/xterm/css/xterm.css';
 import '@fontsource/jetbrains-mono/latin-400.css';
 import '@fontsource/jetbrains-mono/latin-700.css';
 import type { TerminalAttention, TerminalOpenResult, TerminalOutput, TerminalSessionInfo } from '../types';
 import { formatDroppedPaths, recoverShiftedImeInput, trackBareShift, transformTypedInput, type TerminalImeState } from './terminalInput';
 import { DEFAULT_TERMINAL_FONT_SIZE, TERMINAL_FONT_FAMILY, TERMINAL_LINE_HEIGHT, TERMINAL_THEME } from './terminalAppearance';
+import { createTitlePublisher } from './terminalUsability';
 
 type TerminalExit = Pick<TerminalSessionInfo, 'projectId' | 'slot' | 'sessionId' | 'exitCode'>;
 type TerminalClosed = Pick<TerminalSessionInfo, 'projectId' | 'slot' | 'sessionId'>;
@@ -20,6 +22,8 @@ export interface TerminalStatus extends Partial<TerminalSessionInfo> {
   slot: number;
   opening?: boolean;
   error?: string;
+  title?: string;
+  attentionAt?: number;
 }
 
 interface InputChunk {
@@ -35,6 +39,8 @@ interface Entry {
   expectedSessionId?: string;
   terminal: Terminal;
   fit: FitAddon;
+  search: SearchAddon;
+  title: ReturnType<typeof createTitlePublisher>;
   container: HTMLDivElement;
   opened: boolean;
   sessionId?: string;
@@ -94,6 +100,15 @@ export function subscribeTerminals(subscriber: () => void) {
 
 export const getTerminalSnapshot = () => registry.snapshot;
 export const getTerminal = (projectId: string, slot: number) => registry.entries.get(terminalKey(projectId, slot))?.terminal;
+export const getTerminalSearch = (projectId: string, slot: number) => registry.entries.get(terminalKey(projectId, slot))?.search;
+
+let lastAttentionAt = 0;
+function attentionTime(attention: boolean, previous?: TerminalStatus) {
+  if (!attention) return undefined;
+  if (previous?.attention && previous.attentionAt !== undefined) return previous.attentionAt;
+  // Preserve ordering even when two events land in the same millisecond.
+  return lastAttentionAt = Math.max(Date.now(), lastAttentionAt + 1);
+}
 
 let terminalFonts: Promise<void> | undefined;
 
@@ -119,9 +134,11 @@ export function setTerminalFontSize(fontSize: number) {
   if (!Number.isFinite(fontSize) || fontSize <= 0) return;
   registry.fontSize = fontSize;
   registry.entries.forEach((entry) => {
+    const atBottom = entry.terminal.buffer.active.viewportY >= entry.terminal.buffer.active.baseY;
     entry.terminal.options.fontSize = fontSize;
     // Detached terminals retain the option and fit when they are attached again.
     fitTerminal(entry.projectId, entry.slot);
+    if (atBottom) entry.terminal.scrollToBottom();
   });
 }
 
@@ -135,23 +152,29 @@ function receiveOutput(entry: Entry, output: TerminalOutput) {
 function receiveExit(entry: Entry, event: TerminalExit) {
   if (entry.sessionId !== event.sessionId) return;
   entry.alive = false;
-  publish({ ...registry.snapshot[terminalKey(entry.projectId, entry.slot)], ...event, alive: false, attention: false });
+  publish({ ...registry.snapshot[terminalKey(entry.projectId, entry.slot)], ...event, alive: false, attention: false, attentionAt: undefined });
 }
 
 function receiveAttention(event: TerminalAttention) {
   const current = registry.snapshot[terminalKey(event.projectId, event.slot)];
   if (!current || current.sessionId !== event.sessionId) return;
   if (current.alive === false && event.attention) return;
-  publish({ ...current, ...event });
+  publish({ ...current, ...event, attentionAt: attentionTime(event.attention, current) });
 }
 
 function receiveOpened(session: TerminalSessionInfo) {
   if (registry.closedSessions.has(session.sessionId)) return;
   const key = terminalKey(session.projectId, session.slot);
   const entry = registry.entries.get(key);
+  const current = registry.snapshot[key];
+  const sameSession = current?.sessionId === session.sessionId;
+  if (!sameSession) entry?.title.reset();
   if (entry) entry.expectedSessionId = session.sessionId;
   const exited = registry.exits.get(session.sessionId);
-  publish({ ...session, ...(exited ? { ...exited, alive: false, attention: false } : {}), opening: entry?.hydrating });
+  const attention = !exited && session.attention;
+  publish({ ...session, ...(exited ? { ...exited, alive: false, attention: false } : {}),
+    title: sameSession ? current?.title : undefined,
+    attentionAt: attentionTime(attention, sameSession ? current : undefined), opening: entry?.hydrating });
   if (entry && entry.sessionId !== session.sessionId && !entry.hydrating) startHydrate(entry, false);
 }
 
@@ -169,6 +192,7 @@ function receiveClosed(event: TerminalClosed) {
     entry.input = [];
     entry.resize = undefined;
     clearTimeout(entry.imePendingTimer);
+    entry.title.reset();
     entry.terminal.dispose();
     entry.container.remove();
     registry.entries.delete(key);
@@ -202,7 +226,7 @@ export function initTerminalRegistry(showError: (message: string) => void): Prom
           if (entry?.hydrating) entry.exits.push(payload);
           else if (entry) receiveExit(entry, payload);
           if (registry.snapshot[key]?.sessionId === payload.sessionId) {
-            publish({ ...registry.snapshot[key], ...payload, alive: false, attention: false });
+            publish({ ...registry.snapshot[key], ...payload, alive: false, attention: false, attentionAt: undefined });
           }
         })));
         unlisteners.push(await listen<TerminalAttention>('terminal-attention', ({ payload }) => dispatch(() => {
@@ -274,7 +298,10 @@ function createEntry(projectId: string, slot: number): Entry {
     scrollback: 5000,
   });
   const fit = new FitAddon();
+  // Scrollback is bounded by the terminal; include every retained match.
+  const search = new SearchAddon({ highlightLimit: Number.MAX_SAFE_INTEGER });
   terminal.loadAddon(fit);
+  terminal.loadAddon(search);
   terminal.loadAddon(new Unicode11Addon());
   terminal.unicode.activeVersion = '11';
   terminal.loadAddon(new WebLinksAddon((event, url) => {
@@ -286,11 +313,17 @@ function createEntry(projectId: string, slot: number): Entry {
   container.dataset.terminalProject = projectId;
   container.dataset.terminalSlot = String(slot);
   const entry: Entry = {
-    projectId, slot, disposed: false, terminal, fit, container, opened: false, alive: false, seq: 0,
+    projectId, slot, disposed: false, terminal, fit, search, container, opened: false, alive: false, seq: 0,
+    title: createTitlePublisher(title => {
+      const current = registry.snapshot[terminalKey(projectId, slot)];
+      if (entry.disposed || !current || current.sessionId !== entry.sessionId || current.title === (title || undefined)) return;
+      publish({ ...current, title: title || undefined });
+    }),
     hydrating: false, buffered: [], exits: [], attentions: [], input: [], writing: false, resizing: false,
     lastPrintable: '', pasting: false,
     ime: { shiftDown: false, composing: false, pendingSend: false },
   };
+  terminal.onTitleChange(title => entry.title.update(title));
   const paste = terminal.paste.bind(terminal);
   terminal.paste = (text) => {
     entry.lastPrintable = '';
@@ -339,6 +372,11 @@ function handleTerminalKey(entry: Entry, event: KeyboardEvent): boolean {
   if (event.isComposing || event.keyCode === 229) return true;
   const { key, metaKey, altKey, ctrlKey, shiftKey } = event;
   const command = metaKey && !altKey && !ctrlKey;
+  // Global project actions must never reach the PTY, including later key events.
+  if (command && !shiftKey && ['p', 'n'].includes(key.toLowerCase())) {
+    event.preventDefault();
+    return false;
+  }
   // Let the native Edit menu generate the paste event, including image-only clipboards.
   if (command && key.toLowerCase() === 'v') {
     if (event.type === 'keydown') entry.lastPrintable = '';
@@ -449,8 +487,9 @@ function startHydrate(entry: Entry, restart: boolean): Promise<void> {
   entry.input = [];
   entry.resize = undefined;
   entry.lastPrintable = '';
+  entry.title.reset();
   const key = terminalKey(entry.projectId, entry.slot);
-  publish({ ...registry.snapshot[key], projectId: entry.projectId, slot: entry.slot, opening: true, error: undefined });
+  publish({ ...registry.snapshot[key], projectId: entry.projectId, slot: entry.slot, opening: true, error: undefined, title: undefined });
   entry.opening = hydrate(entry, restart).finally(() => {
     if (entry.disposed) return;
     entry.hydrating = false;
@@ -481,9 +520,10 @@ async function hydrate(entry: Entry, restart: boolean) {
     entry.expectedSessionId = entry.sessionId;
     entry.alive = result.session.alive;
     entry.seq = result.snapshot.seq;
+    entry.title.reset();
     entry.terminal.reset();
     entry.terminal.write(result.snapshot.data);
-    publish(result.session);
+    publish({ ...result.session, attentionAt: attentionTime(result.session.attention, registry.snapshot[key]) });
     entry.buffered.sort((a, b) => a.seq - b.seq).forEach(output => receiveOutput(entry, output));
     entry.exits.forEach(event => receiveExit(entry, event));
     const exited = registry.exits.get(entry.sessionId);

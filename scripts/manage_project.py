@@ -4,9 +4,9 @@ Bento SQLite Database Project Manager CLI for AI and Developers.
 
 Database: ~/.apphub/apphub.db
 Usage:
-    python3 manage_project.py list
-    python3 manage_project.py add --name <name> --path <path> --command <command> [--port <port>] [--type <web|app>] [--display <display>] [--desc <desc>]
-    python3 manage_project.py update --id <id> [--name <name>] [--path <path>] [--port <port>] [--command <command>] [--type <web|app>]
+    python3 manage_project.py list [--group <name>]
+    python3 manage_project.py add --name <name> --path <path> --command <command> [--port <port>] [--type <web|app>] [--display <display>] [--desc <desc>] [--group <name>]
+    python3 manage_project.py update --id <id> [--name <name>] [--path <path>] [--port <port>] [--command <command>] [--type <web|app>] [--group <name>]
     python3 manage_project.py delete <id>
     python3 manage_project.py check-port <port>
 """
@@ -58,18 +58,64 @@ def init_db(conn):
         cols = [c[1] for c in cur.fetchall()]
         if "type" not in cols:
             conn.execute("ALTER TABLE projects ADD COLUMN type TEXT DEFAULT 'web'")
+        conn.execute("""CREATE TABLE IF NOT EXISTS groups (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, sort_order INTEGER NOT NULL,
+            collapsed INTEGER NOT NULL DEFAULT 0
+        )""")
+        for column, definition in [
+            ("group_id", "TEXT REFERENCES groups(id) ON DELETE SET NULL"),
+            ("pinned", "INTEGER NOT NULL DEFAULT 0"),
+            ("archived", "INTEGER NOT NULL DEFAULT 0"),
+        ]:
+            if column not in cols:
+                conn.execute(f"ALTER TABLE projects ADD COLUMN {column} {definition}")
         # sort_order / env / commands / auto_open are migrated by the Bento app itself,
         # which also preserves the existing sidebar order. An empty database stays empty.
 
 def project_columns(conn):
     return {c[1] for c in conn.execute("PRAGMA table_info(projects)").fetchall()}
 
+def resolve_group(conn, name):
+    name = name.strip()
+    if not name:
+        return None
+    if len(name) > 40:
+        print("❌ 错误：分组名称最多 40 个字符。", file=sys.stderr)
+        sys.exit(1)
+    existing = conn.execute("SELECT id FROM groups WHERE name=? ORDER BY sort_order,id LIMIT 1", (name,)).fetchone()
+    if existing:
+        return existing['id']
+    suffix = 1
+    while conn.execute("SELECT 1 FROM groups WHERE id=?", (f"group-{suffix}",)).fetchone():
+        suffix += 1
+    group_id = f"group-{suffix}"
+    conn.execute("INSERT INTO groups (id,name,sort_order) VALUES (?,?,(SELECT COALESCE(MAX(sort_order),-1)+1 FROM groups))", (group_id, name))
+    return group_id
+
+def ensure_unique_port(conn, port, exclude_id=None):
+    if port is None:
+        return
+    if not 1 <= port <= 65535:
+        print("❌ 错误：端口必须是 1–65535 之间的整数。", file=sys.stderr)
+        sys.exit(1)
+    conflict = conn.execute(
+        "SELECT id, name, display_name FROM projects WHERE port = ? AND (? IS NULL OR id != ?)",
+        (port, exclude_id, exclude_id),
+    ).fetchone()
+    if conflict:
+        display = conflict['display_name'] or conflict['name']
+        print(f"❌ 错误：端口 {port} 已被项目「{display}」(ID: {conflict['id']}) 占用！各项目端口必须唯一，请更换端口。", file=sys.stderr)
+        sys.exit(1)
+
 def cmd_list(args):
     conn = get_connection()
     cur = conn.cursor()
-    # Same order as the Bento sidebar; databases the app hasn't migrated yet keep the old port order.
-    order = "sort_order IS NULL, sort_order, created_at, id" if "sort_order" in project_columns(conn) else "port ASC"
-    cur.execute(f"SELECT id, name, display_name, type, port, path, start_command FROM projects ORDER BY {order}")
+    # Use the saved manual project order; the UI also partitions pins/groups/archives.
+    # Databases the app hasn't migrated yet keep the old port order.
+    order = "p.sort_order IS NULL, p.sort_order, p.created_at, p.id" if "sort_order" in project_columns(conn) else "p.port ASC"
+    where = "" if args.group is None else "WHERE COALESCE(g.name,'')=?"
+    cur.execute(f"SELECT p.*, g.name AS group_name FROM projects p LEFT JOIN groups g ON g.id=p.group_id {where} ORDER BY {order}",
+                () if args.group is None else (args.group.strip(),))
     rows = cur.fetchall()
 
     if not rows:
@@ -78,13 +124,15 @@ def cmd_list(args):
 
     print(f"\n📂 Bento 项目列表 (数据库: {DB_PATH}):")
     print("-" * 92)
-    print(f"{'ID':<20} | {'类型':<6} | {'端口':<6} | {'显示名称 / 项目名':<22} | {'启动命令'}")
+    print(f"{'ID':<20} | {'类型':<6} | {'端口':<6} | {'显示名称 / 项目名':<22} | {'分组':<12} | {'启动命令'}")
     print("-" * 92)
     for r in rows:
         display = r['display_name'] or r['name']
         port_str = str(r['port']) if r['port'] is not None else "-"
         ptype = r['type'] or 'web'
-        print(f"{r['id']:<20} | {ptype:<6} | {port_str:<6} | {display:<22} | {r['start_command']}")
+        group = r['group_name'] or '未分组'
+        flags = (' · 置顶' if r['pinned'] else '') + (' · 已归档' if r['archived'] else '')
+        print(f"{r['id']:<20} | {ptype:<6} | {port_str:<6} | {display:<22} | {group:<12} | {r['start_command']}{flags}")
     print("-" * 92)
     print(f"共 {len(rows)} 个项目已配置。\n")
 
@@ -102,17 +150,11 @@ def cmd_check_port(args):
 
 def cmd_add(args):
     conn = get_connection()
+    conn.execute("BEGIN IMMEDIATE")
     cur = conn.cursor()
 
-    # 1. Check duplicate port if port is specified
-    if args.port is not None:
-        cur.execute("SELECT id, name, display_name FROM projects WHERE port = ?", (args.port,))
-        conflict = cur.fetchone()
-        if conflict:
-            display = conflict['display_name'] or conflict['name']
-            print(f"❌ 错误：端口 {args.port} 已被项目「{display}」(ID: {conflict['id']}) 占用！", file=sys.stderr)
-            print(f"👉 提示：Bento 要求各项目端口必须唯一，请为该项目分配其他空闲端口（例如 {args.port + 1}）后再试。", file=sys.stderr)
-            sys.exit(1)
+    # Hold the write lock across validation and insertion, including older databases.
+    ensure_unique_port(conn, args.port)
 
     # 2. Generate ID if not provided
     project_id = args.id or args.name.lower().replace(" ", "-")
@@ -129,6 +171,9 @@ def cmd_add(args):
         with conn:
             columns = ["id", "name", "display_name", "description", "path", "port", "start_command", "type"]
             values = [project_id, args.name, args.display or args.name, args.desc or "", args.path, args.port, args.command, project_type]
+            if args.group is not None:
+                columns.append("group_id")
+                values.append(resolve_group(conn, args.group))
             if "sort_order" in project_columns(conn):
                 # New projects go to the end of the sidebar, like projects added in the app.
                 columns.append("sort_order")
@@ -150,6 +195,7 @@ def cmd_add(args):
 
 def cmd_update(args):
     conn = get_connection()
+    conn.execute("BEGIN IMMEDIATE")
     cur = conn.cursor()
 
     cur.execute("SELECT * FROM projects WHERE id = ?", (args.id,))
@@ -166,21 +212,16 @@ def cmd_update(args):
     new_command = args.command if args.command is not None else existing['start_command']
     new_type = args.type if args.type is not None else (existing['type'] if 'type' in existing.keys() else 'web')
 
-    # Check port uniqueness with other projects
-    if new_port is not None and new_port != existing['port']:
-        cur.execute("SELECT id, name, display_name FROM projects WHERE port = ? AND id != ?", (new_port, args.id))
-        conflict = cur.fetchone()
-        if conflict:
-            display = conflict['display_name'] or conflict['name']
-            print(f"❌ 错误：端口 {new_port} 已被其他项目「{display}」占用！请更换其他端口。", file=sys.stderr)
-            sys.exit(1)
+    # Recheck unchanged ports too, so legacy duplicate configurations cannot persist.
+    ensure_unique_port(conn, new_port, args.id)
 
     with conn:
+        group_id = resolve_group(conn, args.group) if args.group is not None else existing['group_id']
         conn.execute("""
             UPDATE projects
-            SET name = ?, display_name = ?, description = ?, path = ?, port = ?, start_command = ?, type = ?, updated_at = CURRENT_TIMESTAMP
+            SET name = ?, display_name = ?, description = ?, path = ?, port = ?, start_command = ?, type = ?, group_id = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
-        """, (new_name, new_display, new_desc, new_path, new_port, new_command, new_type, args.id))
+        """, (new_name, new_display, new_desc, new_path, new_port, new_command, new_type, group_id, args.id))
 
     print(f"✅ 成功更新项目「{args.id}」！")
     print(f"   类型: {new_type}, 端口: {new_port}, 路径: {new_path}, 启动命令: {new_command}")
@@ -199,7 +240,8 @@ def main():
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
     # list
-    subparsers.add_parser("list", help="列出所有配置的项目")
+    p_list = subparsers.add_parser("list", help="列出所有配置的项目")
+    p_list.add_argument("--group", help="仅列出指定分组，空字符串表示未分组")
 
     # check-port
     p_check = subparsers.add_parser("check-port", help="检查指定端口是否已被占用")
@@ -215,6 +257,7 @@ def main():
     p_add.add_argument("--display", help="显示别名")
     p_add.add_argument("--desc", help="项目简要描述")
     p_add.add_argument("--id", help="自定义唯一 ID")
+    p_add.add_argument("--group", help="分组名称，不存在则新建；空字符串表示未分组")
 
     # update
     p_update = subparsers.add_parser("update", help="更新已有项目配置")
@@ -226,6 +269,7 @@ def main():
     p_update.add_argument("--port", type=int, help="新端口号（必须唯一）")
     p_update.add_argument("--command", help="新启动命令")
     p_update.add_argument("--type", choices=["web", "app"], help="新项目类型")
+    p_update.add_argument("--group", help="分组名称，不存在则新建；空字符串移回未分组，省略则保留")
 
     # delete
     p_del = subparsers.add_parser("delete", help="删除项目")

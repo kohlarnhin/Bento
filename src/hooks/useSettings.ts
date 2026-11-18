@@ -4,6 +4,7 @@ import { DEFAULT_TERMINAL_FONT_SIZE } from '../lib/terminalAppearance';
 import { setTerminalFontSize } from '../lib/terminalRegistry';
 
 interface Settings {
+  'sidebar.compact': boolean;
   'terminal.fontSize': number;
   'terminal.maxPerProject': number;
   'autostart.defaultApplied': boolean;
@@ -20,6 +21,10 @@ let initialSettings: Promise<Settings> | undefined;
 let initialAutostart: Promise<AutostartStatus> | undefined;
 
 export function useSettings() {
+  const [compactSidebar, setCompactSidebar] = useState(true);
+  const [compactSaving, setCompactSaving] = useState(false);
+  const [compactError, setCompactError] = useState<string | null>(null);
+  const compactPending = useRef(false);
   const [fontSize, setFontSize] = useState(DEFAULT_TERMINAL_FONT_SIZE);
   const [fontLoading, setFontLoading] = useState(true);
   const [fontSaving, setFontSaving] = useState(false);
@@ -30,7 +35,10 @@ export function useSettings() {
   const [autostart, setAutostart] = useState<AutostartStatus | null>(null);
   const [autostartSaving, setAutostartSaving] = useState(false);
   const [autostartError, setAutostartError] = useState<string | null>(null);
-  const fontPending = useRef(false);
+  const requestedFontSize = useRef(DEFAULT_TERMINAL_FONT_SIZE);
+  const savedFontSize = useRef(DEFAULT_TERMINAL_FONT_SIZE);
+  const fontRevision = useRef(0);
+  const fontSaveQueue = useRef(Promise.resolve());
   const maxPending = useRef(false);
   const autostartPending = useRef(false);
 
@@ -40,9 +48,14 @@ export function useSettings() {
     initialAutostart ??= invoke<AutostartStatus>('autostart_status');
     void initialSettings.then(settings => {
       if (!active) return;
-      setFontSize(settings['terminal.fontSize']);
+      savedFontSize.current = settings['terminal.fontSize'];
+      if (fontRevision.current === 0) {
+        requestedFontSize.current = settings['terminal.fontSize'];
+        setFontSize(settings['terminal.fontSize']);
+        setTerminalFontSize(settings['terminal.fontSize']);
+      }
       setMaxPerProject(settings['terminal.maxPerProject']);
-      setTerminalFontSize(settings['terminal.fontSize']);
+      setCompactSidebar(settings['sidebar.compact']);
     }).catch(error => { if (active) setFontError(`读取设置失败：${error}`); })
       .finally(() => { if (active) setFontLoading(false); });
     void initialAutostart.then(status => { if (active) setAutostart(status); })
@@ -50,25 +63,34 @@ export function useSettings() {
     return () => { active = false; };
   }, []);
 
-  const changeFontSize = useCallback(async (size: number) => {
-    if (fontPending.current || !Number.isInteger(size) || size < 12 || size > 20) return;
-    fontPending.current = true;
-    const previous = fontSize;
+  const changeFontSize = useCallback((next: number | ((current: number) => number)) => {
+    const size = typeof next === 'function' ? next(requestedFontSize.current) : next;
+    if (!Number.isInteger(size) || size < 12 || size > 20 || size === requestedFontSize.current) return Promise.resolve();
+    const revision = ++fontRevision.current;
+    requestedFontSize.current = size;
     setFontSaving(true);
     setFontError(null);
     setFontSize(size);
     setTerminalFontSize(size);
-    try {
-      await invoke('set_setting', { key: 'terminal.fontSize', value: size });
-    } catch (error) {
-      setFontSize(previous);
-      setTerminalFontSize(previous);
-      setFontError(`保存字号失败：${error}`);
-    } finally {
-      fontPending.current = false;
-      setFontSaving(false);
-    }
-  }, [fontSize]);
+    // Keep the display immediate and serialize writes, including rapid zooms.
+    fontSaveQueue.current = fontSaveQueue.current.then(async () => {
+      try {
+        await initialSettings?.catch(() => undefined);
+        await invoke('set_setting', { key: 'terminal.fontSize', value: size });
+        savedFontSize.current = size;
+      } catch (error) {
+        if (revision === fontRevision.current) {
+          requestedFontSize.current = savedFontSize.current;
+          setFontSize(savedFontSize.current);
+          setTerminalFontSize(savedFontSize.current);
+          setFontError(`保存字号失败：${error}`);
+        }
+      } finally {
+        if (revision === fontRevision.current) setFontSaving(false);
+      }
+    });
+    return fontSaveQueue.current;
+  }, []);
 
   const changeMaxPerProject = useCallback(async (max: number) => {
     if (maxPending.current || !Number.isInteger(max) || max < 1 || max > 6) return;
@@ -87,6 +109,18 @@ export function useSettings() {
       setMaxSaving(false);
     }
   }, [maxPerProject]);
+
+  const changeCompactSidebar = useCallback(async (enabled: boolean) => {
+    if (compactPending.current) return;
+    compactPending.current = true;
+    const previous = compactSidebar;
+    setCompactSaving(true);
+    setCompactError(null);
+    setCompactSidebar(enabled);
+    try { await invoke('set_setting', { key: 'sidebar.compact', value: enabled }); }
+    catch (error) { setCompactSidebar(previous); setCompactError(`保存侧边栏设置失败：${error}`); }
+    finally { compactPending.current = false; setCompactSaving(false); }
+  }, [compactSidebar]);
 
   const changeAutostart = useCallback(async (enabled: boolean) => {
     if (!autostart?.available || autostartPending.current) return;
@@ -107,6 +141,7 @@ export function useSettings() {
   }, [autostart]);
 
   return { fontSize, fontLoading, fontSaving, fontError, changeFontSize,
+    compactSidebar, compactSaving, compactError, changeCompactSidebar,
     maxPerProject, maxSaving, maxError, changeMaxPerProject,
     autostart, autostartSaving, autostartError, changeAutostart };
 }

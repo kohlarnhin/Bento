@@ -10,7 +10,7 @@ import { ProjectCard } from './components/ProjectCard';
 import { PortConflictBanner } from './components/PortConflictBanner';
 import { TerminalLogsModal } from './components/TerminalLogs';
 import { ProjectSidebar } from './components/ProjectSidebar';
-import { ProjectTerminal } from './components/ProjectTerminal';
+import { ProjectTerminal, type ProjectTerminalControls } from './components/ProjectTerminal';
 import { ProjectFormDialog } from './components/ProjectFormDialog';
 import { ProjectDeleteDialog } from './components/ProjectDeleteDialog';
 import { ExternalProcessDialog } from './components/ExternalProcessDialog';
@@ -19,14 +19,21 @@ import { UpdateDialog, UpdateFooter } from './components/UpdateDialog';
 import { useUpdater } from './hooks/useUpdater';
 import { useSettings } from './hooks/useSettings';
 import { SettingsDialog } from './components/SettingsDialog';
+import { QuickSwitcher } from './components/QuickSwitcher';
+import { GroupDialog } from './components/GroupDialog';
 import Button from './components/ui/button';
 import { Toaster } from './components/ui/sonner';
 import { Empty, EmptyTitle, EmptyDescription } from './components/ui/empty';
 import { createTerminal, getProjectTerminalSlots, getTerminalSnapshot, initTerminalRegistry, subscribeTerminals, terminalKey } from './lib/terminalRegistry';
 import { projectLogs } from './lib/useProjectLogs';
 import { recordRender } from './lib/renderMetrics';
+import { DEFAULT_TERMINAL_FONT_SIZE } from './lib/terminalAppearance';
+import { clampTerminalFontSize, terminalsNeedingAttention } from './lib/terminalUsability';
+import { matchesSidebarFilter, sidebarNavigation, sidebarSections, type SidebarFilter } from './lib/sidebarModel';
+import { useProjectGitInfos } from './lib/useGitInfo';
 import {
   ProjectConfig,
+  ProjectGroup,
   PortConflict,
   ProjectsResponse,
   ProjectStatus,
@@ -36,28 +43,52 @@ import {
   PortOwner,
 } from './types';
 
-let sidebarDropContext: { isDialogOpen: () => boolean; openCreate: (inspection: ProjectDirInspection) => void } | undefined;
+let sidebarDropContext: {
+  isDialogOpen: () => boolean;
+  openCreate: (inspection: ProjectDirInspection) => void;
+  showHover: (name: string | null) => void;
+} | undefined;
+let sidebarDragPaths: string[] = [];
+let sidebarDropPending = false;
 
 export async function handleSidebarDragDrop(event: DragDropEvent) {
   const sidebar = document.querySelector<HTMLElement>('aside.app-sidebar');
   if (!sidebar) return;
-  delete sidebar.dataset.folderDrag;
   const context = sidebarDropContext;
-  if (!context || context.isDialogOpen() || event.type === 'leave') return;
+  if (event.type === 'enter') sidebarDragPaths = event.paths;
+  if (!context || context.isDialogOpen() || event.type === 'leave') {
+    context?.showHover(null);
+    sidebarDragPaths = [];
+    return;
+  }
   const rect = sidebar.getBoundingClientRect();
   const x = event.position.x / window.devicePixelRatio;
   const y = event.position.y / window.devicePixelRatio;
-  if (x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) return;
-  if (event.type === 'enter' || event.type === 'over') sidebar.dataset.folderDrag = 'true';
+  if (x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) {
+    context.showHover(null);
+    if (event.type === 'drop') sidebarDragPaths = [];
+    return;
+  }
+  if (event.type === 'drop' && !event.paths.length) { context.showHover(null); sidebarDragPaths = []; return; }
+  const paths = event.type === 'drop' ? event.paths : sidebarDragPaths;
+  const name = paths[0]?.split(/[/\\]/u).filter(Boolean).at(-1) || '项目文件夹';
+  if (event.type === 'enter' || event.type === 'over') context.showHover(name);
   else if (event.type === 'drop' && event.paths[0]) {
+    context.showHover(null);
+    sidebarDragPaths = [];
+    if (sidebarDropPending) return;
+    sidebarDropPending = true;
     try {
+      if (paths.length > 1) toast.info(`一次仅处理首项，已选择「${name}」（共 ${paths.length} 项）`);
       const inspection = await invoke<ProjectDirInspection>('inspect_project_dir', { path: event.paths[0], excludeId: null });
-      if (context.isDialogOpen()) return;
-      if (inspection.isDir) context.openCreate(inspection);
-      else toast.error('请拖入项目文件夹');
+      if (context !== sidebarDropContext || context.isDialogOpen()) return;
+      if (!inspection.exists) toast.error(`「${name}」路径不存在，请重新拖入项目文件夹`);
+      else if (!inspection.isDir) toast.error(`「${name}」不是文件夹，请拖入项目文件夹`);
+      else if (inspection.existingProject) toast.info(`此文件夹已添加为项目「${inspection.existingProject.name}」，请在侧边栏打开`);
+      else context.openCreate(inspection);
     } catch (error) {
       toast.error(`检查项目目录失败：${error}`);
-    }
+    } finally { sidebarDropPending = false; }
   }
 }
 
@@ -78,10 +109,22 @@ export function App() {
   recordRender('app');
   const updater = useUpdater();
   const settings = useSettings();
+  const terminalControls = useRef<ProjectTerminalControls>(null);
+  const changeFontSize = settings.changeFontSize;
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [folderDropName, setFolderDropName] = useState<string | null>(null);
   const terminals = useSyncExternalStore(subscribeTerminals, getTerminalSnapshot);
   const terminalCount = Object.values(terminals).filter(terminal => terminal.alive).length;
   const [projects, setProjects] = useState<ProjectConfig[]>([]);
+  const [groups, setGroups] = useState<ProjectGroup[]>([]);
+  const [filter, setFilter] = useState<SidebarFilter>('all');
+  const [quickOpen, setQuickOpen] = useState(false);
+  const quickOpenRef = useRef(quickOpen);
+  quickOpenRef.current = quickOpen;
+  const [groupForm, setGroupForm] = useState<{ action: 'create' | 'rename' | 'delete'; group?: ProjectGroup } | null>(null);
+  const gitInfos = useProjectGitInfos(projects);
+  const attentionProjects = useMemo(() => new Set(Object.values(terminals).filter(terminal => terminal.attention).map(terminal => terminal.projectId)), [terminals]);
+  const changedProjects = useMemo(() => new Set(projects.filter(project => (gitInfos[project.id]?.changes ?? 0) > 0).map(project => project.id)), [projects, gitInfos]);
   const [conflicts, setConflicts] = useState<PortConflict[]>([]);
   const [runtimes, setRuntimes] = useState<Record<string, ProjectRuntimeStatus>>({});
   const projectStatuses: Record<string, ProjectStatus> = useMemo(() => Object.fromEntries(Object.entries(runtimes).map(([id, runtime]) => [id, runtime.status])), [runtimes]);
@@ -125,7 +168,7 @@ export function App() {
       return next;
     });
   }, [terminals]);
-  const watchedProjectId = selection?.view === 'terminal' ? selection.projectId : null;
+  const watchedProjectId = selection?.view === 'terminal' && !quickOpen ? selection.projectId : null;
   const watchedSlot = watchedProjectId ? activeSlots[watchedProjectId] ?? 1 : null;
   const reportedTerminal = useRef<string | null>();
   const focusRequests = useRef(Promise.resolve());
@@ -159,10 +202,13 @@ export function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const searchInput = useRef<HTMLInputElement>(null);
   const searchText = searchQuery.trim().toLowerCase();
-  const visibleProjects = useMemo(() => projects.filter(project => !searchText ||
-    [project.displayName, project.name, project.path, project.port?.toString()].some(value => value?.toLowerCase().includes(searchText))), [projects, searchText]);
-  const navigation = useRef({ projects: visibleProjects, view: selection?.view || 'overview', selection, activeSlots });
-  navigation.current = { projects: visibleProjects, view: selection?.view || 'overview', selection, activeSlots };
+  const visibleProjects = useMemo(() => sidebarSections(projects.filter(project =>
+    matchesSidebarFilter(project, filter, projectStatuses, attentionProjects, changedProjects) && (!searchText ||
+    [project.displayName, project.name, project.path, project.port?.toString()].some(value => value?.toLowerCase().includes(searchText)))), groups).flatMap(section => section.projects),
+    [projects, groups, searchText, filter, projectStatuses, attentionProjects, changedProjects]);
+  const shortcutProjects = useMemo(() => visibleProjects.filter(project => !project.archived), [visibleProjects]);
+  const navigation = useRef({ projects: shortcutProjects, view: selection?.view || 'overview', selection, activeSlots });
+  navigation.current = { projects: shortcutProjects, view: selection?.view || 'overview', selection, activeSlots };
   const [reordering, setReordering] = useState(false);
   const reorderPending = useRef(false);
   const [projectForm, setProjectForm] = useState<{ project?: ProjectConfig; inspection?: ProjectDirInspection } | null>(null);
@@ -172,7 +218,14 @@ export function App() {
   const managedProjects = projects.filter(project => runtimes[project.id]?.isManaged && ['starting', 'running'].includes(runtimes[project.id].status));
   const externalRequest = useRef(false);
   const dialogOpen = useRef(false);
-  dialogOpen.current = !!(projectForm || deleteProject || activeLogProject || externalStop || stopAllOpen || settingsOpen || externalRequest.current || updater.isModalOpen);
+  dialogOpen.current = !!(projectForm || deleteProject || activeLogProject || externalStop || stopAllOpen || settingsOpen || quickOpen || groupForm || externalRequest.current || updater.isModalOpen);
+  const openQuickSwitcher = useCallback(() => {
+    if (dialogOpen.current) return;
+    terminalControls.current?.closeFind();
+    dialogOpen.current = true;
+    setQuickOpen(true);
+  }, []);
+  const closeQuickSwitcher = useCallback(() => { setQuickOpen(false); quickOpenRef.current = false; dialogOpen.current = false; }, []);
   const openSettings = useCallback(() => {
     if (dialogOpen.current) return;
     dialogOpen.current = true;
@@ -180,6 +233,7 @@ export function App() {
   }, []);
   const openCreate = useCallback((inspection?: ProjectDirInspection) => {
     if (dialogOpen.current) return;
+    setFolderDropName(null);
     dialogOpen.current = true;
     setProjectForm({ inspection });
   }, []);
@@ -199,18 +253,66 @@ export function App() {
   }, [selectTerminalSlot]);
 
   useEffect(() => {
+    const captured = new Set<string>();
+    let composing = false;
+    const startComposition = () => { composing = true; };
+    const endComposition = () => { composing = false; };
     const onShortcut = (event: KeyboardEvent) => {
+      const physicalKey = event.code || event.key;
+      if (event.type !== 'keydown' && captured.has(physicalKey)) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.type === 'keyup') captured.delete(physicalKey);
+        return;
+      }
+      if (composing || event.isComposing || event.keyCode === 229) return;
+      if (quickOpenRef.current) {
+        // Panel actions may close the dialog on keydown; swallow their later
+        // keypress/keyup events before focus returns to an existing terminal.
+        if (event.type === 'keydown' && (['Enter', 'Escape', 'ArrowUp', 'ArrowDown'].includes(event.key)
+          || (event.metaKey && ['t', 'n'].includes(event.key.toLowerCase())))) captured.add(physicalKey);
+        return;
+      }
+      const inTerminal = navigation.current.view === 'terminal';
+      const finding = inTerminal && terminalControls.current?.isFindOpen();
+      if (finding && event.key === 'Escape' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.type === 'keydown') {
+          captured.add(physicalKey);
+          if (!dialogOpen.current) terminalControls.current?.closeFind();
+        }
+        return;
+      }
       if (!event.metaKey || event.ctrlKey || event.altKey || event.isComposing || event.keyCode === 229) return;
       const key = event.key.toLowerCase();
-      const cycle = event.shiftKey && ['BracketLeft', 'BracketRight'].includes(event.code) && navigation.current.view === 'terminal';
-      if (!cycle && (event.shiftKey || (key !== 't' && key !== 'n' && key !== 'f' && key !== ',' && !/^[1-9]$/.test(key)))) return;
+      const cycle = event.shiftKey && ['BracketLeft', 'BracketRight'].includes(event.code) && inTerminal;
+      const zoomIn = inTerminal && (event.code === 'Equal' || key === '=' || key === '+');
+      const zoomOut = inTerminal && !event.shiftKey && (event.code === 'Minus' || key === '-');
+      const zoomReset = inTerminal && !event.shiftKey && (event.code === 'Digit0' || key === '0');
+      const jump = event.shiftKey && (event.code === 'KeyU' || key === 'u');
+      const findNext = finding && key === 'g';
+      if (!cycle && !zoomIn && !zoomOut && !zoomReset && !jump && !findNext
+          && (event.shiftKey || (key !== 'p' && key !== 't' && key !== 'n' && key !== 'f' && key !== ',' && !/^[1-9]$/.test(key)))) return;
       event.preventDefault();
       event.stopPropagation();
       // xterm also handles keyup; swallowing the complete shortcut keeps focus
       // in search and prevents a later event from reaching the old terminal.
       if (event.type !== 'keydown') return;
+      captured.add(physicalKey);
       if (dialogOpen.current) return;
-      if (cycle) {
+      if (key === 'p' && !event.repeat) openQuickSwitcher();
+      else if (zoomIn || zoomOut || zoomReset) {
+        void changeFontSize(current => zoomReset ? DEFAULT_TERMINAL_FONT_SIZE : clampTerminalFontSize(current + (zoomIn ? 1 : -1)));
+      } else if (jump) {
+        const target = terminalsNeedingAttention(Object.values(getTerminalSnapshot()))[0];
+        if (!target) toast('没有等待处理的终端');
+        else {
+          if (!navigation.current.projects.some(project => project.id === target.projectId)) { setSearchQuery(''); setFilter('all'); }
+          selectTerminalSlot(target.projectId, target.slot);
+        }
+      } else if (findNext) terminalControls.current?.navigateFind(event.shiftKey);
+      else if (cycle) {
         const projectId = navigation.current.selection?.projectId;
         if (!projectId) return;
         const slots = getProjectTerminalSlots(projectId);
@@ -221,22 +323,30 @@ export function App() {
         const projectId = navigation.current.selection?.projectId;
         if (projectId && !event.repeat) void openTerminal(projectId);
       } else if (key === ',') openSettings();
-      else if (key === 'n') openCreate();
-      else if (key === 'f') { searchInput.current?.focus(); searchInput.current?.select(); }
+      else if (key === 'n' && !event.repeat) openCreate();
+      else if (key === 'f') {
+        if (inTerminal) terminalControls.current?.openFind();
+        else { searchInput.current?.focus(); searchInput.current?.select(); }
+      }
       else {
         const project = navigation.current.projects[Number(key) - 1];
         if (project) setSelection({ projectId: project.id, view: navigation.current.view });
       }
     };
     for (const type of ['keydown', 'keypress', 'keyup'] as const) window.addEventListener(type, onShortcut, true);
-    sidebarDropContext = { isDialogOpen: () => dialogOpen.current, openCreate };
+    window.addEventListener('compositionstart', startComposition, true);
+    window.addEventListener('compositionend', endComposition, true);
+    sidebarDropContext = { isDialogOpen: () => dialogOpen.current, openCreate, showHover: setFolderDropName };
     const unlisten = getCurrentWebview().onDragDropEvent(({ payload }) => { void handleSidebarDragDrop(payload); });
     return () => {
       for (const type of ['keydown', 'keypress', 'keyup'] as const) window.removeEventListener(type, onShortcut, true);
+      window.removeEventListener('compositionstart', startComposition, true);
+      window.removeEventListener('compositionend', endComposition, true);
       sidebarDropContext = undefined;
+      sidebarDragPaths = [];
       void unlisten.then((stop) => stop());
     };
-  }, [openCreate, openSettings, openTerminal, selectTerminalSlot]);
+  }, [openCreate, openSettings, openQuickSwitcher, openTerminal, selectTerminalSlot, changeFontSize]);
 
   useEffect(() => {
     const unlisten = listen('bento-open-settings', openSettings);
@@ -249,7 +359,7 @@ export function App() {
 
   useEffect(() => {
     const unlisten = listen<{ projectId: string }>('apphub-select-project', ({ payload }) => {
-      if (!navigation.current.projects.some(project => project.id === payload.projectId)) setSearchQuery('');
+      if (!navigation.current.projects.some(project => project.id === payload.projectId)) { setSearchQuery(''); setFilter('all'); }
       setSelection({ projectId: payload.projectId, view: 'overview' });
     });
     return () => { void unlisten.then(stop => stop()); };
@@ -269,11 +379,12 @@ export function App() {
       setLoading(true);
       const res = await invoke<ProjectsResponse>('get_projects');
       setProjects(res.projects);
+      setGroups(res.groups);
       setProjectsLoaded(true);
       setConflicts(res.conflicts);
       setSelection((previous) => previous && res.projects.some((project) => project.id === previous.projectId)
         ? previous
-        : res.projects[0] ? { projectId: res.projects[0].id, view: 'overview' } : null);
+        : (sidebarNavigation(res.projects, res.groups)[0] ?? res.projects[0]) ? { projectId: (sidebarNavigation(res.projects, res.groups)[0] ?? res.projects[0]).id, view: 'overview' } : null);
 
       // Check port in-use / runtime status
       const runtimeStatuses = await invoke<ProjectRuntimeStatus[]>('get_projects_runtime_status');
@@ -286,15 +397,15 @@ export function App() {
     }
   }, [showToast, applyRuntime]);
 
-  const reorderProjects = useCallback(async (ids: string[]) => {
+  const reorderProjects = useCallback(async (ids: string[], move?: { id: string; groupId: string | null }) => {
     if (reorderPending.current) return;
     reorderPending.current = true;
     setReordering(true);
     const previous = projects;
     const byId = new Map(projects.map(project => [project.id, project]));
-    setProjects(ids.map(id => byId.get(id)!));
+    setProjects(ids.map(id => { const project = byId.get(id)!; return move?.id === id ? { ...project, groupId: move.groupId } : project; }));
     try {
-      await invoke('reorder_projects', { ids });
+      await invoke(move ? 'move_project' : 'reorder_projects', { ids, ...move });
       await loadProjects();
     } catch (error) {
       setProjects(previous);
@@ -305,6 +416,32 @@ export function App() {
       setReordering(false);
     }
   }, [projects, loadProjects]);
+
+  const addGroup = useCallback(async (name: string) => {
+    const group = await invoke<ProjectGroup>('add_group', { name });
+    setGroups(previous => [...previous, group]);
+    return group;
+  }, []);
+  const updateGroup = useCallback(async (id: string, changes: { name?: string; collapsed?: boolean }) => {
+    await invoke('update_group', { id, ...changes });
+    setGroups(previous => previous.map(group => group.id === id ? { ...group, ...changes } : group));
+  }, []);
+  const reorderGroups = useCallback(async (ids: string[]) => {
+    if (reorderPending.current) return;
+    reorderPending.current = true;
+    setReordering(true);
+    try {
+      await invoke('reorder_groups', { ids });
+      setGroups(previous => ids.map((id, sortOrder) => ({ ...previous.find(group => group.id === id)!, sortOrder })));
+    } catch (error) { toast.error(`分组排序失败：${error}`); await loadProjects(); }
+    finally { reorderPending.current = false; setReordering(false); }
+  }, [loadProjects]);
+  const setProjectFlags = useCallback(async (id: string, flags: { pinned?: boolean; archived?: boolean }) => {
+    try {
+      await invoke('set_project_flags', { id, ...flags });
+      setProjects(previous => previous.map(project => project.id === id ? { ...project, ...flags } : project));
+    } catch (error) { toast.error(`保存项目状态失败：${error}`); }
+  }, []);
 
   // Set up event listeners and periodic status polling
   useEffect(() => {
@@ -443,12 +580,24 @@ export function App() {
 
         <ProjectSidebar
           projects={projects}
+          folderDropName={folderDropName}
+          groups={groups}
           visibleProjects={visibleProjects}
           searchQuery={searchQuery}
           searchInputRef={searchInput}
           onSearchChange={setSearchQuery}
           onReorder={reorderProjects}
           reordering={reordering}
+          compact={settings.compactSidebar}
+          filter={filter}
+          onFilterChange={setFilter}
+          attentionProjects={attentionProjects}
+          changedProjects={changedProjects}
+          onQuickSwitch={openQuickSwitcher}
+          onUpdateGroup={updateGroup}
+          onReorderGroups={reorderGroups}
+          onGroupAction={(action, group) => setGroupForm({ action, group })}
+          onProjectFlags={setProjectFlags}
           statuses={projectStatuses}
           conflicts={conflicts}
           selection={selection}
@@ -478,7 +627,7 @@ export function App() {
               <Button onClick={() => openCreate()}>新建项目</Button>
             </Empty>
           ) : selectedProject && selection?.view === 'terminal' ? (
-            <ProjectTerminal key={selectedProject.id} project={selectedProject} activeSlot={activeSlots[selectedProject.id] ?? 1} />
+            <ProjectTerminal ref={terminalControls} key={selectedProject.id} project={selectedProject} activeSlot={activeSlots[selectedProject.id] ?? 1} />
           ) : selectedProject ? (
             <div className="flex-1 overflow-y-auto px-7 pb-8 pt-3 lg:px-12 lg:pt-7" data-project-overview={selectedProject.id}>
               <div className="mx-auto flex max-w-4xl flex-col gap-5">
@@ -505,6 +654,19 @@ export function App() {
         </main>
 
         <UpdateDialog updater={updater} projects={managedProjects} terminalCount={terminalCount} />
+        {quickOpen && <QuickSwitcher projects={[...sidebarNavigation(projects, groups), ...projects.filter(project => project.archived)]} statuses={projectStatuses}
+          onClose={closeQuickSwitcher}
+          onCreate={() => { closeQuickSwitcher(); openCreate(); }}
+          onCreateGroup={() => { closeQuickSwitcher(); dialogOpen.current = true; setGroupForm({ action: 'create' }); }}
+          onSelect={project => { closeQuickSwitcher(); setSearchQuery(''); setFilter('all'); setSelection({ projectId: project.id, view: 'overview' }); }}
+          onToggle={project => { closeQuickSwitcher(); void (['running', 'starting'].includes(projectStatuses[project.id]) ? handleStop(project.id) : handleStart(project.id)); }}
+          onNewTerminal={project => { closeQuickSwitcher(); setSearchQuery(''); setFilter('all'); void openTerminal(project.id); }} />}
+        {groupForm && <GroupDialog group={groupForm.group} deleting={groupForm.action === 'delete'} onClose={() => setGroupForm(null)}
+          onSave={async name => {
+            if (groupForm.action === 'create') await addGroup(name);
+            else if (groupForm.action === 'rename') await updateGroup(groupForm.group!.id, { name });
+            else { await invoke('delete_group', { id: groupForm.group!.id }); await loadProjects(); }
+          }} />}
         {settingsOpen && !updater.isModalOpen && <SettingsDialog settings={settings} updater={updater}
           onClose={() => setSettingsOpen(false)}
           onCheckUpdates={() => { setSettingsOpen(false); void updater.checkNow(); }} />}
@@ -513,6 +675,8 @@ export function App() {
           project={projectForm.project}
           initialInspection={projectForm.inspection}
           projects={projects}
+          groups={groups}
+          onCreateGroup={addGroup}
           status={projectForm.project ? projectStatuses[projectForm.project.id] : undefined}
           onClose={() => setProjectForm(null)}
           onSaved={async (project) => {

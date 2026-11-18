@@ -166,6 +166,7 @@ pub fn record_command(command: &str) {
                 | "delete_project"
                 | "inspect_project_dir"
                 | "check_port_occupied"
+                | "check_port_conflicts"
                 | "get_projects_runtime_status"
                 | "start_project"
                 | "stop_project"
@@ -424,6 +425,7 @@ pub fn e2e_click(app: AppHandle, x: f64, y: f64, action: Option<String>) -> Resu
         "click" => vec![NSEventType::LeftMouseDown, NSEventType::LeftMouseUp],
         "down" => vec![NSEventType::LeftMouseDown],
         "move" => vec![NSEventType::LeftMouseDragged],
+        "hover" => vec![NSEventType::MouseMoved],
         "up" => vec![NSEventType::LeftMouseUp],
         _ => return Err("Unknown E2E pointer action".into()),
     };
@@ -433,6 +435,7 @@ pub fn e2e_click(app: AppHandle, x: f64, y: f64, action: Option<String>) -> Resu
     window.with_webview(move |webview| unsafe {
         let view = &*webview.inner().cast::<WKWebView>();
         if let Some(window) = view.window() {
+            window.setAcceptsMouseMovedEvents(true);
             let y = if view.isFlipped() { y } else { view.bounds().size.height - y };
             let point = view.convertPoint_toView(NSPoint::new(x, y), None);
             for event_type in events {

@@ -28,10 +28,11 @@ export const DialogContent = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
     hideClose?: boolean;
     closeClassName?: string;
+    overlayClassName?: string;
   }
->(({ className, children, hideClose, closeClassName, ...props }, ref) => (
+>(({ className, children, hideClose, closeClassName, overlayClassName, ...props }, ref) => (
   <DialogPortal>
-    <DialogOverlay />
+    <DialogOverlay className={overlayClassName} />
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
