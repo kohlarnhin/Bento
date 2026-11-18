@@ -1,9 +1,19 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { fuzzyMatch, matchesSidebarFilter, moveProjectOrder, projectAvatar, searchCreationActions, searchProjects, sidebarNavigation, sidebarSections, substringMatch } from '../src/lib/sidebarModel.ts';
+import { fuzzyMatch, matchesSidebarFilter, moveProjectOrder, projectAvatar, searchCreationActions, searchProjects, sidebarDensity, sidebarNavigation, sidebarSections, substringMatch } from '../src/lib/sidebarModel.ts';
 
 const project = (id, extra = {}) => ({ id, name: id, path: '~/work/' + id, port: null, groupId: null, pinned: false, archived: false, ...extra });
 const groups = [{ id: 'work', name: '工作', sortOrder: 2, collapsed: false }, { id: 'personal', name: '个人', sortOrder: 1, collapsed: true }];
+
+test('Sidebar density counts only unarchived projects and changes after 10', () => {
+  const ten = Array.from({ length: 10 }, (_, index) => project(`p${index}`));
+  const archived = project('old', { archived: true });
+  assert.equal(sidebarDensity([]), 'comfortable');
+  assert.equal(sidebarDensity(ten), 'comfortable');
+  assert.equal(sidebarDensity([...ten, project('extra')]), 'compact');
+  assert.equal(sidebarDensity([...ten, archived]), 'comfortable');
+  assert.equal(sidebarDensity([archived]), 'comfortable');
+});
 
 test('Sidebar partitions pins, ordered groups, ungrouped and archives without duplicates', () => {
   const projects = [project('a', { groupId: 'work' }), project('b', { pinned: true, groupId: 'work' }), project('c'), project('d', { groupId: 'personal' }), project('e', { pinned: true, archived: true }), project('f', { groupId: 'deleted' })];

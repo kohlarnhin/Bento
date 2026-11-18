@@ -4,7 +4,6 @@ import { DEFAULT_TERMINAL_FONT_SIZE } from '../lib/terminalAppearance';
 import { setTerminalFontSize } from '../lib/terminalRegistry';
 
 interface Settings {
-  'sidebar.compact': boolean;
   'terminal.fontSize': number;
   'terminal.maxPerProject': number;
   'autostart.defaultApplied': boolean;
@@ -21,10 +20,6 @@ let initialSettings: Promise<Settings> | undefined;
 let initialAutostart: Promise<AutostartStatus> | undefined;
 
 export function useSettings() {
-  const [compactSidebar, setCompactSidebar] = useState(true);
-  const [compactSaving, setCompactSaving] = useState(false);
-  const [compactError, setCompactError] = useState<string | null>(null);
-  const compactPending = useRef(false);
   const [fontSize, setFontSize] = useState(DEFAULT_TERMINAL_FONT_SIZE);
   const [fontLoading, setFontLoading] = useState(true);
   const [fontSaving, setFontSaving] = useState(false);
@@ -55,7 +50,6 @@ export function useSettings() {
         setTerminalFontSize(settings['terminal.fontSize']);
       }
       setMaxPerProject(settings['terminal.maxPerProject']);
-      setCompactSidebar(settings['sidebar.compact']);
     }).catch(error => { if (active) setFontError(`读取设置失败：${error}`); })
       .finally(() => { if (active) setFontLoading(false); });
     void initialAutostart.then(status => { if (active) setAutostart(status); })
@@ -110,18 +104,6 @@ export function useSettings() {
     }
   }, [maxPerProject]);
 
-  const changeCompactSidebar = useCallback(async (enabled: boolean) => {
-    if (compactPending.current) return;
-    compactPending.current = true;
-    const previous = compactSidebar;
-    setCompactSaving(true);
-    setCompactError(null);
-    setCompactSidebar(enabled);
-    try { await invoke('set_setting', { key: 'sidebar.compact', value: enabled }); }
-    catch (error) { setCompactSidebar(previous); setCompactError(`保存侧边栏设置失败：${error}`); }
-    finally { compactPending.current = false; setCompactSaving(false); }
-  }, [compactSidebar]);
-
   const changeAutostart = useCallback(async (enabled: boolean) => {
     if (!autostart?.available || autostartPending.current) return;
     autostartPending.current = true;
@@ -141,7 +123,6 @@ export function useSettings() {
   }, [autostart]);
 
   return { fontSize, fontLoading, fontSaving, fontError, changeFontSize,
-    compactSidebar, compactSaving, compactError, changeCompactSidebar,
     maxPerProject, maxSaving, maxError, changeMaxPerProject,
     autostart, autostartSaving, autostartError, changeAutostart };
 }

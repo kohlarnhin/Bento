@@ -21,9 +21,9 @@ export default {
         muted: { DEFAULT: 'hsl(var(--muted))', foreground: 'hsl(var(--muted-foreground))' },
         accent: { DEFAULT: 'hsl(var(--accent))', foreground: 'hsl(var(--accent-foreground))' },
         popover: { DEFAULT: 'hsl(var(--popover))', foreground: 'hsl(var(--popover-foreground))' },
-        card: { DEFAULT: 'hsl(var(--card))', foreground: 'hsl(var(--card-foreground))' },
+        card: { DEFAULT: 'var(--card)', foreground: 'hsl(var(--card-foreground))', border: 'var(--card-border)' },
         sidebar: {
-          DEFAULT: 'hsl(var(--sidebar-background))',
+          DEFAULT: 'var(--sidebar-background)',
           foreground: 'hsl(var(--sidebar-foreground))',
           primary: 'hsl(var(--sidebar-primary))',
           'primary-foreground': 'hsl(var(--sidebar-primary-foreground))',
@@ -45,28 +45,28 @@ export default {
         }
       },
       borderRadius: {
+        control: 'var(--radius-control)',
         lg: 'var(--radius)',
         md: 'calc(var(--radius) - 2px)',
         sm: 'calc(var(--radius) - 4px)',
       },
       fontFamily: {
-        sans: [
-          '-apple-system',
-          'BlinkMacSystemFont',
-          '"SF Pro Text"',
-          '"SF Pro Display"',
-          '"PingFang SC"',
-          '"Helvetica Neue"',
-          'Arial',
-          'sans-serif'
-        ],
-        mono: [
-          '"SF Mono"',
-          'Menlo',
-          'Monaco',
-          'Consolas',
-          'monospace'
-        ]
+        sans: 'var(--font-ui)',
+        mono: 'var(--font-mono)',
+      },
+      fontSize: {
+        sm: ['var(--text-body)', '1.5'],
+        brand: ['var(--text-brand)', '1.25'],
+        title: ['var(--text-title)', '1.25'],
+        meta: ['var(--text-meta)', '1.35'],
+        label: ['var(--text-label)', '1.35'],
+        keycap: ['var(--text-keycap)', '1.5'],
+      },
+      fontWeight: {
+        heading: 'var(--weight-heading)',
+      },
+      letterSpacing: {
+        title: 'var(--tracking-title)',
       }
     },
   },

@@ -10,6 +10,14 @@ export function projectAvatar(name: string) {
   return { color: avatarColors[hash % avatarColors.length], initial: Array.from(name.trim())[0]?.toLocaleUpperCase() || '?' };
 }
 
+export function groupColor(name?: string) {
+  return name ? projectAvatar(name).color : '#d4d4d8';
+}
+
+export function sidebarDensity(projects: readonly Pick<ProjectConfig, 'archived'>[]): 'comfortable' | 'compact' {
+  return projects.filter(project => !project.archived).length > 10 ? 'compact' : 'comfortable';
+}
+
 export type SidebarFilter = 'all' | 'running' | 'attention' | 'changes';
 export function matchesSidebarFilter(project: ProjectConfig, filter: SidebarFilter, statuses: Record<string, ProjectStatus>, attention: ReadonlySet<string>, changes: ReadonlySet<string>) {
   if (filter === 'running') return ['running', 'starting'].includes(statuses[project.id]);
