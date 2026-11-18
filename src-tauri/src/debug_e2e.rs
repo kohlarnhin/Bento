@@ -34,10 +34,14 @@ pub fn record_terminal_bounce() {
     if enabled() { TERMINAL_BOUNCES.fetch_add(1, Ordering::Relaxed); }
 }
 
-pub fn record_open_url(url: &str) -> bool {
-    if !enabled() { return false; }
+pub fn record_open_url(url: &str) -> Option<Result<(), String>> {
+    if !enabled() { return None; }
     if let Ok(mut urls) = OPENED_URLS.lock() { urls.push(url.into()); }
-    true
+    if std::env::var("APPHUB_E2E_OPEN_FAIL_URL").as_deref() == Ok(url) {
+        Some(Err("系统未能打开浏览器（测试夹具）".into()))
+    } else {
+        Some(Ok(()))
+    }
 }
 
 pub fn record_lsof() {
@@ -171,6 +175,7 @@ pub fn record_command(command: &str) {
                 | "delete_project"
                 | "inspect_project_dir"
                 | "check_project_port_standard"
+                | "preview_project_launch"
                 | "preview_project_standard_script"
                 | "generate_project_standard_script"
                 | "check_port_occupied"
@@ -301,6 +306,7 @@ pub fn e2e_window(
         "visible": window.is_visible().map_err(|err| err.to_string())?,
         "pid": std::process::id(),
         "version": app.package_info().version.to_string(),
+        "theme": window.theme().map_err(|err| err.to_string())?,
         "home": std::env::var_os("HOME"),
         "dbPath": crate::get_db_path(),
         "size": window.inner_size().map_err(|err| err.to_string())?,

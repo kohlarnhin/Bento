@@ -10,8 +10,21 @@ export interface Service {
   key: string;
   kind?: string;
   openWeb: boolean;
+  startCommand?: string;
 }
 
+export type ProjectLaunchConfig = Pick<ProjectDraft, 'path' | 'startCommand' | 'port' | 'services' | 'injectPorts' | 'env'>;
+export interface ProjectLaunchPlan {
+  mode: 'single' | 'shared' | 'independent';
+  steps: {
+    serviceId: string | null;
+    dir: string;
+    command: string;
+    description: string;
+    placeholderHint: boolean;
+    portEnv: EnvVar[];
+  }[];
+}
 export interface ScannedService extends Service { portCandidate: PortCandidate | null }
 export interface StartScript { command: string; source: string }
 export interface ServicePortCheck { serviceId: string; variable: string; references: string[] }
@@ -198,6 +211,7 @@ export interface DashboardServiceSample {
   port: number | null;
   state: DashboardListener;
   usage: DashboardUsage | null;
+  unexpectedPorts?: number[];
 }
 export interface DashboardConflict {
   serviceId: string;

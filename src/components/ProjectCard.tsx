@@ -1,17 +1,17 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { ArrowUpRight, Ellipsis, Play } from 'lucide-react';
+import { ArrowUpRight, Ellipsis, Play, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
 import type {
   DashboardConflict, DashboardCpuPoint, DashboardHealth, DashboardRun, DashboardServiceSample, DashboardUsage,
   PortConflict, ProjectConfig, ProjectRuntimeStatus, ProjectStatus, Service,
 } from '../types';
-import { cpuChart, dashboardServices, dashboardStatus, durationText, relativeTime, runInterval } from '../lib/dashboard';
-import { injectedPortVariables } from '../lib/projectServices';
+import { cpuChart, dashboardPortListening, dashboardServices, dashboardStatus, durationText, relativeTime, runInterval } from '../lib/dashboard';
 import { useDashboard } from '../lib/useDashboard';
+import { useProjectLaunch } from '../lib/useProjectLaunch';
 import { DashboardGitCard, DashboardOutput, DashboardStandard } from './DashboardPanels';
 import { ProjectAvatar } from './ProjectAvatar';
-import { ProjectWebMenu } from './ProjectServices';
+import { OpenServiceButton, ProjectWebMenu } from './ProjectServices';
 import Button from './ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
 import './dashboard.css';
@@ -69,6 +69,8 @@ function ServiceTile({ service, sample, health, last, history, active, onOpen }:
   const previous = last?.port === service.port ? last : undefined;
   const check = live ? (health?.port === service.port ? health : undefined) : previous?.health;
   const usage = live ? serviceSample?.usage : undefined;
+  const unexpected = serviceSample?.unexpectedPorts ?? [];
+  const placeholder = service.key === 'PORT' ? '{port}' : '{port:' + service.key + '}';
   return <section className="dash-tile" data-dashboard-service={service.id} data-service={service.id} data-listener={state} data-idle={!live || undefined}>
     <div className="dash-tile-heading">
       <h2 className="dash-truncate" title={service.name}>{service.name}</h2>
@@ -80,9 +82,16 @@ function ServiceTile({ service, sample, health, last, history, active, onOpen }:
       {check && <small className={check.code == null || check.code < 200 || check.code >= 300 ? 'dash-error' : undefined}
         data-health={check.code ?? 'no-response'}>{healthText(check, live)}</small>}
       {live && !check && <small>检查中…</small>}
-      {live && service.openWeb && service.port != null && <button type="button" className="dash-link dash-right"
-        onClick={() => onOpen(service.port!)}>打开 <ArrowUpRight size={12} aria-hidden="true" /></button>}
+      {service.port != null && <OpenServiceButton port={service.port} listening={state !== 'idle'} onOpen={onOpen}
+        wrapperClassName="dash-right" className="dash-link" data-service-open={service.id}>
+        打开 <ArrowUpRight size={12} aria-hidden="true" />
+      </OpenServiceButton>}
     </div>
+    {active && unexpected.length > 0 && <div className="dash-port-warning" role="status" data-port-injection-warning>
+      <TriangleAlert size={13} aria-hidden="true" />
+      <p>该项目没有读取注入端口（实际 {unexpected.map(port => ':' + port).join('、')}）
+        <small>在启动命令的端口位置使用 <code>{placeholder}</code></small></p>
+    </div>}
     <div className="dash-service-meta">
       {usage ? <>
         <span>CPU <b>{usage.cpu.toFixed(1)}%</b></span><span>内存 <b>{mb(usage.rssKib)} MB</b></span>
@@ -159,6 +168,7 @@ function ConflictDialog({ conflict, onClose, onConfirm }: {
 export function ProjectCard({ project, status: runtimeStatus, runtime, conflicts, onStart, onStop, onRestart, onOpenBrowser,
   onSetDefaultService, onRevealPath, onOpenTerminal, onOpenLogs, onClearLogs, onEdit, onDelete, onRunCommand }: ProjectCardProps) {
   const { snapshot, snapshotError, git, health, now, refresh } = useDashboard(project, runtime);
+  const launch = useProjectLaunch(project);
   const status = dashboardStatus(runtimeStatus, runtime, snapshot);
   const active = status === 'running' || status === 'starting';
   const running = status === 'running';
@@ -169,14 +179,14 @@ export function ProjectCard({ project, status: runtimeStatus, runtime, conflicts
   const busy = useRef(false);
   const viewportRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
-  const firstPort = project.port;
-  const liveServices = new Set(snapshot?.services.filter(service => service.state === 'listening').map(service => service.id));
+  const defaultService = services.find(service => service.openWeb) ?? services[0];
   const startedAt = runtime?.startedAt ?? snapshot?.startedAt;
   const last = snapshot?.lastRun;
   const statusText = running ? '运行中' + (startedAt == null ? '' : ' · ' + durationText(now - startedAt))
     : status === 'starting' ? '启动中' : '未运行' + (last ? ' · ' + relativeTime(last.endedAt, now) + '停止' : '');
   const branch = git?.branch ?? git?.head;
-  const envCount = new Set([...project.env, ...injectedPortVariables(project)].map(variable => variable.key)).size;
+  const envCount = new Set([...project.env, ...(launch?.data?.steps.flatMap(step => step.portEnv) ?? [])]
+    .map(variable => variable.key)).size;
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
@@ -235,8 +245,7 @@ export function ProjectCard({ project, status: runtimeStatus, runtime, conflicts
     setOccupied(undefined);
     refresh();
   };
-  const showWeb = (serviceId: string) => liveServices.has(serviceId);
-  const openDefault = running && firstPort != null && !!snapshot?.services.some(service => service.port === firstPort && service.state === 'listening');
+  const showWeb = (service: Service) => dashboardPortListening(service, snapshot?.services);
 
   return <div className="dashboard" ref={viewportRef} data-project-overview={project.id}>
     <div className="dash-main" ref={contentRef} data-project-details={project.id} data-project-runtime={status}>
@@ -256,10 +265,12 @@ export function ProjectCard({ project, status: runtimeStatus, runtime, conflicts
           </div>
         </div>
         <div className="dash-actions">
-          {services.length > 1 ? <ProjectWebMenu project={project} disabled={!running} canOpen={showWeb}
+          {services.length > 1 ? <ProjectWebMenu project={project} canOpen={showWeb}
             onOpenBrowser={onOpenBrowser} onSetDefault={onSetDefaultService} />
-            : <button type="button" className="dash-button" disabled={!openDefault} data-project-action="open"
-                onClick={() => { if (firstPort != null) onOpenBrowser(firstPort); }}>打开网页{firstPort != null && ' :' + firstPort}</button>}
+            : <OpenServiceButton className="dash-button" port={defaultService.port} listening={showWeb(defaultService)}
+                onOpen={onOpenBrowser} data-project-action="open">
+                打开网页{defaultService.port != null && ' :' + defaultService.port}
+              </OpenServiceButton>}
           {active ? <>
             <button type="button" className="dash-button" disabled={pending || !running} onClick={() => act('restart')}
               aria-keyshortcuts="Meta+R" data-project-action="restart">重启 <kbd>⌘R</kbd></button>
@@ -297,7 +308,7 @@ export function ProjectCard({ project, status: runtimeStatus, runtime, conflicts
           onTerminal={onOpenTerminal} onJump={onOpenLogs} onClear={onClearLogs} />
         <div className="dash-rail">
           {git && <DashboardGitCard git={git} now={now} onEditor={seeEditor} />}
-          <DashboardStandard project={project} services={services} />
+          <DashboardStandard project={project} plan={launch?.data} planError={launch?.error} />
         </div>
       </div>
 

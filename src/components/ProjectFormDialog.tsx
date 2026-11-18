@@ -9,7 +9,8 @@ import type { DashboardConflict, PortConflictCheck, ProjectConfig, ProjectDirIns
 import { getTerminalSnapshot } from '../lib/terminalRegistry';
 import { cn } from '../lib/utils';
 import { applyInspectionDiff, diffProjectInspection, type RescanField } from '../lib/projectRescan';
-import { defaultServiceKey, normalizedServiceDir, portNumber, projectPorts, savedServices, serviceDraft, standardServices, uniqueServiceKey, type ServiceDraft } from '../lib/projectServices';
+import { defaultServiceKey, normalizedServiceDir, portNumber, projectPorts, savedServices, serviceDraft, uniqueServiceKey, type ServiceDraft } from '../lib/projectServices';
+import { useProjectLaunch } from '../lib/useProjectLaunch';
 import { usePortStandard } from '../lib/usePortStandard';
 import { hasAdvancedErrors, validateAdvanced } from '../lib/projectSettings';
 import type { AdvancedErrors } from '../lib/projectSettings';
@@ -54,8 +55,10 @@ function validateServices(services: ServiceDraft[], conflictForPort: (port: numb
   const dirs = new Set<string>();
   const keys = new Set<string>();
   const errors: ServiceErrors = {};
+  const independent = services.some(service => !!service.startCommand?.trim());
   for (const service of services) {
     const result: ServiceErrors[string] = {};
+    if (independent && !service.startCommand?.trim()) result.startCommand = '请输入独立启动命令';
     if (!service.name.trim()) result.name = '请输入服务名称';
     const raw = service.dir.trim();
     const dir = normalizedServiceDir(raw);
@@ -136,6 +139,15 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
   const composing = useRef(false);
   const form = useRef<HTMLFormElement>(null);
   const multiService = !!values.services.length;
+  const hasServiceCommands = values.services.some(service => !!service.startCommand?.trim());
+  const launchPreview = useProjectLaunch({
+    path: values.path,
+    startCommand: values.startCommand,
+    port: portNumber(values.port),
+    services: savedServices(values.services),
+    injectPorts: values.injectPorts,
+    env: values.env,
+  }, !!values.startCommand.trim() || hasServiceCommands);
   const checkedPortKey = (multiService ? [...new Set(values.services.map(service => portNumber(service.port)))].sort()
     : [portNumber(values.port)]).filter(port => port != null).join(',');
 
@@ -210,12 +222,10 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
   const selectedChanges = new Set<RescanField>(diff?.rows.filter(row => row.changed && rescan?.status === 'ready' && !rescan.unchecked.has(row.field)).map(row => row.field));
   if (diff?.serviceChanges.length && rescan?.status === 'ready' && !rescan.unchecked.has('services')) selectedChanges.add('services');
   const auditedConfig = diff ? applyInspectionDiff(diff.rows, selectedChanges) : undefined;
-  const auditedServices = standardServices(
-    savedServices(diff && selectedChanges.has('services') ? diff.services : values.services),
-    portNumber(auditedConfig?.port ?? values.port),
-  );
+  const auditedServices = savedServices(diff && selectedChanges.has('services') ? diff.services : values.services);
   const auditedCommand = auditedConfig?.startCommand ?? values.startCommand;
-  const showStandard = !!(diff || appliedServiceDiff) && auditedServices.length > 0;
+  const showStandard = !!(diff || appliedServiceDiff) && values.injectPorts && auditedServices.length > 1
+    && auditedServices.every(service => !service.startCommand?.trim());
   const standardCheck = usePortStandard(values.path, auditedCommand, auditedServices, showStandard);
   const unchanged = !!diff && !diff.serviceChanges.length && !diff.rows.some(row => row.changed);
 
@@ -295,11 +305,9 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
     else if (directory && !directory.exists) next.path = '目录不存在';
     else if (directory && !directory.isDir) next.path = '不是文件夹';
     if (!current.name.trim()) next.name = '请输入项目名称';
-    if (!current.startCommand.trim()) next.startCommand = '请输入启动命令';
-    if (!current.services.length) {
-      if (!current.port.trim()) {
-        if (current.type === 'web') next.port = 'Web 项目需要填写端口';
-      } else if (portNumber(current.port) == null) next.port = '端口必须是 1–65535 之间的整数';
+    if (!current.startCommand.trim() && !current.services.some(service => service.startCommand?.trim())) next.startCommand = '请输入启动命令';
+    if (!current.services.length && current.port.trim()) {
+      if (portNumber(current.port) == null) next.port = '端口必须是 1–65535 之间的整数';
       else if (portConflictMessage) next.port = portConflictMessage;
     }
     return next;
@@ -385,7 +393,7 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
   const explicitPort = source && source !== '推荐空闲端口' && !source.endsWith('默认端口');
   const portHint = !project && !edited.current.port && source
     ? `${explicitPort ? `从 ${source} 检测` : source}${!explicitPort ? '，请确认项目实际监听该端口' : ''}`
-    : values.type === 'app' ? '可选，填写应用开发服务器的实际端口' : '须与项目实际监听的端口一致，修改后请同步启动命令或项目配置';
+    : '留空时使用项目默认端口。填写后，Bento 会尝试在启动时使用此端口。';
   const hasPortWarning = !!(portConflictMessage || checkedPort?.inUse || checkedPort?.reserved.length);
   const initialSuggestion = focusPort?.port === portNumber(values.port) ? focusPort.suggestion : null;
   const portSuggestion = (hasPortWarning ? checkedPort?.suggestion : null) ?? initialSuggestion;
@@ -458,7 +466,7 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
   </>;
   const singlePort = (
       <div className="space-y-2">
-        <Label htmlFor="project-port">端口 {values.type === 'web' ? <span className="text-destructive">*</span> : <span className="font-normal text-muted-foreground">（可选）</span>}{updated.port && <UpdatedBadge />}</Label>
+        <Label htmlFor="project-port">端口 <span className="font-normal text-muted-foreground">（可选）</span>{updated.port && <UpdatedBadge />}</Label>
         <Input {...fieldProps('port')} inputMode="numeric" className={cn('font-mono text-[length:var(--text-control)]', updated.port && updatedInput)} placeholder={values.type === 'web' ? '例如 5173' : '无开发服务器时可留空'} />
         {message('port', portHint)}
         <div id="project-port-warnings" className="space-y-2" role="status" aria-live="polite">
@@ -529,7 +537,7 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
               <ProjectRescanCard rows={diff?.rows} sourceFiles={diff?.sourceFiles} serviceChanges={(diff || appliedServiceDiff)?.serviceChanges}
                 startScripts={(diff || appliedServiceDiff)?.startScripts} applied={!!appliedServiceDiff}
                 checkStandard={showStandard} standard={standardCheck?.data} standardError={standardCheck?.error}
-                onViewTemplate={auditedServices.some(service => service.port != null)
+                onViewTemplate={showStandard && auditedServices.some(service => service.port != null)
                   ? () => setStandardDialog({ path: values.path, services: auditedServices, mode: 'view' }) : undefined}
                 selected={selectedChanges} error={rescanError} disabled={saving}
                 onDismiss={() => { dismissRescan(); setAppliedServiceDiff(undefined); }} onApply={applyRescan} onToggle={field => {
@@ -545,11 +553,13 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
             {!multiService && singlePort}
             <div className="space-y-[7px]">
               <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-                <Label htmlFor="project-startCommand">启动命令 <span className="text-destructive">*</span>{updated.startCommand && !detectedScript && <UpdatedBadge />}</Label>
-                {project && values.services.length >= 2 ? <Button type="button" size="sm" variant="outline" disabled={saving}
+                <Label htmlFor="project-startCommand">{multiService ? '总启动命令' : '启动命令'} {hasServiceCommands
+                  ? <span className="font-normal text-muted-foreground">（已设独立命令）</span>
+                  : <span className="text-destructive">*</span>}{updated.startCommand && !detectedScript && <UpdatedBadge />}</Label>
+                {project && values.services.length >= 2 && !hasServiceCommands ? <Button type="button" size="sm" variant="outline" disabled={saving}
                   className="h-7 text-xs" onClick={showGenerationPreview} data-generate-standard-script>
                   <FileCode2 data-icon="inline-start" />生成标准启动脚本
-                </Button> : multiService && <span className="text-xs text-muted-foreground">多服务项目用根目录脚本统一启停</span>}
+                </Button> : multiService && !hasServiceCommands && <span className="text-xs text-muted-foreground">多服务项目可用根目录脚本统一启停</span>}
               </div>
               <div className="relative">
                 <Input {...fieldProps('startCommand')} className={cn('font-mono text-[length:var(--text-control)]', multiService && 'h-9 rounded-lg',
@@ -558,6 +568,16 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
                   title={detectedScript.source}>检测到 · {detectedScript.source}</span>}
               </div>
               {errors.startCommand && message('startCommand')}
+              {launchPreview?.error && <p className="text-xs text-warning-foreground" role="status" data-launch-preview-error>{launchPreview.error}</p>}
+              {launchPreview?.data && <div className="space-y-1.5 rounded-lg bg-muted/70 px-3 py-2.5 text-xs leading-relaxed"
+                data-launch-preview aria-live="polite">
+                {launchPreview.data.steps.map(step => <p key={step.serviceId ?? 'root'} className="break-words">
+                  <span className="text-muted-foreground">启动时将执行：{step.dir !== '.' && step.dir + '/ · '}</span><code className="[overflow-wrap:anywhere]">{step.command}</code>
+                  {step.portEnv.length > 0 && <><span className="text-muted-foreground"> · 注入 </span>
+                    <code className="[overflow-wrap:anywhere]">{step.portEnv.map(({ key, value }) => key + '=' + value).join(' ')}</code></>}
+                  {step.portEnv.length === 0 && <span className="text-muted-foreground"> · {step.description === '端口注入已关闭' ? '端口注入已关闭' : '无端口注入'}</span>}
+                </p>)}
+              </div>}
               {!!inspection?.commands.length && (!multiService || !detectedScript || inspection.commands.length > 1) &&
                 <div className="flex flex-wrap gap-1.5">{inspection.commands.filter(command => command !== detectedScript?.command).slice(0, 4).map(command => <Button
                   type="button" key={command} variant="outline" size="sm" className="h-6 px-2 font-mono text-[11px]" disabled={saving}
@@ -574,7 +594,9 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
               <label className="flex min-h-9 items-center gap-2 rounded-lg border border-input px-[11px] py-2 text-[12.5px]">
                 <input id="project-inject-ports" type="checkbox" role="switch" checked={values.injectPorts} disabled={saving}
                   className="size-3.5 shrink-0 accent-primary" onChange={event => setValues(current => ({ ...current, injectPorts: event.target.checked }))} />
-                <span>启动时注入 <code>PORT</code>{values.services.length >= 2 && <>（打开网页端口）、<code>BENTO_PORT_&lt;KEY&gt;</code> 和 <code>BENTO_PORTS</code></>}</span>
+                <span>{values.services.length >= 2 && !hasServiceCommands
+                  ? <>向总启动命令注入 <code>PORT</code>、<code>BENTO_PORT_&lt;KEY&gt;</code> 和 <code>BENTO_PORTS</code></>
+                  : '按启动方式自动适配已填写的端口'}</span>
               </label>
             </div>
             {serviceLayout && <details className="rounded-lg border border-card-border" data-project-basic-details>

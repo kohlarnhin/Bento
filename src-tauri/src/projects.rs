@@ -8,9 +8,11 @@ use std::sync::{Mutex, OnceLock};
 
 mod services;
 mod standard;
-pub use services::{default_inject_ports, launch_environment, Service};
+mod launch;
+pub use launch::{launch_plan, LaunchConfig, LaunchPlan};
+pub use services::{default_inject_ports, Service};
 pub use standard::{check_port_standard, standard_script_preview, write_standard_script, PortStandardCheck, StandardScript};
-use services::{fill_service_keys, normalize_services, scan_services, ScannedService, StartScript};
+use services::{fill_service_keys, independent_commands, normalize_services, scan_services, ScannedService, StartScript};
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct EnvVar {
@@ -227,19 +229,18 @@ fn normalize_project(
         return Err("请输入项目名称".into());
     }
     let start_command = draft.start_command.trim().to_string();
-    if start_command.is_empty() {
+    let services = normalize_services(draft.services)?;
+    if start_command.is_empty() && !independent_commands(&services)? {
         return Err("请输入启动命令".into());
     }
     let project_type = draft.project_type.as_deref().unwrap_or("web").trim();
     if !matches!(project_type, "web" | "app") {
         return Err("项目类型必须为 Web 项目或桌面应用".into());
     }
-    let services = normalize_services(draft.services)?;
     let port = if services.is_empty() {
         match draft.port {
             Some(port) if (1..=65535).contains(&port) => Some(port as u16),
             Some(_) => return Err("端口必须是 1–65535 之间的整数".into()),
-            None if project_type == "web" => return Err("Web 项目需要填写端口".into()),
             None => None,
         }
     } else {
@@ -1049,15 +1050,8 @@ pub fn inspect_project_dir(
         result.port = Some(port.port);
         result.port_source = Some(port.source);
     }
-    let audit_services: Vec<_> = if result.services.len() >= 2 {
-        result.services.iter().map(|row| row.service.clone()).collect()
-    } else {
-        result.port.into_iter().map(|port| Service {
-            id: "legacy:root".into(), name: result.name.clone(), dir: ".".into(), port: Some(port),
-            key: "ROOT".into(), kind: None, open_web: true,
-        }).collect()
-    };
-    if !audit_services.is_empty() {
+    if result.services.len() >= 2 {
+        let audit_services: Vec<_> = result.services.iter().map(|row| row.service.clone()).collect();
         let command = result.commands.first().map(String::as_str).unwrap_or_default();
         result.standard = Some(standard::audit(&path, command, &audit_services));
     }
@@ -1186,8 +1180,8 @@ mod tests {
         let mut draft = fixture.draft();
         draft.port = Some(9999);
         draft.services = vec![
-            Service { key: String::new(), id: "web".into(), name: "前端".into(), dir: "./apps/frontend/".into(), port: Some(5199), kind: Some("web".into()), open_web: true },
-            Service { key: String::new(), id: "api".into(), name: "后端".into(), dir: "packages/back-end".into(), port: Some(8500), kind: None, open_web: false },
+            Service { key: String::new(), id: "web".into(), name: "前端".into(), dir: "./apps/frontend/".into(), port: Some(5199), kind: Some("web".into()), open_web: true, start_command: None },
+            Service { key: String::new(), id: "api".into(), name: "后端".into(), dir: "packages/back-end".into(), port: Some(8500), kind: None, open_web: false, start_command: None },
         ];
         draft.inject_ports = false;
         let project = insert_project(&conn, draft.clone()).unwrap();
@@ -1216,11 +1210,14 @@ mod tests {
         let conn = database();
         let fixture = Fixture::new();
         let mut project = insert_project(&conn, fixture.draft()).unwrap();
+        let launch_environment = |project: &ProjectConfig| {
+            services::launch_environment(&project.env, project.port, &project.services, project.inject_ports)
+        };
         assert_eq!(launch_environment(&project), [EnvVar { key: "PORT".into(), value: "5199".into() }]);
         project.services = vec![
-            Service { key: "WEB".into(), id: "web".into(), name: "前端".into(), dir: "apps/front-end".into(), port: Some(5199), kind: Some("web".into()), open_web: true },
-            Service { key: "API".into(), id: "api".into(), name: "后端".into(), dir: "server".into(), port: Some(8110), kind: Some("api".into()), open_web: false },
-            Service { key: "WORKER".into(), id: "worker".into(), name: "Worker".into(), dir: "worker".into(), port: None, kind: None, open_web: false },
+            Service { key: "WEB".into(), id: "web".into(), name: "前端".into(), dir: "apps/front-end".into(), port: Some(5199), kind: Some("web".into()), open_web: true, start_command: None },
+            Service { key: "API".into(), id: "api".into(), name: "后端".into(), dir: "server".into(), port: Some(8110), kind: Some("api".into()), open_web: false, start_command: None },
+            Service { key: "WORKER".into(), id: "worker".into(), name: "Worker".into(), dir: "worker".into(), port: None, kind: None, open_web: false, start_command: None },
         ];
         project.env = vec![EnvVar { key: "PORT".into(), value: "explicit".into() }, EnvVar { key: "BENTO_PORT_API".into(), value: "8111".into() }];
         let env = launch_environment(&project);
@@ -1568,16 +1565,10 @@ mod tests {
             }
             assert!(insert_project(&conn, draft).unwrap_err().contains(expected));
         }
-        for port in [None, Some(0), Some(-1), Some(65536)] {
+        for port in [Some(0), Some(-1), Some(65536)] {
             let mut draft = f.draft();
             draft.port = port;
-            assert!(insert_project(&conn, draft)
-                .unwrap_err()
-                .contains(if port.is_none() {
-                    "需要填写端口"
-                } else {
-                    "1–65535"
-                }));
+            assert!(insert_project(&conn, draft).unwrap_err().contains("1–65535"));
         }
         let project = insert_project(&conn, f.draft()).unwrap();
         assert!(insert_project(&conn, f.draft())
@@ -1595,6 +1586,10 @@ mod tests {
             update_project_row(&conn, "missing", updated).unwrap_err(),
             "未找到项目"
         );
+        let mut blank = f.draft();
+        blank.port = None;
+        assert_eq!(update_project_row(&conn, &project.id, blank).unwrap().port, None);
+        assert_eq!(crate::read_projects(&conn).unwrap()[0].port, None);
         conn.execute("DELETE FROM projects", []).unwrap();
         crate::init_db(&conn).unwrap();
         assert_eq!(

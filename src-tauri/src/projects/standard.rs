@@ -498,6 +498,12 @@ pub(super) fn audit(root: &Path, command: &str, services: &[Service]) -> PortSta
                 .filter(|source| references(&source.text, source.shell))
                 .map(|source| source.name.clone())
                 .collect();
+            let role = format!("{{port:{}}}", service.key);
+            let uses_placeholder = |token: &str| command.match_indices(token)
+                .any(|(offset, _)| !command[..offset].ends_with('$'));
+            if uses_placeholder(&role) || (service.open_web && uses_placeholder("{port}")) {
+                sources.insert("启动命令".into());
+            }
             for framework in ["vite", "next"] {
                 for extension in ["ts", "mts", "js", "mjs", "cjs", "cts"] {
                     let config = root
@@ -987,6 +993,7 @@ mod tests {
                     kind: Some("web".into()),
                     key: "WEB".into(),
                     open_web: true,
+                    start_command: None,
                 },
                 Service {
                     id: "back".into(),
@@ -996,6 +1003,7 @@ mod tests {
                     kind: Some("api".into()),
                     key: "API".into(),
                     open_web: false,
+                    start_command: None,
                 },
             ]
         }

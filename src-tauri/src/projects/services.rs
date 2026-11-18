@@ -2,7 +2,6 @@ use super::{
     add_port_candidate, dependency, env_ports, literal_port, probe_project_ports, read_json,
     script_command, script_ports, without_js_comments, EnvVar, PortCandidate, PortConfidence,
 };
-use crate::ProjectConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -20,6 +19,18 @@ pub struct Service {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     pub open_web: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_command: Option<String>,
+}
+
+pub(super) fn independent_commands(services: &[Service]) -> Result<bool, String> {
+    let count = services.iter().filter(|service| {
+        service.start_command.as_deref().is_some_and(|command| !command.trim().is_empty())
+    }).count();
+    if count > 0 && count != services.len() {
+        return Err("请填写所有服务的独立启动命令，或全部留空使用总启动命令".into());
+    }
+    Ok(count > 0)
 }
 
 #[derive(Debug, Serialize)]
@@ -98,6 +109,8 @@ pub(super) fn normalize_services(mut services: Vec<Service>) -> Result<Vec<Servi
     let mut ports = HashSet::new();
     for service in &mut services {
         service.name = service.name.trim().into();
+        service.start_command = service.start_command.take().map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
         if service.name.is_empty() {
             return Err("请输入服务名称".into());
         }
@@ -137,6 +150,7 @@ pub(super) fn normalize_services(mut services: Vec<Service>) -> Result<Vec<Servi
             }
         }
     }
+    independent_commands(&services)?;
     fill_service_keys(&mut services);
     let mut keys = HashSet::new();
     for service in &services {
@@ -157,30 +171,32 @@ pub(super) fn normalize_services(mut services: Vec<Service>) -> Result<Vec<Servi
     Ok(services)
 }
 
-pub fn launch_environment(project: &ProjectConfig) -> Vec<EnvVar> {
-    let mut env = project.env.clone();
-    if !project.inject_ports {
+pub(super) fn launch_environment(explicit: &[EnvVar], port: Option<u16>, services: &[Service], enabled: bool) -> Vec<EnvVar> {
+    let mut env = explicit.to_vec();
+    if !enabled {
         return env;
     }
     let mut inject = |key: String, value: String| {
-        if !project.env.iter().any(|entry| entry.key == key) {
+        if !explicit.iter().any(|entry| entry.key == key) {
             env.push(EnvVar { key, value });
         }
     };
-    if let Some(port) = project.port {
+    if let Some(port) = port {
         inject("PORT".into(), port.to_string());
     }
-    if project.services.len() < 2 {
+    if services.len() < 2 {
         return env;
     }
     let mut ports = Vec::new();
-    for service in &project.services {
+    for service in services {
         if let Some(port) = service.port {
             inject(port_variable(&service.key), port.to_string());
             ports.push(format!("{}:{port}", service.key));
         }
     }
-    inject("BENTO_PORTS".into(), ports.join(","));
+    if !ports.is_empty() {
+        inject("BENTO_PORTS".into(), ports.join(","));
+    }
     env
 }
 
@@ -609,6 +625,7 @@ fn scan_service(
             dir,
             kind: kind.map(str::to_owned),
             open_web: false,
+            start_command: None,
         },
         port_candidate,
     })

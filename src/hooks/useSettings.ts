@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { DEFAULT_TERMINAL_FONT_SIZE } from '../lib/terminalAppearance';
 import { setTerminalFontSize } from '../lib/terminalRegistry';
@@ -7,7 +7,10 @@ interface Settings {
   'terminal.fontSize': number;
   'terminal.maxPerProject': number;
   'autostart.defaultApplied': boolean;
+  'appearance.theme': Appearance;
 }
+
+type Appearance = 'system' | 'light' | 'dark';
 
 interface AutostartStatus {
   available: boolean;
@@ -20,6 +23,22 @@ let initialSettings: Promise<Settings> | undefined;
 let initialAutostart: Promise<AutostartStatus> | undefined;
 
 export function useSettings() {
+  const [appearance, setAppearance] = useState<Appearance>('system');
+  const [appearanceSaving, setAppearanceSaving] = useState(false);
+  const [appearanceError, setAppearanceError] = useState<string | null>(null);
+  const appearancePending = useRef(false);
+  const [systemDark, setSystemDark] = useState(() => window.matchMedia('(prefers-color-scheme: dark)').matches);
+  const colorScheme = appearance === 'system' ? (systemDark ? 'dark' : 'light') : appearance;
+  useEffect(() => {
+    const scheme = window.matchMedia('(prefers-color-scheme: dark)');
+    const update = () => setSystemDark(scheme.matches);
+    scheme.addEventListener('change', update);
+    update();
+    return () => scheme.removeEventListener('change', update);
+  }, []);
+  useLayoutEffect(() => {
+    document.documentElement.classList.toggle('dark', colorScheme === 'dark');
+  }, [colorScheme]);
   const [fontSize, setFontSize] = useState(DEFAULT_TERMINAL_FONT_SIZE);
   const [fontLoading, setFontLoading] = useState(true);
   const [fontSaving, setFontSaving] = useState(false);
@@ -50,12 +69,30 @@ export function useSettings() {
         setTerminalFontSize(settings['terminal.fontSize']);
       }
       setMaxPerProject(settings['terminal.maxPerProject']);
+      setAppearance(settings['appearance.theme'] ?? 'system');
     }).catch(error => { if (active) setFontError(`读取设置失败：${error}`); })
       .finally(() => { if (active) setFontLoading(false); });
     void initialAutostart.then(status => { if (active) setAutostart(status); })
       .catch(error => { if (active) setAutostartError(`读取启动设置失败：${error}`); });
     return () => { active = false; };
   }, []);
+
+  const changeAppearance = async (next: Appearance) => {
+    if (appearancePending.current || next === appearance) return;
+    appearancePending.current = true;
+    setAppearanceSaving(true);
+    setAppearanceError(null);
+    setAppearance(next);
+    try {
+      await invoke('set_setting', { key: 'appearance.theme', value: next });
+    } catch (error) {
+      setAppearance(appearance);
+      setAppearanceError(`保存外观失败：${error}`);
+    } finally {
+      appearancePending.current = false;
+      setAppearanceSaving(false);
+    }
+  };
 
   const changeFontSize = useCallback((next: number | ((current: number) => number)) => {
     const size = typeof next === 'function' ? next(requestedFontSize.current) : next;
@@ -124,6 +161,7 @@ export function useSettings() {
 
   return { fontSize, fontLoading, fontSaving, fontError, changeFontSize,
     maxPerProject, maxSaving, maxError, changeMaxPerProject,
+    appearance, colorScheme, appearanceSaving, appearanceError, changeAppearance,
     autostart, autostartSaving, autostartError, changeAutostart };
 }
 

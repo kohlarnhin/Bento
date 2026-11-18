@@ -39,6 +39,7 @@ pub struct ProcessInfo {
     phase: Phase,
     identity: Option<processes::ProcessIdentity>,
     services: Vec<projects::Service>,
+    inject_ports: bool,
     tree: Option<Arc<processes::TrackedTree>>,
     pub run: dashboard::Run,
 }
@@ -72,10 +73,18 @@ impl ProcessInfo {
         tree.pids().collect()
     }
 
-    fn configured_ports(&self) -> impl Iterator<Item = u16> + '_ {
+    pub fn configured_ports(&self) -> impl Iterator<Item = u16> + '_ {
         self.port
             .into_iter()
             .chain(self.services.iter().filter_map(|service| service.port))
+    }
+
+    pub fn checks_injected_port(&self, id: &str, port: u16) -> bool {
+        self.inject_ports && if self.services.is_empty() {
+            id == "legacy:root" && self.port == Some(port)
+        } else {
+            self.services.iter().any(|service| service.id == id && service.port == Some(port))
+        }
     }
 }
 
@@ -615,7 +624,7 @@ async fn start(app: &AppHandle, id: &str, state: &ProcessMap) -> Result<(), Stri
         return Err("项目已经在运行中".into());
     }
     let id_owned = id.to_string();
-    let project = tauri::async_runtime::spawn_blocking(move || {
+    let (project, plan) = tauri::async_runtime::spawn_blocking(move || {
         let response = get_projects_sync()?;
         let project = response
             .projects
@@ -642,7 +651,8 @@ async fn start(app: &AppHandle, id: &str, state: &ProcessMap) -> Result<(), Stri
                 }
             }
         }
-        Ok(project)
+        let plan = projects::launch_plan((&project).into())?;
+        Ok((project, plan))
     })
     .await
     .map_err(|err| format!("启动项目失败：{err}"))??;
@@ -653,16 +663,10 @@ async fn start(app: &AppHandle, id: &str, state: &ProcessMap) -> Result<(), Stri
     let _ = app.emit("project-run-started", id);
     log(app, id, format!("[Bento] 正在启动项目: {}", project.name));
     log(app, id, format!("[Bento] 工作目录: {path}"));
-    log(
-        app,
-        id,
-        format!("[Bento] 执行命令: {}", project.start_command),
-    );
-    let script = processes::launch_script(
-        &path,
-        &project.start_command,
-        &projects::launch_environment(&project),
-    )?;
+    for (dir, command) in plan.commands() {
+        log(app, id, format!("[Bento] 执行命令（{dir}）: {command}"));
+    }
+    let script = plan.script()?;
     let environment = tauri::async_runtime::spawn_blocking(shell_env::capture)
         .await
         .unwrap_or_else(|err| Err(format!("读取环境任务失败：{err}")));
@@ -702,6 +706,7 @@ async fn start(app: &AppHandle, id: &str, state: &ProcessMap) -> Result<(), Stri
                 },
                 identity: root.identity,
                 services: project.services.clone(),
+                inject_ports: project.inject_ports,
                 tree: tree.clone(),
                 run: run.clone(),
             },
@@ -770,7 +775,7 @@ async fn start(app: &AppHandle, id: &str, state: &ProcessMap) -> Result<(), Stri
                     // Still under the pid-match lock: a stopped/replaced start cannot open a URL.
                     if auto_open {
                         if let Err(error) =
-                            crate::open_url_sync(&format!("http://localhost:{port}"))
+                            crate::open_url(format!("http://localhost:{port}")).await
                         {
                             log(&app, &id, format!("[Bento] 自动打开网页失败：{error}"));
                         }
@@ -955,7 +960,7 @@ fn watch_service_tree(
                     log(&app, &id, format!("[Bento] 端口 {port} 已就绪"));
                     if auto_open {
                         if let Err(error) =
-                            crate::open_url_sync(&format!("http://localhost:{port}"))
+                            crate::open_url(format!("http://localhost:{port}")).await
                         {
                             log(&app, &id, format!("[Bento] 自动打开网页失败：{error}"));
                         }
@@ -1340,6 +1345,7 @@ mod tests {
             phase,
             identity: None,
             services: Vec::new(),
+            inject_ports: true,
             tree: None,
             run: dashboard::Run::new(),
         }
