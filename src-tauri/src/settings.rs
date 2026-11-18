@@ -1,10 +1,42 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value;
+use tauri::{AppHandle, Manager, Theme};
 
 const FONT_SIZE: &str = "terminal.fontSize";
 const MAX_PER_PROJECT: &str = "terminal.maxPerProject";
 const DEFAULT_APPLIED: &str = "autostart.defaultApplied";
+const APPEARANCE: &str = "appearance.theme";
+
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum Appearance {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "system" => Some(Self::System),
+            "light" => Some(Self::Light),
+            "dark" => Some(Self::Dark),
+            _ => None,
+        }
+    }
+
+    fn apply(self, app: &AppHandle) -> Result<(), String> {
+        let theme = match self {
+            Self::System => None,
+            Self::Light => Some(Theme::Light),
+            Self::Dark => Some(Theme::Dark),
+        };
+        app.get_webview_window("main").ok_or("未找到主窗口")?.set_theme(theme)
+            .map_err(|error| format!("应用窗口外观失败：{error}"))
+    }
+}
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Settings {
@@ -14,6 +46,8 @@ pub struct Settings {
     pub terminal_max_per_project: u8,
     #[serde(rename = "autostart.defaultApplied")]
     pub autostart_default_applied: bool,
+    #[serde(rename = "appearance.theme")]
+    appearance: Appearance,
 }
 
 pub fn read(conn: &Connection) -> Result<Settings, String> {
@@ -26,7 +60,23 @@ pub fn read(conn: &Connection) -> Result<Settings, String> {
         terminal_font_size,
         terminal_max_per_project: max_per_project(conn)?,
         autostart_default_applied: default_applied(conn)?,
+        appearance: read_appearance(conn)?,
     })
+}
+
+fn read_appearance(conn: &Connection) -> Result<Appearance, String> {
+    let saved: Option<String> = conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1", [APPEARANCE], |row| row.get(0),
+    ).optional().map_err(|error| error.to_string())?;
+    Ok(saved.as_deref().and_then(Appearance::parse).unwrap_or_default())
+}
+
+pub fn initialize_appearance(app: &AppHandle) -> Result<(), String> {
+    let appearance = read_appearance(&crate::open_project_db()?)?;
+    if appearance != Appearance::System {
+        appearance.apply(app)?;
+    }
+    Ok(())
 }
 
 pub fn max_per_project(conn: &Connection) -> Result<u8, String> {
@@ -66,6 +116,11 @@ pub fn set(conn: &Connection, key: &str, value: Value) -> Result<(), String> {
                 .ok_or("每个项目最多终端数必须是 1–6 的整数")?;
             save(conn, key, &max.to_string())
         }
+        APPEARANCE => {
+            let choice = value.as_str().filter(|choice| Appearance::parse(choice).is_some())
+                .ok_or("外观必须是跟随系统、浅色或深色")?;
+            save(conn, key, choice)
+        }
         DEFAULT_APPLIED => Err("该设置由 Bento 自动管理".into()),
         _ => Err("未知设置".into()),
     }
@@ -77,8 +132,20 @@ pub fn get_settings() -> Result<Settings, String> {
 }
 
 #[tauri::command]
-pub fn set_setting(key: String, value: Value) -> Result<(), String> {
-    set(&crate::open_project_db()?, &key, value)
+pub fn set_setting(app: AppHandle, key: String, value: Value) -> Result<(), String> {
+    let mut conn = crate::open_project_db()?;
+    if key != APPEARANCE {
+        return set(&conn, &key, value);
+    }
+    let transaction = conn.transaction().map_err(|error| error.to_string())?;
+    let previous = read_appearance(&transaction)?;
+    set(&transaction, &key, value)?;
+    read_appearance(&transaction)?.apply(&app)?;
+    if let Err(error) = transaction.commit() {
+        let _ = previous.apply(&app);
+        return Err(format!("保存外观失败：{error}"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -106,10 +173,27 @@ mod tests {
         crate::init_db(&conn).unwrap();
         crate::init_db(&conn).unwrap();
         assert_eq!(project_rows(&conn), before);
-        assert_eq!(read(&conn).unwrap(), Settings { terminal_font_size: 14, terminal_max_per_project: 2, autostart_default_applied: false });
+        assert_eq!(read(&conn).unwrap(), Settings { terminal_font_size: 14, terminal_max_per_project: 2,
+            autostart_default_applied: false, appearance: Appearance::System });
         set(&conn, FONT_SIZE, json!(18)).unwrap();
         assert_eq!(read(&conn).unwrap().terminal_font_size, 18);
         assert_eq!(project_rows(&conn), before);
+    }
+
+    #[test]
+    fn appearance_defaults_to_system_and_round_trips_each_choice() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::init_db(&conn).unwrap();
+        assert_eq!(read_appearance(&conn).unwrap(), Appearance::System);
+        for (choice, appearance) in [("dark", Appearance::Dark), ("light", Appearance::Light), ("system", Appearance::System)] {
+            set(&conn, APPEARANCE, json!(choice)).unwrap();
+            assert_eq!(read_appearance(&conn).unwrap(), appearance);
+            assert_eq!(serde_json::to_value(read(&conn).unwrap()).unwrap()[APPEARANCE], choice);
+        }
+        assert!(set(&conn, APPEARANCE, json!("invalid")).is_err());
+        assert!(set(&conn, APPEARANCE, json!(true)).is_err());
+        save(&conn, APPEARANCE, "invalid").unwrap();
+        assert_eq!(read_appearance(&conn).unwrap(), Appearance::System);
     }
 
     #[test]

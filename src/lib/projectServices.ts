@@ -2,8 +2,9 @@ import type { EnvVar, ProjectConfig, Service, ServiceRuntimeStatus } from '../ty
 
 export type ServiceDraft = Omit<Service, 'port'> & { port: string };
 
-export function serviceDraft({ id, name, dir, port, key, kind, openWeb }: Service): ServiceDraft {
-  return { id, name, dir, port: port?.toString() ?? '', key: key || defaultServiceKey(kind, dir), kind, openWeb };
+export function serviceDraft({ id, name, dir, port, key, kind, openWeb, startCommand }: Service): ServiceDraft {
+  return { id, name, dir, port: port?.toString() ?? '', key: key || defaultServiceKey(kind, dir), kind, openWeb,
+    ...(startCommand ? { startCommand } : {}) };
 }
 
 export function savedServices(services: ServiceDraft[]): Service[] {
@@ -41,11 +42,6 @@ export function missingPortReference(variable: string) {
   return '脚本未读取 ' + variable + '，Bento 分配的端口不会生效';
 }
 
-export function standardServices(services: Service[], port: number | null | undefined): Service[] {
-  if (services.length || port == null) return services;
-  return [{ id: 'legacy:root', name: '主服务', dir: '.', port, key: 'ROOT', openWeb: true }];
-}
-
 export function portNumber(value: string) {
   const port = Number(value);
   return /^\d+$/.test(value.trim()) && port >= 1 && port <= 65535 ? port : null;
@@ -72,7 +68,7 @@ export function injectedPortVariables(project: Pick<ProjectConfig, 'env' | 'port
     inject(serviceEnvName(service.key), String(service.port));
     ports.push(service.key + ':' + service.port);
   }
-  inject('BENTO_PORTS', ports.join(','));
+  if (ports.length) inject('BENTO_PORTS', ports.join(','));
   return entries;
 }
 

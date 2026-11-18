@@ -2,10 +2,9 @@ import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ArrowRight, CircleCheck, TriangleAlert } from 'lucide-react';
 import { dashboardLog, logTime, recentLogCounts, relativeTime } from '../lib/dashboard';
 import { projectAvatar } from '../lib/sidebarModel';
-import { injectedPortVariables, standardServices } from '../lib/projectServices';
 import { usePortStandard } from '../lib/usePortStandard';
 import { useProjectLogLines } from '../lib/useProjectLogs';
-import type { DashboardGit, DashboardRun, ProjectConfig, Service } from '../types';
+import type { DashboardGit, DashboardRun, ProjectConfig, ProjectLaunchPlan, Service } from '../types';
 import { ProjectStandardDialog } from './ProjectStandardDialog';
 import { SegmentedControl } from './ui/segmented-control';
 
@@ -113,34 +112,41 @@ export function DashboardGitCard({ git, now, onEditor }: { git: DashboardGit; no
   </section>;
 }
 
-export function DashboardStandard({ project, services }: { project: ProjectConfig; services: Service[] }) {
-  const requested = standardServices(project.services, project.port);
-  const standard = usePortStandard(project.path, project.startCommand, requested);
+export function DashboardStandard({ project, plan, planError }: {
+  project: ProjectConfig; plan?: ProjectLaunchPlan; planError?: string;
+}) {
+  const shared = plan?.mode === 'shared' && project.injectPorts && project.services.some(service => service.port != null);
+  const standard = usePortStandard(project.path, project.startCommand, project.services, shared);
   const [show, setShow] = useState(false);
   const checks = standard?.data?.services ?? [];
   const missing = checks.filter(service => !service.references.length);
-  const vars = injectedPortVariables(project);
-  const template = requested.length > 0;
   return <section className="dash-card" aria-labelledby="dash-standard-heading" data-dashboard-standard>
     <header className="dash-ch">
       <h2 id="dash-standard-heading">启动标准</h2>
-      {template && <button type="button" className="dash-link dash-right dash-muted-link" onClick={() => setShow(true)} data-view-standard-template>查看模板</button>}
+      {shared && <button type="button" className="dash-link dash-right dash-muted-link" onClick={() => setShow(true)} data-view-standard-template>查看模板</button>}
     </header>
     <div className="dash-standard-body">
-      {standard?.error ? <p className="dash-warn">无法检查启动标准 · {standard.error}</p> : missing.length ? <>
+      {planError && <p className="dash-warn">无法预览启动方式 · {planError}</p>}
+      {!plan && !planError && <p className="dash-standard-note">正在识别启动方式…</p>}
+      {shared && (standard?.error ? <p className="dash-warn">无法检查启动标准 · {standard.error}</p> : missing.length ? <>
         <p className="dash-standard-result dash-warn"><TriangleAlert size={15} aria-hidden="true" />脚本缺少端口变量引用</p>
         <p className="dash-standard-note">脚本未读取 {missing.map(service => service.variable).join('、')}，Bento 分配的端口不会生效。</p>
-        <button type="button" className="dash-link" onClick={() => setShow(true)}>查看模板</button>
       </> : checks.length ? <>
         <p className="dash-standard-result dash-positive"><CircleCheck size={15} aria-hidden="true" />符合 Bento 标准</p>
-        <p className="dash-standard-note">{project.injectPorts === false ? '端口注入已关闭。'
-          : '启动命令读取了 ' + checks.length + ' 个服务的端口变量。'}</p>
-      </> : <p className="dash-standard-note">{services.some(service => service.port != null) && !standard?.data ? '正在检查端口变量…' : '当前服务未配置端口'}</p>}
-      {(vars.length > 0 || project.injectPorts === false) && <div className="dash-chips" data-port-injection-summary>
-        {vars.map(variable => <code key={variable.key}>{variable.key}={variable.value}</code>)}
-        {project.injectPorts === false && <span className="dash-muted">未开启端口注入</span>}
-      </div>}
+        <p className="dash-standard-note">已为 {checks.length} 个服务找到端口变量或占位符。</p>
+      </> : <p className="dash-standard-note">{standard?.data ? '当前服务未配置端口' : '正在检查端口变量…'}</p>)}
+      {plan?.steps.map(step => {
+        const service = project.services.find(service => service.id === step.serviceId);
+        const vars = step.portEnv.filter(variable => shared || !variable.key.startsWith('BENTO_PORT'));
+        return <div key={step.serviceId ?? 'root'} className="space-y-1.5" data-port-launch-method>
+          {!shared && <p className="dash-standard-note">{service && <b>{service.name} · </b>}{step.description}</p>}
+          {step.placeholderHint && <p className="dash-standard-note">在启动命令的端口位置可使用 <code>{'{port}'}</code>。</p>}
+          {!!vars.length && <div className="dash-chips" data-port-injection-summary>
+            {vars.map(variable => <code key={variable.key}>{variable.key}={variable.value}</code>)}
+          </div>}
+        </div>;
+      })}
     </div>
-    {show && <ProjectStandardDialog request={{ mode: 'view', path: project.path, services: requested }} onClose={() => setShow(false)} />}
+    {show && shared && <ProjectStandardDialog request={{ mode: 'view', path: project.path, services: project.services }} onClose={() => setShow(false)} />}
   </section>;
 }

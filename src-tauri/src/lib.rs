@@ -404,6 +404,12 @@ async fn check_project_port_standard(path: String, start_command: String, servic
 }
 
 #[tauri::command]
+async fn preview_project_launch(config: projects::LaunchConfig) -> Result<projects::LaunchPlan, String> {
+    tauri::async_runtime::spawn_blocking(move || projects::launch_plan(config))
+        .await.map_err(|err| format!("预览启动命令失败：{err}"))?
+}
+
+#[tauri::command]
 async fn preview_project_standard_script(path: String, services: Vec<projects::Service>) -> Result<projects::StandardScript, String> {
     tauri::async_runtime::spawn_blocking(move || projects::standard_script_preview(&path, services))
         .await.map_err(|err| format!("预览启动脚本失败：{err}"))?
@@ -463,17 +469,27 @@ async fn check_service_port_conflicts(
 
 #[tauri::command]
 async fn open_url(url: String) -> Result<(), String> {
-    open_url_sync(&url)
+    tauri::async_runtime::spawn_blocking(move || open_url_sync(&url)).await
+        .map_err(|err| format!("打开链接失败：{err}"))?
 }
 
 fn open_url_sync(url: &str) -> Result<(), String> {
+    let parsed = tauri::Url::parse(url).map_err(|_| "链接地址无效")?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err("仅支持 HTTP 和 HTTPS 网页链接".into());
+    }
     #[cfg(debug_assertions)]
-    if debug_e2e::record_open_url(url) { return Ok(()); }
-    std::process::Command::new("open")
-        .arg(&url)
-        .spawn()
-        .map_err(|e| format!("打开链接失败: {}", e))?;
-    Ok(())
+    if let Some(result) = debug_e2e::record_open_url(url) { return result; }
+    let output = std::process::Command::new("/usr/bin/open")
+        .arg(parsed.as_str())
+        .output()
+        .map_err(|err| format!("无法启动系统浏览器：{err}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = stderr.trim();
+    Err(if detail.is_empty() { output.status.to_string() } else { detail.into() })
 }
 
 #[tauri::command]
@@ -518,6 +534,9 @@ pub fn run() {
             if let Err(error) = autostart::initialize(app.handle()) {
                 eprintln!("Bento launch at login: {error}");
             }
+            if let Err(error) = settings::initialize_appearance(app.handle()) {
+                eprintln!("Bento appearance: {error}");
+            }
             show_initial_window(app.handle());
             Ok(())
         })
@@ -546,6 +565,7 @@ pub fn run() {
         set_default_service,
         delete_project,
         inspect_project_dir,
+        preview_project_launch,
         check_project_port_standard,
         preview_project_standard_script,
         generate_project_standard_script,

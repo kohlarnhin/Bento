@@ -1,20 +1,38 @@
-import { Fragment, useEffect, useId, useRef, useState } from 'react';
+import { Fragment, useEffect, useId, useRef, useState, type ComponentPropsWithoutRef } from 'react';
 import { AlertTriangle, ArrowUpRight, Check, ChevronDown } from 'lucide-react';
-import type { ProjectConfig, ServiceRuntimeStatus } from '../types';
+import type { ProjectConfig, Service, ServiceRuntimeStatus } from '../types';
 import { injectedPortVariables, missingPortReference } from '../lib/projectServices';
 import { usePortStandard } from '../lib/usePortStandard';
 import { ProjectStandardDialog } from './ProjectStandardDialog';
 import Button from './ui/button';
+import { ActionTooltip } from './ui/tooltip';
+import { cn } from '../lib/utils';
 
 interface WebActions {
   project: ProjectConfig;
   onOpenBrowser: (port: number) => void;
   onSetDefault: (serviceId: string) => Promise<void>;
-  disabled?: boolean;
-  canOpen?: (serviceId: string) => boolean;
 }
 
-export function ProjectWebMenu({ project, onOpenBrowser, onSetDefault, disabled, canOpen }: WebActions) {
+export function OpenServiceButton({ port, listening, onOpen, wrapperClassName, ...button }: Omit<
+  ComponentPropsWithoutRef<'button'>, 'type' | 'disabled' | 'onClick'
+> & {
+  port?: number | null;
+  listening: boolean;
+  onOpen: (port: number) => void;
+  wrapperClassName?: string;
+}) {
+  const reason = port == null ? '未配置服务端口' : listening ? undefined : '端口 ' + port + ' 尚未监听';
+  return <ActionTooltip label={reason}>
+    <span className={cn('inline-flex', wrapperClassName)} title={reason} aria-label={reason} tabIndex={reason ? 0 : undefined}>
+      <button {...button} type="button" disabled={!!reason} onClick={() => { if (port != null && listening) onOpen(port); }} />
+    </span>
+  </ActionTooltip>;
+}
+
+export function ProjectWebMenu({ project, onOpenBrowser, onSetDefault, canOpen }: WebActions & {
+  canOpen: (service: Service) => boolean;
+}) {
   const [open, setOpen] = useState(false);
   const menuId = useId();
   const anchor = useRef<HTMLDivElement>(null);
@@ -30,10 +48,6 @@ export function ProjectWebMenu({ project, onOpenBrowser, onSetDefault, disabled,
   };
 
   useEffect(() => {
-    if (disabled) setOpen(false);
-  }, [disabled]);
-
-  useEffect(() => {
     if (!open) return;
     const menu = panel.current;
     (menu?.querySelector<HTMLButtonElement>('[aria-current="true"]:not(:disabled)') ?? menu?.querySelector('button:not(:disabled)'))?.focus({ preventScroll: true });
@@ -45,15 +59,16 @@ export function ProjectWebMenu({ project, onOpenBrowser, onSetDefault, disabled,
   }, [open]);
 
   return <div ref={anchor} className="relative" onBlur={event => {
-    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
+    // WebKit can blur the focused item on mouse-down without focusing the clicked item.
+    if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) setOpen(false);
   }}>
     <div className="project-web-split">
-      <button type="button" data-project-action="open" disabled={disabled || port == null || (defaultService && canOpen?.(defaultService.id) === false)} onClick={() => { if (port != null) onOpenBrowser(port); }}
+      <OpenServiceButton data-project-action="open" port={port} listening={!!defaultService && canOpen(defaultService)} onOpen={onOpenBrowser}
         className="rounded-l-[7px] px-[13px] py-[7px] pr-2.5 hover:bg-accent focus-visible:outline-ring disabled:opacity-50">
         打开网页{port != null && <> <span className="tabular-nums">:{port}</span></>}
-      </button>
+      </OpenServiceButton>
       <button ref={trigger} type="button" aria-label="选择打开网页的服务" aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined}
-        disabled={disabled || !services.length} data-project-web-dropdown className="flex self-stretch items-center rounded-r-[7px] border-l border-border px-[9px] text-muted-foreground hover:bg-accent focus-visible:outline-ring disabled:opacity-50"
+        disabled={!services.length} data-project-web-dropdown className="flex self-stretch items-center rounded-r-[7px] border-l border-border px-[9px] text-muted-foreground hover:bg-accent focus-visible:outline-ring disabled:opacity-50"
         onClick={() => setOpen(previous => !previous)} onKeyDown={event => {
           if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setOpen(true); }
         }}>
@@ -74,12 +89,12 @@ export function ProjectWebMenu({ project, onOpenBrowser, onSetDefault, disabled,
       }}>
       <div className="px-2.5 pb-1 pt-1.5 text-[11px] text-[var(--sidebar-heading)]">打开哪个端口</div>
       {services.map(service => <div key={service.id} className="project-web-option" data-default={service.openWeb || undefined}>
-        <button type="button" role="menuitem" disabled={canOpen?.(service.id) === false} aria-current={service.openWeb || undefined} data-open-service={service.id}
-          className="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-2.5 py-[7px] text-left outline-none hover:bg-accent/65 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50"
-          onClick={() => { close(true); onOpenBrowser(service.port!); }}>
+        <OpenServiceButton role="menuitem" port={service.port} listening={canOpen(service)} aria-current={service.openWeb || undefined} data-open-service={service.id}
+          wrapperClassName="min-w-0 flex-1" className="flex w-full min-w-0 items-center justify-between gap-2 rounded-md px-2.5 py-[7px] text-left outline-none hover:bg-accent/65 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50 disabled:opacity-50"
+          onOpen={port => { close(true); onOpenBrowser(port); }}>
           <span className="truncate" title={service.name}>{service.name}{service.kind && <span className="font-normal opacity-75"> · {service.kind}</span>}</span>
           <span className="flex shrink-0 items-center gap-1 font-mono">{service.port}{service.openWeb && <Check className="size-3" aria-label="默认" />}</span>
-        </button>
+        </OpenServiceButton>
         {!service.openWeb && <button type="button" role="menuitem" aria-label={'设为默认：' + service.name} data-default-service={service.id}
           className="shrink-0 rounded px-1.5 py-1 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-ring"
           onClick={() => { close(true); void onSetDefault(service.id); }}>设为默认</button>}
@@ -107,7 +122,8 @@ export function ProjectServices({ project, runtime, onOpenBrowser, onSetDefault,
     return status?.port === service.port && statusOf(status) === 'live';
   });
   const vars = injectedPortVariables(project);
-  const standard = usePortStandard(project.path, project.startCommand, project.services);
+  const shared = project.injectPorts && project.services.length > 1 && project.services.every(service => !service.startCommand);
+  const standard = usePortStandard(project.path, project.startCommand, project.services, shared);
   const missing = new Map(standard?.data?.services
     .filter(service => !service.references.length).map(service => [service.serviceId, service.variable]));
   const [showTemplate, setShowTemplate] = useState(false);
@@ -117,7 +133,7 @@ export function ProjectServices({ project, runtime, onOpenBrowser, onSetDefault,
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
         <h2 id="project-services-title" className="text-[13.5px] font-semibold leading-4">服务</h2>
         <p className="text-xs leading-4 text-muted-foreground">启动/停止由 <code className="break-all font-medium text-foreground">{project.startCommand}</code> 统一管理{allListening && '，所有端口都在监听'}</p>
-        {configured.length > 0 && <button type="button" className="ml-auto shrink-0 rounded text-xs text-[var(--service-blue)] hover:underline focus-visible:outline-ring"
+        {shared && configured.length > 0 && <button type="button" className="ml-auto shrink-0 rounded text-xs text-[var(--service-blue)] hover:underline focus-visible:outline-ring"
           onClick={() => setShowTemplate(true)} data-view-standard-template>查看标准模板</button>}
       </div>
       <div className="project-service-card overflow-x-auto">
@@ -137,8 +153,9 @@ export function ProjectServices({ project, runtime, onOpenBrowser, onSetDefault,
               <td><span className="project-service-status" data-state={status}
                 title={status === 'foreign' && runtime?.owner?.pid != null ? 'PID ' + runtime.owner.pid : undefined}>{statusLabels[status]}</span></td>
               <td>{service.port == null ? <span className="text-muted-foreground">—</span> : service.openWeb
-                ? <button type="button" className="inline-flex items-center gap-1 rounded text-[var(--service-blue)] hover:underline focus-visible:outline-ring"
-                    onClick={() => onOpenBrowser(service.port!)}>localhost:{service.port}<ArrowUpRight className="size-3.5" /></button>
+                ? <OpenServiceButton port={service.port} listening={runtime?.port === service.port && !!runtime.listening}
+                    className="inline-flex items-center gap-1 rounded text-[var(--service-blue)] hover:underline focus-visible:outline-ring"
+                    onOpen={onOpenBrowser}>localhost:{service.port}<ArrowUpRight className="size-3.5" /></OpenServiceButton>
                 : <button type="button" className="rounded text-muted-foreground hover:text-[var(--service-blue)] hover:underline focus-visible:outline-ring"
                     onClick={() => void onSetDefault(service.id)}>设为打开端口</button>}</td>
             </tr>

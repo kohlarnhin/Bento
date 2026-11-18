@@ -82,54 +82,52 @@
     --terminal-scrollbar-hover: #62656e;
   }
 
-  @media (prefers-color-scheme: dark) {
-    :root {
-      color-scheme: dark;
-      --background: 240 6% 13%;
-      --foreground: 240 8% 94%;
-      --card: #212126;
-      --card-border: #323238;
-      --popover: 240 7% 16%;
-      --popover-foreground: var(--foreground);
-      --primary: 240 8% 92%;
-      --primary-foreground: 240 6% 13%;
-      --secondary: 240 4% 20%;
-      --secondary-foreground: var(--foreground);
-      --muted: 240 5% 19%;
-      --muted-foreground: 240 5% 67%;
-      --accent: 240 5% 22%;
-      --accent-foreground: var(--foreground);
-      --border: 240 5% 24%;
-      --input: var(--border);
-      --ring: 215 67% 68%;
-      --sidebar-background: #22242d;
-      --sidebar-glass: rgba(34, 36, 45, .88);
-      --sidebar-edge: rgba(255, 255, 255, .1);
-      --sidebar-hover: rgba(255, 255, 255, .07);
-      --sidebar-segment: rgba(0, 0, 0, .24);
-      --sidebar-heading: #a5a5af;
-      --sidebar-muted: #b6b6bf;
-      --sidebar-port: #a6a8b7;
-      --sidebar-extra-port: #a5a5af;
-      --sidebar-selected-port: #9cb8ff;
-      --sidebar-selected: rgba(96, 165, 250, .16);
-      --sidebar-sub-selected: rgba(96, 165, 250, .13);
-      --sidebar-guide: rgba(255, 255, 255, .12);
-      --sidebar-border: var(--border);
-      --sidebar-ring: var(--ring);
-      --success-foreground: 154 66% 69%;
-      --success-muted: 157 36% 18%;
-      --warning-foreground: 37 92% 73%;
-      --warning-muted: 35 36% 18%;
-      --service-blue: #8abaff;
-      --service-blue-text: #b0caff;
-      --service-blue-fill: rgba(96, 165, 250, .16);
-      --service-diff-bg: #202a3b;
-      --service-diff-border: #354664;
-      --service-diff-text: #b5c2d9;
-      --service-live: hsl(var(--success-foreground));
-      --service-live-fill: hsl(var(--success-muted));
-    }
+  :root.dark {
+    color-scheme: dark;
+    --background: 240 6% 13%;
+    --foreground: 240 8% 94%;
+    --card: #212126;
+    --card-border: #323238;
+    --popover: 240 7% 16%;
+    --popover-foreground: var(--foreground);
+    --primary: 240 8% 92%;
+    --primary-foreground: 240 6% 13%;
+    --secondary: 240 4% 20%;
+    --secondary-foreground: var(--foreground);
+    --muted: 240 5% 19%;
+    --muted-foreground: 240 5% 67%;
+    --accent: 240 5% 22%;
+    --accent-foreground: var(--foreground);
+    --border: 240 5% 24%;
+    --input: var(--border);
+    --ring: 215 67% 68%;
+    --sidebar-background: #22242d;
+    --sidebar-glass: rgba(34, 36, 45, .88);
+    --sidebar-edge: rgba(255, 255, 255, .1);
+    --sidebar-hover: rgba(255, 255, 255, .07);
+    --sidebar-segment: rgba(0, 0, 0, .24);
+    --sidebar-heading: #a5a5af;
+    --sidebar-muted: #b6b6bf;
+    --sidebar-port: #a6a8b7;
+    --sidebar-extra-port: #a5a5af;
+    --sidebar-selected-port: #9cb8ff;
+    --sidebar-selected: rgba(96, 165, 250, .16);
+    --sidebar-sub-selected: rgba(96, 165, 250, .13);
+    --sidebar-guide: rgba(255, 255, 255, .12);
+    --sidebar-border: var(--border);
+    --sidebar-ring: var(--ring);
+    --success-foreground: 154 66% 69%;
+    --success-muted: 157 36% 18%;
+    --warning-foreground: 37 92% 73%;
+    --warning-muted: 35 36% 18%;
+    --service-blue: #8abaff;
+    --service-blue-text: #b0caff;
+    --service-blue-fill: rgba(96, 165, 250, .16);
+    --service-diff-bg: #202a3b;
+    --service-diff-border: #354664;
+    --service-diff-text: #b5c2d9;
+    --service-live: hsl(var(--success-foreground));
+    --service-live-fill: hsl(var(--success-muted));
   }
 
   * { @apply border-border; }
@@ -262,10 +260,8 @@ html, body, #root {
     backdrop-filter: blur(40px) saturate(180%);
   }
 
-  @media (prefers-color-scheme: dark) {
-    .sidebar-glass {
-      background: linear-gradient(180deg, #202b39, #242834 45%, #2b2532);
-    }
+  .dark .sidebar-glass {
+    background: linear-gradient(180deg, #202b39, #242834 45%, #2b2532);
   }
 
   .sidebar-project-list {
@@ -420,9 +416,7 @@ html, body, #root {
     box-shadow: 0 0 0 .5px rgba(0, 0, 0, .08);
   }
 
-  @media (prefers-color-scheme: dark) {
-    input.sidebar-search { background-color: var(--sidebar-glass); }
-  }
+  .dark input.sidebar-search { background-color: var(--sidebar-glass); }
 
   input.sidebar-search:focus-visible {
     box-shadow: 0 0 0 1px hsl(var(--ring)), 0 0 0 3px hsl(var(--ring) / .24);

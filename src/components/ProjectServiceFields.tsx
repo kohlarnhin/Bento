@@ -4,7 +4,7 @@ import { portNumber, serviceEnvName, type ServiceDraft } from '../lib/projectSer
 import Button from './ui/button';
 import { Input } from './ui/input';
 
-export type ServiceField = 'name' | 'dir' | 'port' | 'key';
+export type ServiceField = 'name' | 'dir' | 'port' | 'key' | 'startCommand';
 export type ServiceErrors = Record<string, Partial<Record<ServiceField, string>>>;
 
 export function ProjectServiceFields({ services, newIds, checks, errors, disabled, portFocus, onChange, onDefault, onRemove, onAdd }: {
@@ -83,5 +83,20 @@ export function ProjectServiceFields({ services, newIds, checks, errors, disable
     </div>
     <button type="button" className="inline-flex items-center gap-1 rounded px-2 pt-0.5 text-[12.5px] text-[var(--service-blue)] hover:underline focus-visible:outline-ring disabled:opacity-50"
       disabled={disabled} onClick={onAdd} data-add-service><Plus className="size-3.5" />添加服务</button>
+    <details className="rounded-lg border border-card-border" open={services.some(service => !!service.startCommand?.trim()) || undefined}>
+      <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-muted-foreground">服务独立启动命令（可选）</summary>
+      <div className="space-y-2 px-3 pb-3">
+        <p className="text-xs text-muted-foreground">填齐后在各服务目录分别启动。全部留空时使用总启动命令。</p>
+        {services.map((service, index) => <label key={service.id} className="grid grid-cols-[8rem_1fr] items-center gap-2 text-xs">
+          <span className="truncate" title={service.dir}>{service.name || '服务 ' + (index + 1)}</span>
+          <Input value={service.startCommand ?? ''} aria-invalid={!!errors[service.id]?.startCommand}
+            title={errors[service.id]?.startCommand} className="font-mono" disabled={disabled}
+            placeholder="例如 pnpm dev" data-service-start-command={service.id}
+            onChange={event => onChange(service.id, 'startCommand', event.target.value)} />
+        </label>)}
+        {Object.values(errors).some(error => error.startCommand) &&
+          <p className="text-xs text-destructive" role="alert">请填写所有服务的独立启动命令，或全部留空。</p>}
+      </div>
+    </details>
   </section>;
 }

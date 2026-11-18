@@ -544,8 +544,7 @@ export function App() {
     try {
       await invoke('open_url', { url: `http://localhost:${port}` });
     } catch (err) {
-      console.error('打开浏览器失败:', err);
-      showToast(`打开浏览器失败: ${err}`);
+      showToast(`打开网页失败 · ${err}`);
     }
   };
 
@@ -589,7 +588,7 @@ export function App() {
   return (
     <TooltipProvider delayDuration={150}>
       <div className="flex h-screen overflow-hidden cursor-default select-none">
-        <Toaster />
+        <Toaster theme={settings.colorScheme} />
 
         <ProjectSidebar
           projects={projects}

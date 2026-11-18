@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  cleanTerminalText, cpuChart, dashboardLog, dashboardServices, dashboardStatus, durationText, logSeverity,
+  cleanTerminalText, cpuChart, dashboardLog, dashboardPortListening, dashboardServices, dashboardStatus, durationText, logSeverity,
   recentLogCounts, relativeTime, runInterval, DASHBOARD_LOG_LIMIT,
 } from '../src/lib/dashboard.ts';
 
@@ -22,6 +22,14 @@ test('the overview does not display an unrelated single-service listener as a ru
   assert.equal(dashboardStatus('starting', { isManaged: true }, { external: false }), 'starting');
 });
 
+test('open web actions depend only on the same configured port listening, including an unidentified owner', () => {
+  assert.equal(dashboardPortListening(front, [{ ...front, state: 'listening', health: { code: 503 } }]), true);
+  assert.equal(dashboardPortListening(front, [{ ...front, state: 'occupied', health: { code: null } }]), true);
+  assert.equal(dashboardPortListening(front, [{ ...front, state: 'idle' }]), false);
+  assert.equal(dashboardPortListening(front, [{ ...front, port: 9999, state: 'listening' }]), false);
+  assert.equal(dashboardPortListening(front, [{ ...api, port: front.port, state: 'listening' }]), false);
+  assert.equal(dashboardPortListening({ ...front, port: null }, [{ ...front, port: null, state: 'listening' }]), false);
+});
 test('startup log tags match names, role keys, and service directories while stripping terminal controls', () => {
   const entry = { id: '1', projectId: 'p', stream: 'stdout', timestamp: 0 };
   const parse = text => dashboardLog({ ...entry, text }, [front, api]);

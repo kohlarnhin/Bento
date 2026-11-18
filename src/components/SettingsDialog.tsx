@@ -4,10 +4,16 @@ import { DEFAULT_TERMINAL_FONT_SIZE } from '../lib/terminalAppearance';
 import Button from './ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
 import { Select } from './ui/select';
+import { SegmentedControl } from './ui/segmented-control';
 import { Switch } from './ui/switch';
 
 const fontSizes = Array.from({ length: 9 }, (_, index) => ({ value: String(index + 12), label: `${index + 12} px` }));
 const terminalLimits = Array.from({ length: 6 }, (_, index) => ({ value: String(index + 1), label: `${index + 1} 个` }));
+const appearances = [
+  { value: 'system', label: '跟随系统' },
+  { value: 'light', label: '浅色' },
+  { value: 'dark', label: '深色' },
+] as const;
 
 export function SettingsDialog({ settings, updater, onClose, onCheckUpdates }: {
   settings: SettingsController;
@@ -19,12 +25,20 @@ export function SettingsDialog({ settings, updater, onClose, onCheckUpdates }: {
     <DialogContent className="flex max-h-[calc(100dvh-3rem)] max-w-lg flex-col gap-0 rounded-2xl p-0" data-settings-dialog>
       <DialogHeader className="px-6 pb-5 pt-6">
         <DialogTitle>设置</DialogTitle>
-        <DialogDescription>管理登录时启动和终端偏好。</DialogDescription>
+        <DialogDescription>管理外观、登录时启动和终端偏好。</DialogDescription>
       </DialogHeader>
 
       <div className="min-h-0 overflow-y-auto rounded-b-2xl">
       <section className="border-t px-6 py-5" aria-labelledby="settings-general">
         <h3 id="settings-general" className="mb-4 text-xs font-medium text-muted-foreground">通用</h3>
+        <div className="mb-5 flex items-center justify-between gap-5">
+          <span id="settings-appearance" className="text-sm font-medium">外观</span>
+          <SegmentedControl labelledBy="settings-appearance" value={settings.appearance} options={appearances}
+            disabled={settings.fontLoading || settings.appearanceSaving}
+            className="shrink-0 [&>button]:flex-none [&>button]:whitespace-nowrap [&>button]:px-3"
+            onChange={value => { void settings.changeAppearance(value); }} />
+        </div>
+        {settings.appearanceError && <p role="alert" className="mb-5 break-words text-xs text-destructive">{settings.appearanceError}</p>}
         <div className="flex items-start justify-between gap-5">
           <div className="min-w-0">
             <label htmlFor="settings-autostart" className="text-sm font-medium">登录时启动 Bento</label>

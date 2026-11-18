@@ -382,6 +382,8 @@ struct ServiceSample {
     port: Option<u16>,
     state: ListenerState,
     usage: Option<Usage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unexpected_ports: Vec<u16>,
 }
 
 #[derive(Serialize)]
@@ -419,6 +421,7 @@ fn services_for(project: &ProjectConfig) -> Vec<projects::Service> {
         key: "PORT".into(),
         kind: None,
         open_web: project.port.is_some(),
+        start_command: None,
     }]
 }
 
@@ -443,6 +446,56 @@ fn owned_listeners(
     (owned, foreign)
 }
 
+fn detect_unexpected_ports(
+    info: &ProcessInfo,
+    config: &[projects::Service],
+    services: &mut [ServiceSample],
+    directory: Option<&Path>,
+    managed: &HashSet<u32>,
+    listeners: &HashMap<u16, Vec<u32>>,
+) {
+    // Give slower servers a brief chance to bind their requested port.
+    if now().saturating_sub(info.run.started_at) < 2_000 {
+        return;
+    }
+    let waiting: Vec<_> = services.iter().enumerate().filter_map(|(index, service)| {
+        let port = service.port?;
+        (service.state == ListenerState::Idle && info.checks_injected_port(&service.id, port)).then_some(index)
+    }).collect();
+    if waiting.is_empty() {
+        return;
+    }
+    let expected: HashSet<_> = info.configured_ports().collect();
+    let ready_pids: HashSet<_> = expected.iter().filter_map(|port| listeners.get(port))
+        .flatten().copied().collect();
+    let paths: Vec<_> = config.iter().map(|service| {
+        directory.and_then(|directory| directory.join(&service.dir).canonicalize().ok())
+    }).collect();
+    for (&port, pids) in listeners {
+        if expected.contains(&port) {
+            continue;
+        }
+        for &pid in pids {
+            if !managed.contains(&pid) || ready_pids.contains(&pid) {
+                continue;
+            }
+            let service = paths.iter().enumerate()
+                .filter_map(|(index, path)| path.as_ref().map(|path| (index, path)))
+                .filter(|(_, path)| processes::cwd_matches(pid, path))
+                .max_by_key(|(_, path)| path.components().count())
+                .map(|(index, _)| index)
+                .or_else(|| (waiting.len() == 1).then_some(waiting[0]));
+            if let Some(index) = service.filter(|index| waiting.contains(index)) {
+                services[index].unexpected_ports.push(port);
+            }
+        }
+    }
+    for service in services {
+        service.unexpected_ports.sort_unstable();
+        service.unexpected_ports.dedup();
+    }
+}
+
 fn sample_project(project: &ProjectConfig, info: Option<&ProcessInfo>) -> Snapshot {
     let processes = ProcessSample::read();
     let listeners = crate::processes::listening_ports();
@@ -452,7 +505,8 @@ fn sample_project(project: &ProjectConfig, info: Option<&ProcessInfo>) -> Snapsh
         .ok();
     let mut external_roots = Vec::new();
     let mut services = Vec::new();
-    for service in services_for(project) {
+    let config = services_for(project);
+    for service in &config {
         let (owned, foreign) = service
             .port
             .map(|port| owned_listeners(port, &listeners, directory.as_deref(), managed.as_ref()))
@@ -461,14 +515,18 @@ fn sample_project(project: &ProjectConfig, info: Option<&ProcessInfo>) -> Snapsh
         let usage = processes.total(&processes.tree_pids(&owned), owned.first().copied());
         external_roots.extend(owned);
         services.push(ServiceSample {
-            id: service.id,
+            id: service.id.clone(),
             port: service.port,
             state,
             usage,
+            unexpected_ports: Vec::new(),
         });
     }
     let external = info.is_none() && !external_roots.is_empty();
     let (started_at, total) = if let Some(info) = info {
+        if let Some(pids) = &managed {
+            detect_unexpected_ports(info, &config, &mut services, directory.as_deref(), pids, &listeners);
+        }
         let total = managed
             .as_ref()
             .and_then(|pids| processes.total(pids, Some(info.pid)));

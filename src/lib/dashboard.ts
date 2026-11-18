@@ -1,4 +1,4 @@
-import type { DashboardCpuPoint, DashboardSnapshot, LogEntry, ProjectConfig, ProjectRuntimeStatus, ProjectStatus, Service } from '../types.ts';
+import type { DashboardCpuPoint, DashboardServiceSample, DashboardSnapshot, LogEntry, ProjectConfig, ProjectRuntimeStatus, ProjectStatus, Service } from '../types.ts';
 
 export const DASHBOARD_LOG_LIMIT = 500;
 
@@ -14,6 +14,11 @@ export function dashboardStatus(status: ProjectStatus, runtime?: ProjectRuntimeS
   if (snapshot?.external) return 'running';
   if (snapshot && runtime?.external) return 'stopped';
   return status;
+}
+
+export function dashboardPortListening(service: Pick<Service, 'id' | 'port'>, samples?: DashboardServiceSample[]) {
+  return service.port != null && !!samples?.some(sample => sample.id === service.id &&
+    sample.port === service.port && sample.state !== 'idle');
 }
 
 export function cleanTerminalText(line: string) {
