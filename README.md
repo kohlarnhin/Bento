@@ -16,6 +16,36 @@ Bento 基于 **Tauri 2 + React + Tailwind CSS**。像便当盒一样，每个项
   - **启动就绪后自动打开网页**：仅 Web 项目可用。由 Bento 启动、且端口就绪后打开一次浏览器。
 - **Git 信息**：如果项目目录在 Git 仓库中，概览会显示当前分支、项目目录内未提交的改动数，以及与上游分支相比领先或落后的提交数。读取时不加锁（`GIT_OPTIONAL_LOCKS=0`），不会影响你同时执行的 git 操作。
 
+## Bento 启动标准
+
+Bento 在启用「端口注入」时，把配置中的监听端口传给项目根目录的启动命令。
+
+- 单服务项目使用 `PORT`。
+- 多服务项目仍提供 `PORT`，值为「打开网页」所选服务的端口。每个已配置端口的服务另外收到 `BENTO_PORT_<KEY>`，例如 `BENTO_PORT_WEB=3100` 和 `BENTO_PORT_API=8100`。
+- `BENTO_PORTS` 提供以逗号分隔的角色与端口，例如 `WEB:3100,API:8100`。角色 key 在同一项目内唯一，仅使用大写字母、数字和下划线。Web 与 API 服务默认使用 `WEB`、`API`，其余服务根据目录名生成。
+- 「高级设置」中的同名环境变量优先。Bento 负责传值，项目脚本负责用这些值配置实际监听端口。
+
+脚本可以这样读取标准变量，并为脱离 Bento 直接运行保留默认值。
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+WEB_PORT="${BENTO_PORT_WEB:-${PORT:-3100}}"
+API_PORT="${BENTO_PORT_API:-8100}"
+export API_PORT
+```
+
+启动 Vite 时传入 `--port "$WEB_PORT" --strictPort`，Next.js 使用 `-p "$WEB_PORT"`。Uvicorn 或 Flask 使用 `--port "$API_PORT"`。前端开发服务器可从 `process.env.API_PORT` 生成代理地址。
+
+```ts
+const apiPort = process.env.API_PORT || '8100'
+const proxy = {
+  '/api': { target: `http://127.0.0.1:${apiPort}`, changeOrigin: true },
+}
+```
+
+概览和重新扫描会静态检查启动命令、它直接调用的脚本以及 Vite/Next 配置。多服务项目可在编辑窗口预览并生成 `scripts/bento-dev.sh`，确认后写入新文件。保存项目后才应用填入的启动命令。
+
 ## 运行与状态
 
 - **启动环境**：每次启动都会读取登录 shell，使用与项目终端相同的环境；`.zshrc` 中定义的别名和函数不可用。读取失败时会在日志中提示，并改用登录 shell 启动，此时 `.zshrc` 中的设置可能不会生效。

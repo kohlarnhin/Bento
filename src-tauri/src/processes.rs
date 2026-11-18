@@ -1,10 +1,12 @@
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod launch_marker;
 mod listeners;
+pub use launch_marker::{new_launch_marker, MANAGED_RUN_ENV};
 
 fn lsof() -> Command {
     #[cfg(debug_assertions)]
@@ -74,6 +76,16 @@ pub struct ProcessIdentity {
     micros: u64,
 }
 
+impl ProcessIdentity {
+    pub fn started_at_millis(self) -> u64 {
+        self.seconds * 1000 + self.micros / 1000
+    }
+
+    pub fn token(self) -> String {
+        format!("{}:{}", self.seconds, self.micros)
+    }
+}
+
 // A birth timestamp prevents a recycled PID from inheriting permission to be killed.
 pub fn identity(pid: u32) -> Option<ProcessIdentity> {
     if pid <= 1 || pid == std::process::id() {
@@ -123,7 +135,7 @@ pub fn parse_process_table(text: &str) -> Vec<ProcessRow> {
         .collect()
 }
 
-fn process_table() -> Vec<ProcessRow> {
+pub fn process_table() -> Vec<ProcessRow> {
     Command::new("ps")
         .args(["-ax", "-o", "pid=,ppid=,pgid="])
         .output()
@@ -150,6 +162,7 @@ pub fn descendants(rows: &[ProcessRow], root: u32) -> HashSet<u32> {
     found
 }
 
+#[derive(Clone)]
 pub struct ManagedRoot {
     pub pid: u32,
     pub pgid: i32,
@@ -162,6 +175,10 @@ pub struct ProcessTree {
 }
 
 impl ProcessTree {
+    pub fn for_root(root: &ManagedRoot, rows: &[ProcessRow]) -> Self {
+        Self::capture(root, rows)
+    }
+
     fn capture(root: &ManagedRoot, rows: &[ProcessRow]) -> Self {
         let mut members = HashMap::new();
         let own_group = unsafe { libc::getpgrp() };
@@ -195,6 +212,23 @@ impl ProcessTree {
             .any(|(&pid, &birth)| identity(pid) == Some(birth))
     }
 
+    pub fn pids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.members.keys().copied()
+    }
+
+    pub fn owns(&self, pid: u32) -> bool {
+        self.members
+            .get(&pid)
+            .is_some_and(|birth| identity(pid) == Some(*birth))
+    }
+
+    pub fn kill_listener(&self, pid: u32) -> bool {
+        if !self.owns(pid) {
+            return false;
+        }
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) == 0 }
+    }
+
     fn signal(&self, signal: i32) {
         let mut group_alive = false;
         for (&pid, &birth) in &self.members {
@@ -218,6 +252,81 @@ impl ProcessTree {
                 libc::kill(-self.pgid, signal);
             }
         }
+    }
+}
+
+/// A managed PTY has its own session. Keep birth identities for descendants
+/// that leave the session so they remain attributable after reparenting.
+pub struct TrackedTree {
+    root: ManagedRoot,
+    members: Mutex<HashMap<u32, ProcessIdentity>>,
+    marker: String,
+}
+
+impl TrackedTree {
+    pub fn new(root: ManagedRoot, marker: String) -> Self {
+        Self {
+            root,
+            members: Mutex::default(),
+            marker,
+        }
+    }
+
+    pub fn capture(
+        &self,
+        rows: &[ProcessRow],
+        listeners: impl IntoIterator<Item = u32>,
+    ) -> Arc<ProcessTree> {
+        let mut members = self.members.lock().unwrap_or_else(|err| err.into_inner());
+        members.retain(|&pid, birth| identity(pid) == Some(*birth));
+        let current = identity(self.root.pid);
+        if let Some(birth) = self.root.identity {
+            if current == Some(birth) {
+                members.insert(self.root.pid, birth);
+            }
+            // The session ID remains allocated while any of its processes live.
+            // A recycled leader PID must never grant ownership of a new session.
+            if current.is_none() || current == Some(birth) {
+                for row in rows {
+                    if row.pgid == self.root.pgid
+                        || unsafe { libc::getsid(row.pid as i32) } == self.root.pgid
+                    {
+                        if let Some(birth) = identity(row.pid) {
+                            members.insert(row.pid, birth);
+                        }
+                    }
+                }
+            }
+        }
+        // A launcher can exit before a newly detached process appears in a
+        // process-table sample. Check inherited ownership only on its configured ports.
+        for pid in listeners {
+            if members.contains_key(&pid) {
+                continue;
+            }
+            if let Some(birth) = identity(pid) {
+                if launch_marker::matches(pid, &self.marker) && identity(pid) == Some(birth) {
+                    members.insert(pid, birth);
+                }
+            }
+        }
+        loop {
+            let count = members.len();
+            for row in rows {
+                if !members.contains_key(&row.pid) && members.contains_key(&row.ppid) {
+                    if let Some(birth) = identity(row.pid) {
+                        members.insert(row.pid, birth);
+                    }
+                }
+            }
+            if count == members.len() {
+                break;
+            }
+        }
+        Arc::new(ProcessTree {
+            pgid: self.root.pgid,
+            members: members.clone(),
+        })
     }
 }
 
@@ -267,6 +376,34 @@ pub struct PortOwner {
 
 pub fn port_owners(port: u16, project_path: &str) -> Vec<PortOwner> {
     owners_for_pids(port_pids(port), Some(project_path))
+}
+
+pub fn cwd_matches(pid: u32, project: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let mut info = std::mem::MaybeUninit::<libc::proc_vnodepathinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as i32;
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid as i32,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if read != size {
+        return false;
+    }
+    let info = unsafe { info.assume_init() };
+    let cwd: Vec<u8> = info
+        .pvi_cdir
+        .vip_path
+        .iter()
+        .flatten()
+        .map(|&byte| byte as u8)
+        .take_while(|&byte| byte != 0)
+        .collect();
+    std::path::Path::new(std::ffi::OsStr::from_bytes(&cwd)).starts_with(project)
 }
 
 pub fn owners_for_pids(pids: Vec<u32>, project_path: Option<&str>) -> Vec<PortOwner> {
@@ -329,9 +466,7 @@ pub fn stop_external(port: u16, pids: Vec<u32>) -> Vec<String> {
         }
         let birth = identity(pid);
         if birth.is_none() || !port_pids(port).contains(&pid) || identity(pid) != birth {
-            messages.push(format!(
-                "[Bento] 已跳过 PID {pid}：它已不再监听端口 {port}"
-            ));
+            messages.push(format!("[Bento] 已跳过 PID {pid}：它已不再监听端口 {port}"));
             continue;
         }
         unsafe {

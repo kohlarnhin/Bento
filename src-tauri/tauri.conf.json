@@ -20,7 +20,6 @@
         "height": 800,
         "minWidth": 850,
         "minHeight": 600,
-        "theme": "Light",
         "transparent": true,
         "windowEffects": {
           "effects": ["sidebar"]

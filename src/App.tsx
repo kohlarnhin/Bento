@@ -7,7 +7,6 @@ import { FolderPlus } from 'lucide-react';
 import { toast } from 'sonner';
 import { TooltipProvider } from './components/ui/tooltip';
 import { ProjectCard } from './components/ProjectCard';
-import { PortConflictBanner } from './components/PortConflictBanner';
 import { TerminalLogsModal } from './components/TerminalLogs';
 import { ProjectSidebar } from './components/ProjectSidebar';
 import { ProjectTerminal, type ProjectTerminalControls } from './components/ProjectTerminal';
@@ -31,6 +30,7 @@ import { DEFAULT_TERMINAL_FONT_SIZE } from './lib/terminalAppearance';
 import { clampTerminalFontSize, terminalsNeedingAttention } from './lib/terminalUsability';
 import { matchesSidebarFilter, sidebarNavigation, sidebarSections, type SidebarFilter } from './lib/sidebarModel';
 import { useProjectGitInfos } from './lib/useGitInfo';
+import { sameServiceStatuses } from './lib/projectServices';
 import {
   ProjectConfig,
   ProjectGroup,
@@ -41,6 +41,7 @@ import {
   ProjectSelection,
   ProjectDirInspection,
   PortOwner,
+  DashboardConflict,
 } from './types';
 
 let sidebarDropContext: {
@@ -135,7 +136,8 @@ export function App() {
       for (const runtime of updates) {
         const current = previous[runtime.projectId];
         if (current && runtime.revision < current.revision) continue;
-        if (current && (Object.keys(runtime) as (keyof ProjectRuntimeStatus)[]).every(key => current[key] === runtime[key])) continue;
+        if (current && (Object.keys(runtime) as (keyof ProjectRuntimeStatus)[]).every(key =>
+          key === 'services' ? sameServiceStatuses(current.services, runtime.services) : current[key] === runtime[key])) continue;
         next[runtime.projectId] = runtime;
         changed = true;
       }
@@ -147,6 +149,7 @@ export function App() {
   }, [applyRuntime]);
   const { enqueue: enqueueLogs, flush: flushLogs, clear: clearLogs } = projectLogs;
   const [activeLogProject, setActiveLogProject] = useState<ProjectConfig | null>(null);
+  const [activeLogTarget, setActiveLogTarget] = useState<string>();
   const [loading, setLoading] = useState(true);
   const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [selection, setSelection] = useState<ProjectSelection | null>(null);
@@ -211,7 +214,7 @@ export function App() {
   navigation.current = { projects: shortcutProjects, view: selection?.view || 'overview', selection, activeSlots };
   const [reordering, setReordering] = useState(false);
   const reorderPending = useRef(false);
-  const [projectForm, setProjectForm] = useState<{ project?: ProjectConfig; inspection?: ProjectDirInspection } | null>(null);
+  const [projectForm, setProjectForm] = useState<{ project?: ProjectConfig; inspection?: ProjectDirInspection; focusPort?: DashboardConflict } | null>(null);
   const [deleteProject, setDeleteProject] = useState<ProjectConfig | null>(null);
   const [externalStop, setExternalStop] = useState<{ project: ProjectConfig; owners: PortOwner[]; restart: boolean } | null>(null);
   const [stopAllOpen, setStopAllOpen] = useState(false);
@@ -474,6 +477,7 @@ export function App() {
     const unlistenBatchPromise = listen<LogBatchPayload>('project-log-batch', ({ payload }) => {
       enqueueLogs(payload.projectId, payload.entries);
     });
+    const unlistenRunPromise = listen<string>('project-run-started', ({ payload }) => clearLogs(payload));
 
     const unlistenStatusPromise = listen<StatusPayload>('project-status', (event) => {
       applyRuntime([event.payload]);
@@ -484,9 +488,10 @@ export function App() {
       document.removeEventListener('visibilitychange', onVisibilityChange);
       unlistenLogPromise.then((unlisten) => unlisten());
       unlistenBatchPromise.then((unlisten) => unlisten());
+      unlistenRunPromise.then((unlisten) => unlisten());
       unlistenStatusPromise.then((unlisten) => unlisten());
     };
-  }, [loadProjects, applyRuntime, refreshRuntime, enqueueLogs]);
+  }, [loadProjects, applyRuntime, refreshRuntime, enqueueLogs, clearLogs]);
 
   // Actions
   const handleStart = async (id: string) => {
@@ -558,7 +563,16 @@ export function App() {
   };
 
   const selectedProject = projects.find((project) => project.id === selection?.projectId);
-  const selectedConflict = conflicts.find((conflict) => selectedProject && conflict.projectIds.includes(selectedProject.id));
+  const selectedConflicts = conflicts.filter(conflict => selectedProject && conflict.projectIds.includes(selectedProject.id));
+  const setDefaultService = async (serviceId: string) => {
+    if (!selectedProject) return;
+    try {
+      await invoke('set_default_service', { id: selectedProject.id, serviceId });
+      await loadProjects();
+    } catch (error) {
+      showToast(`设置默认服务失败：${error}`);
+    }
+  };
   const selectView = useCallback((next: ProjectSelection) => {
     setActiveLogProject(null);
     setSelection(next);
@@ -617,7 +631,7 @@ export function App() {
         />
 
         <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background">
-          {selection?.view !== 'terminal' && <div data-tauri-drag-region className={selectedProject ? 'h-[26px] shrink-0' : 'h-8 shrink-0'} aria-hidden="true" />}
+          {!selectedProject && <div data-tauri-drag-region className="h-8 shrink-0" aria-hidden="true" />}
           {projects.length === 0 ? (
             <Empty className="m-6 flex-1">
               <FolderPlus className="size-8 text-muted-foreground" />
@@ -630,27 +644,25 @@ export function App() {
           ) : selectedProject && selection?.view === 'terminal' ? (
             <ProjectTerminal ref={terminalControls} key={selectedProject.id} project={selectedProject} activeSlot={activeSlots[selectedProject.id] ?? 1} />
           ) : selectedProject ? (
-            <div className="flex-1 overflow-y-auto px-6 pb-8 lg:px-8" data-project-overview={selectedProject.id}>
-              <div className="mx-auto flex max-w-5xl flex-col gap-5">
-                {conflicts.length > 0 && !selectedConflict && <PortConflictBanner conflicts={conflicts} />}
                 <ProjectCard
                   key={selectedProject.id}
                   project={selectedProject}
                   status={projectStatuses[selectedProject.id] || 'stopped'}
                   runtime={runtimes[selectedProject.id]}
-                  conflict={selectedConflict}
+                  conflicts={selectedConflicts}
                   onStart={handleStart}
                   onStop={handleStop}
                   onRestart={handleRestart}
                   onOpenBrowser={handleOpenBrowser}
+                  onSetDefaultService={setDefaultService}
                   onRevealPath={handleRevealPath}
-                  onOpenLogs={() => { flushLogs(); setActiveLogProject(selectedProject); }}
-                  onEdit={() => setProjectForm({ project: selectedProject })}
+                  onOpenTerminal={() => selectTerminalSlot(selectedProject.id, activeSlots[selectedProject.id] ?? 1)}
+                  onOpenLogs={id => { flushLogs(); setActiveLogTarget(id); setActiveLogProject(selectedProject); }}
+                  onClearLogs={() => handleClearLogs(selectedProject.id)}
+                  onEdit={focusPort => setProjectForm({ project: selectedProject, focusPort })}
                   onDelete={() => setDeleteProject(selectedProject)}
                   onRunCommand={command => { void handleRunCommand(selectedProject.id, command); }}
                 />
-              </div>
-            </div>
           ) : null}
         </main>
 
@@ -675,6 +687,7 @@ export function App() {
         {projectForm && <ProjectFormDialog
           project={projectForm.project}
           initialInspection={projectForm.inspection}
+          focusPort={projectForm.focusPort}
           projects={projects}
           groups={groups}
           onCreateGroup={addGroup}
@@ -710,6 +723,7 @@ export function App() {
         {activeLogProject && (
           <TerminalLogsModal
             project={activeLogProject}
+            focusEntry={activeLogTarget}
             onClose={() => setActiveLogProject(null)}
             onClear={() => handleClearLogs(activeLogProject.id as string)}
           />

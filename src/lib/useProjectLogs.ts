@@ -1,5 +1,6 @@
 import { useCallback, useSyncExternalStore } from 'react';
 import type { LogEntry } from '../types';
+import { DASHBOARD_LOG_LIMIT } from './dashboard';
 
 type IncomingEntry = Pick<LogEntry, 'text' | 'stream'>;
 interface LogStore {
@@ -39,7 +40,7 @@ function flush() {
   if (!batches.size) return;
   if (debugMetrics) debugMetrics.stateFlushes++;
   for (const [projectId, entries] of batches) {
-    store.lines.set(projectId, [...(store.lines.get(projectId) ?? emptyLines), ...entries].slice(-800));
+    store.lines.set(projectId, [...(store.lines.get(projectId) ?? emptyLines), ...entries].slice(-DASHBOARD_LOG_LIMIT));
     notify(projectId);
   }
 }
@@ -48,7 +49,7 @@ function enqueue(projectId: string, entries: IncomingEntry[]) {
   if (!entries.length) return;
   const timestamp = Date.now();
   const incoming = entries.map(entry => ({ ...entry, projectId, timestamp, id: String(++store.nextId) }));
-  store.pending.set(projectId, [...(store.pending.get(projectId) ?? emptyLines), ...incoming].slice(-800));
+  store.pending.set(projectId, [...(store.pending.get(projectId) ?? emptyLines), ...incoming].slice(-DASHBOARD_LOG_LIMIT));
   if (debugMetrics) debugMetrics.linesReceived += entries.length;
   if (store.timer === undefined) store.timer = setTimeout(flush, 100);
 }

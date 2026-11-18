@@ -12,6 +12,7 @@ mod shell_env;
 mod projects;
 mod processes;
 mod lifecycle;
+mod dashboard;
 mod logs;
 mod quit;
 mod tray;
@@ -40,6 +41,10 @@ pub struct ProjectConfig {
     pub path: String,
     #[serde(default)]
     pub port: Option<u16>,
+    #[serde(default)]
+    pub services: Vec<projects::Service>,
+    #[serde(default = "projects::default_inject_ports")]
+    pub inject_ports: bool,
     pub start_command: String,
     #[serde(alias = "projectType", rename = "type", default = "default_project_type")]
     pub project_type: Option<String>,
@@ -55,6 +60,14 @@ pub struct ProjectConfig {
     pub pinned: bool,
     #[serde(default)]
     pub archived: bool,
+}
+
+impl ProjectConfig {
+    pub fn ports(&self) -> impl Iterator<Item = u16> + '_ {
+        self.port.into_iter().filter(|_| self.services.is_empty())
+            .chain(self.services.iter().filter_map(|service| service.port))
+            .filter(|port| *port > 0)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -172,11 +185,14 @@ pub fn init_db(conn: &Connection) -> Result<(), rusqlite::Error> {
         ("env", "TEXT"), ("commands", "TEXT"), ("auto_open", "INTEGER NOT NULL DEFAULT 0"),
         ("group_id", "TEXT REFERENCES groups(id) ON DELETE SET NULL"),
         ("pinned", "INTEGER NOT NULL DEFAULT 0"), ("archived", "INTEGER NOT NULL DEFAULT 0"),
+        ("services", "TEXT NOT NULL DEFAULT '[]'"), ("inject_ports", "INTEGER NOT NULL DEFAULT 1"),
     ] {
         if !columns.contains(column) {
             transaction.execute(&format!("ALTER TABLE projects ADD COLUMN {column} {definition}"), [])?;
         }
     }
+    projects::migrate_service_keys(&transaction)?;
+    dashboard::migrate(&transaction)?;
     transaction.commit()
 }
 
@@ -193,11 +209,9 @@ fn expand_tilde(path_str: &str) -> String {
 fn calculate_conflicts(projects: &[ProjectConfig]) -> Vec<PortConflict> {
     let mut port_map: HashMap<u16, Vec<(String, String)>> = HashMap::new();
     for p in projects {
-        if let Some(port) = p.port {
-            if port > 0 {
-                let display = p.display_name.clone().unwrap_or_else(|| p.name.clone());
-                port_map.entry(port).or_default().push((p.id.clone(), display));
-            }
+        for port in p.ports().collect::<HashSet<_>>() {
+            let display = p.display_name.clone().unwrap_or_else(|| p.name.clone());
+            port_map.entry(port).or_default().push((p.id.clone(), display));
         }
     }
 
@@ -255,7 +269,7 @@ pub fn get_projects_sync() -> Result<ProjectsResponse, String> {
 
 fn read_projects(conn: &Connection) -> Result<Vec<ProjectConfig>, String> {
     let mut stmt = conn
-        .prepare("SELECT id, name, display_name, description, path, port, start_command, type, env, commands, auto_open, group_id, pinned, archived FROM projects ORDER BY sort_order IS NULL, sort_order, created_at, id")
+        .prepare("SELECT id, name, display_name, description, path, port, start_command, type, env, commands, auto_open, group_id, pinned, archived, services, inject_ports FROM projects ORDER BY sort_order IS NULL, sort_order, created_at, id")
         .map_err(|e| format!("查询失败: {}", e))?;
 
     let project_iter = stmt
@@ -265,9 +279,12 @@ fn read_projects(conn: &Connection) -> Result<Vec<ProjectConfig>, String> {
             let id: String = row.get(0)?;
             let env: Option<String> = row.get(8).unwrap_or(None);
             let commands: Option<String> = row.get(9).unwrap_or(None);
+            let services: String = row.get(14)?;
             Ok(ProjectConfig {
                 env: projects::parse_list(env.as_deref(), &id, "env"),
                 commands: projects::parse_list(commands.as_deref(), &id, "commands"),
+                services: projects::parse_list(Some(&services), &id, "services"),
+                inject_ports: row.get(15)?,
                 auto_open: row.get::<_, i64>(10).unwrap_or(0) != 0,
                 group_id: row.get(11)?,
                 pinned: row.get(12)?,
@@ -328,20 +345,36 @@ fn update_project(app: AppHandle, id: String, project: ProjectDraft) -> Result<P
 }
 
 #[tauri::command]
+fn set_default_service(app: AppHandle, id: String, service_id: String) -> Result<(), String> {
+    projects::set_default_service_row(&open_project_db()?, &id, &service_id)?;
+    tray::refresh(&app);
+    Ok(())
+}
+
+#[tauri::command]
 async fn delete_project(
     app: AppHandle,
     id: String,
     state: State<'_, ProcessMap>,
     terminals: State<'_, terminal::TerminalManager>,
+    external_runs: State<'_, dashboard::ExternalRuns>,
 ) -> Result<(), String> {
     let operation = lifecycle::operation(&state, &id).await;
     let _guard = operation.lock().await;
     lifecycle::stop_managed(&app, &id, &state, false).await?;
     let terminals = terminals.inner().clone();
+    let external_runs = external_runs.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         terminals.close(&id);
-        open_project_db()?.execute("DELETE FROM projects WHERE id = ?1", params![id])
-            .map_err(|e| format!("删除项目失败: {}", e))?;
+        let mut conn = open_project_db()?;
+        let mut delete = || -> rusqlite::Result<()> {
+            let tx = conn.transaction()?;
+            tx.execute("DELETE FROM project_last_runs WHERE project_id = ?1", params![id])?;
+            tx.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
+            tx.commit()
+        };
+        delete().map_err(|e| format!("删除项目失败: {}", e))?;
+        external_runs.remove(&id);
         Ok::<_, String>(())
     }).await.map_err(|err| format!("删除项目失败：{err}"))??;
     tray::refresh(&app);
@@ -364,6 +397,24 @@ async fn inspect_project_dir(path: String, exclude_id: Option<String>) -> Result
     }).await.map_err(|err| format!("检查项目目录失败：{err}"))?
 }
 
+#[tauri::command]
+async fn check_project_port_standard(path: String, start_command: String, services: Vec<projects::Service>) -> Result<projects::PortStandardCheck, String> {
+    tauri::async_runtime::spawn_blocking(move || projects::check_port_standard(&path, &start_command, services))
+        .await.map_err(|err| format!("检查启动标准失败：{err}"))?
+}
+
+#[tauri::command]
+async fn preview_project_standard_script(path: String, services: Vec<projects::Service>) -> Result<projects::StandardScript, String> {
+    tauri::async_runtime::spawn_blocking(move || projects::standard_script_preview(&path, services))
+        .await.map_err(|err| format!("预览启动脚本失败：{err}"))?
+}
+
+#[tauri::command]
+async fn generate_project_standard_script(path: String, services: Vec<projects::Service>, preview: projects::StandardScript) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || projects::write_standard_script(&path, services, preview))
+        .await.map_err(|err| format!("生成启动脚本失败：{err}"))?
+}
+
 pub fn check_port_in_use_sync(port: u16) -> (bool, Option<u32>) {
     if processes::probe_loopback(port) {
         return (true, None);
@@ -384,14 +435,30 @@ async fn check_port_conflicts(
     exclude_project_id: Option<String>,
     state: State<'_, ProcessMap>,
 ) -> Result<PortConflictCheck, String> {
-    let root = {
+    let info = {
         let data = state.lock().await;
-        exclude_project_id.as_ref().and_then(|id| data.managed.get(id).map(|info| info.root()))
+        exclude_project_id.as_ref().and_then(|id| data.managed.get(id).cloned())
     };
     tauri::async_runtime::spawn_blocking(move || {
-        let managed_pids = root.as_ref().map(processes::managed_pids).unwrap_or_default();
+        let managed_pids = info.as_ref().map(lifecycle::ProcessInfo::pids).unwrap_or_default();
         projects::check_port_conflicts(&open_project_db()?, port, exclude_project_id.as_deref(), &managed_pids)
     }).await.map_err(|err| format!("检查端口失败：{err}"))?
+}
+
+#[tauri::command]
+async fn check_service_port_conflicts(
+    ports: Vec<u16>,
+    exclude_project_id: Option<String>,
+    state: State<'_, ProcessMap>,
+) -> Result<HashMap<u16, PortConflictCheck>, String> {
+    let info = {
+        let data = state.lock().await;
+        exclude_project_id.as_ref().and_then(|id| data.managed.get(id).cloned())
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let managed_pids = info.as_ref().map(lifecycle::ProcessInfo::pids).unwrap_or_default();
+        projects::check_ports(&open_project_db()?, &ports, exclude_project_id.as_deref(), &managed_pids)
+    }).await.map_err(|err| format!("检查服务端口失败：{err}"))?
 }
 
 #[tauri::command]
@@ -441,6 +508,7 @@ pub fn run() {
         .plugin(autostart::plugin())
         .manage(autostart::AutostartState::default())
         .manage(process_map)
+        .manage(dashboard::ExternalRuns::default())
         .manage(quit::QuitPending::default())
         .manage(tray::TrayState::default())
         .setup(|app| {
@@ -463,6 +531,9 @@ pub fn run() {
         });
     let commands: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
         get_projects,
+        dashboard::dashboard_snapshot,
+        dashboard::dashboard_health,
+        dashboard::dashboard_release_port,
         add_project,
         reorder_projects,
         sidebar::add_group,
@@ -472,12 +543,17 @@ pub fn run() {
         sidebar::move_project,
         sidebar::set_project_flags,
         update_project,
+        set_default_service,
         delete_project,
         inspect_project_dir,
+        check_project_port_standard,
+        preview_project_standard_script,
+        generate_project_standard_script,
         lifecycle::get_running_projects,
         lifecycle::get_projects_runtime_status,
         check_port_occupied,
         check_port_conflicts,
+        check_service_port_conflicts,
         lifecycle::start_project,
         lifecycle::stop_project,
         lifecycle::stop_all_projects,
@@ -502,6 +578,8 @@ pub fn run() {
         terminal::terminal_write_bytes,
         terminal::terminal_resize,
         git::git_info,
+        git::dashboard_git,
+        git::dashboard_open_editor,
         #[cfg(debug_assertions)]
         debug_e2e::e2e_report,
         #[cfg(debug_assertions)]
@@ -608,6 +686,7 @@ mod tests {
         init_db(&conn).unwrap();
         let old = read_projects(&conn).unwrap().remove(0);
         assert!(old.env.is_empty() && old.commands.is_empty() && !old.auto_open);
+        assert!(old.services.is_empty() && old.inject_ports);
         conn.execute("UPDATE projects SET env='[{\"key\":\"A\",\"value\":\"B\"}]', commands='broken', auto_open=1", []).unwrap();
         init_db(&conn).unwrap();
         init_db(&conn).unwrap();
@@ -717,6 +796,8 @@ mod tests {
                 description: None,
                 path: "~/Projects/p1".to_string(),
                 port: Some(5173),
+                services: Vec::new(),
+                inject_ports: true,
                 start_command: "npm run dev".to_string(),
                 project_type: Some("web".to_string()),
                 env: Vec::new(), commands: Vec::new(), auto_open: false,
@@ -729,6 +810,8 @@ mod tests {
                 description: None,
                 path: "~/Projects/p2".to_string(),
                 port: Some(5174),
+                services: Vec::new(),
+                inject_ports: true,
                 start_command: "npm run dev".to_string(),
                 project_type: Some("web".to_string()),
                 env: Vec::new(), commands: Vec::new(), auto_open: false,
@@ -749,6 +832,8 @@ mod tests {
                 description: None,
                 path: "~/Projects/p1".to_string(),
                 port: Some(5173),
+                services: Vec::new(),
+                inject_ports: true,
                 start_command: "npm run dev".to_string(),
                 project_type: Some("web".to_string()),
                 env: Vec::new(), commands: Vec::new(), auto_open: false,
@@ -761,6 +846,8 @@ mod tests {
                 description: None,
                 path: "~/Projects/p2".to_string(),
                 port: Some(5173),
+                services: Vec::new(),
+                inject_ports: true,
                 start_command: "npm run dev".to_string(),
                 project_type: Some("web".to_string()),
                 env: Vec::new(), commands: Vec::new(), auto_open: false,

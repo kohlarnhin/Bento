@@ -62,7 +62,7 @@ impl TrayView {
                         .filter(|name| !name.is_empty())
                         .unwrap_or(&project.name)
                         .clone(),
-                    port: info.port,
+                    port: if project.services.is_empty() { info.port } else { project.port },
                     starting: info.phase == Phase::Starting,
                 });
             }
@@ -367,6 +367,8 @@ mod tests {
             description: None,
             path: "/tmp".into(),
             port: None,
+            services: Vec::new(),
+            inject_ports: true,
             start_command: "sleep 1".into(),
             project_type: Some("app".into()),
                 env: Vec::new(), commands: Vec::new(), auto_open: false,

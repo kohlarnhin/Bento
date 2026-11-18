@@ -15,6 +15,7 @@ import sys
 import os
 import sqlite3
 import argparse
+import json
 import shutil
 from pathlib import Path
 
@@ -66,6 +67,8 @@ def init_db(conn):
             ("group_id", "TEXT REFERENCES groups(id) ON DELETE SET NULL"),
             ("pinned", "INTEGER NOT NULL DEFAULT 0"),
             ("archived", "INTEGER NOT NULL DEFAULT 0"),
+            ("services", "TEXT NOT NULL DEFAULT '[]'"),
+            ("inject_ports", "INTEGER NOT NULL DEFAULT 1"),
         ]:
             if column not in cols:
                 conn.execute(f"ALTER TABLE projects ADD COLUMN {column} {definition}")
@@ -92,16 +95,22 @@ def resolve_group(conn, name):
     conn.execute("INSERT INTO groups (id,name,sort_order) VALUES (?,?,(SELECT COALESCE(MAX(sort_order),-1)+1 FROM groups))", (group_id, name))
     return group_id
 
+def port_project(conn, port, exclude_id=None):
+    return conn.execute("""
+        SELECT p.id, p.name, p.display_name FROM projects p
+        WHERE (?2 IS NULL OR p.id != ?2) AND (p.port = ?1 OR EXISTS (
+            SELECT 1 FROM json_tree(CASE WHEN json_valid(p.services) THEN p.services ELSE '[]' END) j
+            WHERE j.key = 'port' AND j.type = 'integer' AND j.atom = ?1
+        )) ORDER BY p.id LIMIT 1
+    """, (port, exclude_id)).fetchone()
+
 def ensure_unique_port(conn, port, exclude_id=None):
     if port is None:
         return
     if not 1 <= port <= 65535:
         print("❌ 错误：端口必须是 1–65535 之间的整数。", file=sys.stderr)
         sys.exit(1)
-    conflict = conn.execute(
-        "SELECT id, name, display_name FROM projects WHERE port = ? AND (? IS NULL OR id != ?)",
-        (port, exclude_id, exclude_id),
-    ).fetchone()
+    conflict = port_project(conn, port, exclude_id)
     if conflict:
         display = conflict['display_name'] or conflict['name']
         print(f"❌ 错误：端口 {port} 已被项目「{display}」(ID: {conflict['id']}) 占用！各项目端口必须唯一，请更换端口。", file=sys.stderr)
@@ -138,9 +147,7 @@ def cmd_list(args):
 
 def cmd_check_port(args):
     conn = get_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT id, name, display_name FROM projects WHERE port = ?", (args.port,))
-    row = cur.fetchone()
+    row = port_project(conn, args.port)
     if row:
         display = row['display_name'] or row['name']
         print(f"❌ 端口 {args.port} 已被占用！被项目「{display}」(ID: {row['id']}) 配置。不可重复使用。")
@@ -212,16 +219,34 @@ def cmd_update(args):
     new_command = args.command if args.command is not None else existing['start_command']
     new_type = args.type if args.type is not None else (existing['type'] if 'type' in existing.keys() else 'web')
 
-    # Recheck unchanged ports too, so legacy duplicate configurations cannot persist.
-    ensure_unique_port(conn, new_port, args.id)
+    try:
+        services = json.loads(existing['services'])
+    except (TypeError, ValueError):
+        services = []
+    if services:
+        primary = next((service for service in services if service.get('openWeb')), None)
+        if args.port is not None:
+            if not primary:
+                print("❌ 错误：请先在 Bento 中选择用于打开网页的服务。", file=sys.stderr)
+                sys.exit(1)
+            primary['port'] = new_port
+        ports = [service['port'] for service in services if service.get('port') is not None]
+        if len(ports) != len(set(ports)):
+            print("❌ 错误：同一项目的服务端口必须唯一。", file=sys.stderr)
+            sys.exit(1)
+        for port in ports:
+            ensure_unique_port(conn, port, args.id)
+    else:
+        ensure_unique_port(conn, new_port, args.id)
 
     with conn:
         group_id = resolve_group(conn, args.group) if args.group is not None else existing['group_id']
         conn.execute("""
             UPDATE projects
-            SET name = ?, display_name = ?, description = ?, path = ?, port = ?, start_command = ?, type = ?, group_id = ?, updated_at = CURRENT_TIMESTAMP
+            SET name = ?, display_name = ?, description = ?, path = ?, port = ?, start_command = ?, type = ?, group_id = ?, services = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
-        """, (new_name, new_display, new_desc, new_path, new_port, new_command, new_type, group_id, args.id))
+        """, (new_name, new_display, new_desc, new_path, new_port, new_command, new_type, group_id,
+              json.dumps(services, ensure_ascii=False) if services else existing['services'], args.id))
 
     print(f"✅ 成功更新项目「{args.id}」！")
     print(f"   类型: {new_type}, 端口: {new_port}, 路径: {new_path}, 启动命令: {new_command}")

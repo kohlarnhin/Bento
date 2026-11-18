@@ -1,6 +1,11 @@
-use crate::{get_projects_sync, logs, processes, shell_env, LogPayload, RunningProjectInfo};
+use crate::{
+    dashboard, get_projects_sync, logs, processes, projects, shell_env, LogPayload, ProjectConfig,
+    RunningProjectInfo,
+};
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, Read};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -33,6 +38,9 @@ pub struct ProcessInfo {
     port: Option<u16>,
     phase: Phase,
     identity: Option<processes::ProcessIdentity>,
+    services: Vec<projects::Service>,
+    tree: Option<Arc<processes::TrackedTree>>,
+    pub run: dashboard::Run,
 }
 impl ProcessInfo {
     pub fn root(&self) -> processes::ManagedRoot {
@@ -42,6 +50,45 @@ impl ProcessInfo {
             identity: self.identity,
         }
     }
+
+    pub fn pids(&self) -> HashSet<u32> {
+        match &self.tree {
+            Some(tree) => tree
+                .capture(
+                    &processes::process_table(),
+                    pids_on_ports(self.configured_ports(), &processes::listening_ports()),
+                )
+                .pids()
+                .collect(),
+            None => processes::managed_pids(&self.root()),
+        }
+    }
+
+    pub fn metrics_pids(&self, rows: &[processes::ProcessRow], listeners: &HashMap<u16, Vec<u32>>) -> HashSet<u32> {
+        let tree = match &self.tree {
+            Some(tree) => tree.capture(rows, pids_on_ports(self.configured_ports(), listeners)),
+            None => Arc::new(processes::ProcessTree::for_root(&self.root(), rows)),
+        };
+        tree.pids().collect()
+    }
+
+    fn configured_ports(&self) -> impl Iterator<Item = u16> + '_ {
+        self.port
+            .into_iter()
+            .chain(self.services.iter().filter_map(|service| service.port))
+    }
+}
+
+fn pids_on_ports(
+    ports: impl IntoIterator<Item = u16>,
+    listeners: &HashMap<u16, Vec<u32>>,
+) -> Vec<u32> {
+    ports
+        .into_iter()
+        .filter_map(|port| listeners.get(&port))
+        .flatten()
+        .copied()
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -127,7 +174,25 @@ pub struct ProjectRuntimeStatus {
     pid: Option<u32>,
     exit_code: Option<i32>,
     exit_signal: Option<i32>,
+    started_at: Option<u64>,
     revision: u64,
+    services: Vec<ServiceRuntimeStatus>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServiceRuntimeStatus {
+    service_id: String,
+    port: Option<u16>,
+    listening: bool,
+    owner: Option<ServicePortOwner>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServicePortOwner {
+    pid: Option<u32>,
+    in_project: bool,
 }
 
 fn compute_status(
@@ -162,8 +227,49 @@ fn compute_status(
         pid: managed.map(|info| info.pid).or(listener.1),
         exit_code: failure.and_then(|exit| exit.code),
         exit_signal: failure.and_then(|exit| exit.signal),
+        started_at: managed.map(|info| info.run.started_at),
         revision,
+        services: Vec::new(),
     }
+}
+
+fn service_status(
+    service: &projects::Service,
+    listeners: &HashMap<u16, Vec<u32>>,
+    owns: impl Fn(u32) -> bool,
+) -> (ServiceRuntimeStatus, Option<u32>) {
+    let mut state = ServiceRuntimeStatus {
+        service_id: service.id.clone(),
+        port: service.port,
+        listening: false,
+        owner: None,
+    };
+    let Some(port) = service.port else {
+        return (state, None);
+    };
+    let pids = listeners.get(&port).map_or(&[][..], Vec::as_slice);
+    let mut owned = None;
+    let mut foreign = None;
+    for &pid in pids {
+        if owns(pid) {
+            owned.get_or_insert(pid);
+        } else {
+            foreign.get_or_insert(pid);
+        }
+    }
+    if let Some(pid) = foreign.or(owned) {
+        state.owner = Some(ServicePortOwner {
+            pid: Some(pid),
+            in_project: foreign.is_none(),
+        });
+    } else if processes::probe_loopback(port) {
+        state.owner = Some(ServicePortOwner {
+            pid: None,
+            in_project: false,
+        });
+    }
+    state.listening = state.owner.is_some();
+    (state, owned)
 }
 
 pub fn log(app: &AppHandle, id: &str, text: String) {
@@ -178,8 +284,27 @@ pub fn log(app: &AppHandle, id: &str, text: String) {
         },
     );
 }
-fn emit_status(app: &AppHandle, data: &RuntimeState, id: &str, port: Option<u16>) {
-    let _ = app.emit("project-status", data.status(id, port, (false, None)));
+fn emit_status(
+    app: &AppHandle,
+    data: &RuntimeState,
+    id: &str,
+    port: Option<u16>,
+    services: &[projects::Service],
+) {
+    let mut status = data.status(id, port, (false, None));
+    status.services = services
+        .iter()
+        .map(|service| ServiceRuntimeStatus {
+            service_id: service.id.clone(),
+            port: service.port,
+            listening: false,
+            owner: None,
+        })
+        .collect();
+    if !status.services.is_empty() {
+        status.is_port_in_use = false;
+    }
+    let _ = app.emit("project-status", status);
     crate::tray::refresh(app);
 }
 
@@ -225,10 +350,73 @@ pub async fn get_projects_runtime_status(
     tauri::async_runtime::spawn_blocking(move || {
         let projects = get_projects_sync()?.projects;
         let listeners = processes::listening_ports();
+        let mut managed_by_pid = HashMap::new();
+        if projects.iter().any(|project| !project.services.is_empty()) && !managed.is_empty() {
+            let rows = processes::process_table();
+            for (id, info) in &managed {
+                let pids: Vec<_> = if let Some(tree) = &info.tree {
+                    tree.capture(&rows, pids_on_ports(info.configured_ports(), &listeners))
+                        .pids()
+                        .collect()
+                } else {
+                    processes::managed_pids(&info.root()).into_iter().collect()
+                };
+                managed_by_pid.extend(pids.into_iter().map(|pid| (pid, id.as_str())));
+            }
+        }
         Ok(projects
             .into_iter()
             .map(|project| {
                 let info = managed.get(&project.id);
+                let revision = *revisions.get(&project.id).unwrap_or(&0);
+                let failure = failures.get(&project.id);
+                if !project.services.is_empty() {
+                    let path = std::path::PathBuf::from(crate::expand_tilde(&project.path))
+                        .canonicalize()
+                        .ok();
+                    let mut owned_pid = None;
+                    let services: Vec<_> = project
+                        .services
+                        .iter()
+                        .map(|service| {
+                            let (status, owned) = service_status(service, &listeners, |pid| {
+                                if let Some(owner) = managed_by_pid.get(&pid) {
+                                    return *owner == project.id;
+                                }
+                                info.is_none()
+                                    && path
+                                        .as_ref()
+                                        .is_some_and(|path| processes::cwd_matches(pid, path))
+                            });
+                            owned_pid = owned_pid.or(owned);
+                            status
+                        })
+                        .collect();
+                    let root_alive = info.is_some_and(|info| {
+                        info.identity.is_some() && processes::identity(info.pid) == info.identity
+                    });
+                    let mut status = compute_status(
+                        &project.id,
+                        project.port,
+                        info,
+                        failure,
+                        (owned_pid.is_some(), owned_pid),
+                        revision,
+                    );
+                    status.status = if root_alive || owned_pid.is_some() {
+                        "running".into()
+                    } else if info.is_some() {
+                        "starting".into()
+                    } else {
+                        status.status
+                    };
+                    if !root_alive {
+                        status.pid = owned_pid.or(status.pid);
+                    }
+                    status.is_port_in_use = services.iter().any(|service| service.listening);
+                    status.services = services;
+                    return status;
+                }
                 let listener = if info.is_some_and(|info| info.phase == Phase::Running) {
                     (true, info.map(|info| info.pid))
                 } else {
@@ -243,14 +431,7 @@ pub async fn get_projects_runtime_status(
                         })
                         .unwrap_or((false, None))
                 };
-                compute_status(
-                    &project.id,
-                    project.port,
-                    info,
-                    failures.get(&project.id),
-                    listener,
-                    *revisions.get(&project.id).unwrap_or(&0),
-                )
+                compute_status(&project.id, project.port, info, failure, listener, revision)
             })
             .collect())
     })
@@ -267,6 +448,166 @@ pub async fn start_project(
     let operation = operation(&state, &id).await;
     let _guard = operation.lock().await;
     start(&app, &id, state.inner()).await
+}
+
+enum ProjectChild {
+    Pipes(tokio::process::Child),
+    Pty(
+        Box<dyn portable_pty::Child + Send + Sync>,
+        Box<dyn Read + Send>,
+    ),
+}
+
+fn spawn_project_child(
+    launch_marker: Option<&str>,
+    path: &str,
+    script: &str,
+    environment: Option<HashMap<String, String>>,
+) -> Result<(ProjectChild, u32), String> {
+    let args = [if environment.is_some() { "-fc" } else { "-lc" }, script];
+    if let Some(marker) = launch_marker {
+        let pair = native_pty_system()
+            .openpty(PtySize::default())
+            .map_err(|err| format!("创建项目 PTY 失败：{err}"))?;
+        let reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|err| format!("读取项目 PTY 失败：{err}"))?;
+        let mut command = CommandBuilder::new("/bin/zsh");
+        command.args(args);
+        command.cwd(path);
+        if let Some(env) = environment {
+            command.env_clear();
+            for (key, value) in env {
+                command.env(key, value);
+            }
+        }
+        crate::terminal::configure_environment(&mut command);
+        command.env(processes::MANAGED_RUN_ENV, marker);
+        let child = pair
+            .slave
+            .spawn_command(command)
+            .map_err(|err| format!("启动项目 PTY 失败：{err}"))?;
+        let pid = child.process_id().ok_or("无法获取项目 PTY 的 PID")?;
+        Ok((ProjectChild::Pty(child, reader), pid))
+    } else {
+        let mut command = std::process::Command::new("zsh");
+        command.args(args);
+        if let Some(env) = environment {
+            command.env_clear().envs(env);
+        } else {
+            for (key, _) in std::env::vars_os() {
+                if key.to_str().is_some_and(shell_env::should_strip) {
+                    command.env_remove(key);
+                }
+            }
+        }
+        command
+            .process_group(0)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let child = tokio::process::Command::from(command)
+            .spawn()
+            .map_err(|err| format!("启动进程失败：{err}"))?;
+        let pid = child.id().ok_or("无法获取子进程 PID")?;
+        Ok((ProjectChild::Pipes(child), pid))
+    }
+}
+
+impl ProjectChild {
+    async fn wait(
+        self,
+        sender: tokio::sync::mpsc::Sender<logs::Entry>,
+    ) -> (Option<i32>, Option<i32>) {
+        match self {
+            Self::Pty(mut child, reader) => {
+                tauri::async_runtime::spawn_blocking(move || {
+                    let mut reader = std::io::BufReader::new(reader);
+                    let mut line = Vec::new();
+                    while let Ok(read) = reader.read_until(b'\n', &mut line) {
+                        if read == 0 {
+                            break;
+                        }
+                        let text = String::from_utf8_lossy(&line)
+                            .trim_end_matches(['\r', '\n'])
+                            .to_owned();
+                        if sender
+                            .blocking_send(logs::Entry {
+                                text,
+                                stream: "stdout".into(),
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                        line.clear();
+                    }
+                });
+                tauri::async_runtime::spawn_blocking(move || {
+                    let status = child.wait().ok()?;
+                    let signal = status.signal().and_then(|name| {
+                        (1..32).find(|&number| {
+                            let description = unsafe { libc::strsignal(number) };
+                            !description.is_null()
+                                && unsafe { std::ffi::CStr::from_ptr(description) }.to_bytes()
+                                    == name.as_bytes()
+                        })
+                    });
+                    Some((
+                        status
+                            .signal()
+                            .is_none()
+                            .then_some(status.exit_code() as i32),
+                        signal,
+                    ))
+                })
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+            }
+            Self::Pipes(mut child) => {
+                for (stream, reader) in [
+                    (
+                        "stdout",
+                        child.stdout.take().map(|read| {
+                            Box::new(read) as Box<dyn tokio::io::AsyncRead + Send + Unpin>
+                        }),
+                    ),
+                    (
+                        "stderr",
+                        child.stderr.take().map(|read| {
+                            Box::new(read) as Box<dyn tokio::io::AsyncRead + Send + Unpin>
+                        }),
+                    ),
+                ] {
+                    let Some(reader) = reader else { continue };
+                    let sender = sender.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let mut lines = BufReader::new(reader).lines();
+                        while let Ok(Some(text)) = lines.next_line().await {
+                            if sender
+                                .send(logs::Entry {
+                                    text,
+                                    stream: stream.into(),
+                                })
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
+                }
+                drop(sender);
+                let status = child.wait().await.ok();
+                (
+                    status.and_then(|status| status.code()),
+                    status.and_then(|status| status.signal()),
+                )
+            }
+        }
+    }
 }
 
 async fn start(app: &AppHandle, id: &str, state: &ProcessMap) -> Result<(), String> {
@@ -288,13 +629,17 @@ async fn start(app: &AppHandle, id: &str, state: &ProcessMap) -> Result<(), Stri
         {
             return Err("项目端口存在重复冲突，请更换端口后再启动".into());
         }
-        if let Some(port) = project.port {
-            let (in_use, pid) = crate::check_port_in_use_sync(port);
-            if in_use {
-                let pid = pid.map(|pid| format!("（PID: {pid}）")).unwrap_or_default();
-                return Err(format!(
-                    "端口 {port} 当前已被占用{pid}，请先确认并结束外部进程"
-                ));
+        let ports: Vec<_> = project.ports().collect();
+        if !ports.is_empty() {
+            let listeners = processes::listening_ports();
+            for port in ports {
+                let pid = listeners.get(&port).and_then(|pids| pids.first());
+                if pid.is_some() || processes::probe_loopback(port) {
+                    let pid = pid.map(|pid| format!("（PID: {pid}）")).unwrap_or_default();
+                    return Err(format!(
+                        "端口 {port} 当前已被占用{pid}，请先确认并结束外部进程"
+                    ));
+                }
             }
         }
         Ok(project)
@@ -305,6 +650,7 @@ async fn start(app: &AppHandle, id: &str, state: &ProcessMap) -> Result<(), Stri
     if !std::path::Path::new(&path).is_dir() {
         return Err(format!("项目目录不存在：{}", project.path));
     }
+    let _ = app.emit("project-run-started", id);
     log(app, id, format!("[Bento] 正在启动项目: {}", project.name));
     log(app, id, format!("[Bento] 工作目录: {path}"));
     log(
@@ -312,58 +658,65 @@ async fn start(app: &AppHandle, id: &str, state: &ProcessMap) -> Result<(), Stri
         id,
         format!("[Bento] 执行命令: {}", project.start_command),
     );
-    let script = processes::launch_script(&path, &project.start_command, &project.env)?;
+    let script = processes::launch_script(
+        &path,
+        &project.start_command,
+        &projects::launch_environment(&project),
+    )?;
     let environment = tauri::async_runtime::spawn_blocking(shell_env::capture)
         .await
         .unwrap_or_else(|err| Err(format!("读取环境任务失败：{err}")));
-    let mut command = std::process::Command::new("zsh");
-    match environment {
-        Ok(env) => {
-            command.args(["-f", "-c", &script]).env_clear().envs(env);
-        }
+    let environment = match environment {
+        Ok(env) => Some(env),
         Err(reason) => {
             log(app, id, format!("[Bento] 读取终端环境失败（{reason}），已改用登录 shell 启动，.zshrc 中的设置可能不会生效"));
-            command.args(["-lc", &script]);
-            for (key, _) in std::env::vars_os() {
-                if key.to_str().is_some_and(shell_env::should_strip) {
-                    command.env_remove(key);
-                }
-            }
+            None
         }
-    }
-    command
-        .process_group(0)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let (mut child, pid) = {
+    };
+    let multi_service = !project.services.is_empty();
+    let marker = multi_service.then(processes::new_launch_marker);
+    let run = dashboard::Run::new();
+    let (child, pid, tree) = {
         let mut data = state.lock().await;
         if SHUTTING_DOWN.load(Ordering::SeqCst) {
             return Err("Bento 正在退出".into());
         }
         data.clear_failure(id);
-        let child = tokio::process::Command::from(command)
-            .spawn()
-            .map_err(|err| format!("启动进程失败：{err}"))?;
-        let pid = child.id().ok_or("无法获取子进程 PID")?;
+        let (child, pid) = spawn_project_child(marker.as_deref(), &path, &script, environment)?;
+        let root = processes::ManagedRoot {
+            pid,
+            pgid: pid as i32,
+            identity: processes::identity(pid),
+        };
+        let tree = marker.map(|marker| Arc::new(processes::TrackedTree::new(root.clone(), marker)));
         data.managed.insert(
             id.into(),
             ProcessInfo {
                 pid,
                 pgid: pid as i32,
                 port: project.port,
-                phase: Phase::Starting,
-                identity: processes::identity(pid),
+                phase: if multi_service {
+                    Phase::Running
+                } else {
+                    Phase::Starting
+                },
+                identity: root.identity,
+                services: project.services.clone(),
+                tree: tree.clone(),
+                run: run.clone(),
             },
         );
-        emit_status(app, &data, id, project.port);
-        (child, pid)
+        emit_status(app, &data, id, project.port, &project.services);
+        (child, pid, tree)
     };
     let (sender, receiver) = tokio::sync::mpsc::channel(2048);
     let (finish_logs, finished) = tokio::sync::oneshot::channel();
     let log_app = app.clone();
     let log_id = id.to_string();
+    let log_run = run.clone();
     let mut delivery =
         tauri::async_runtime::spawn(logs::aggregate(receiver, finished, move |entries| {
+            log_run.record_logs(&entries);
             #[cfg(debug_assertions)]
             crate::debug_e2e::record_log_batch(entries.len());
             let _ = log_app.emit(
@@ -374,43 +727,17 @@ async fn start(app: &AppHandle, id: &str, state: &ProcessMap) -> Result<(), Stri
                 },
             );
         }));
-    for (stream, reader) in [
-        (
-            "stdout",
-            child
-                .stdout
-                .take()
-                .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
-        ),
-        (
-            "stderr",
-            child
-                .stderr
-                .take()
-                .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
-        ),
-    ] {
-        if let Some(reader) = reader {
-            let sender = sender.clone();
-            tauri::async_runtime::spawn(async move {
-                let mut lines = BufReader::new(reader).lines();
-                while let Ok(Some(text)) = lines.next_line().await {
-                    if sender
-                        .send(logs::Entry {
-                            text,
-                            stream: stream.into(),
-                        })
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            });
-        }
-    }
-    drop(sender);
-    if let Some(port) = project.port {
+    watch_resources(state.clone(), id.into(), pid, project.clone());
+    if let Some(tree) = &tree {
+        watch_service_tree(
+            app.clone(),
+            state.clone(),
+            id.into(),
+            pid,
+            tree.clone(),
+            project.clone(),
+        );
+    } else if let Some(port) = project.port {
         let auto_open = project.auto_open && project.project_type.as_deref() == Some("web");
         let app = app.clone();
         let state = state.clone();
@@ -439,7 +766,7 @@ async fn start(app: &AppHandle, id: &str, state: &ProcessMap) -> Result<(), Stri
                     data.managed.get_mut(&id).unwrap().phase = Phase::Running;
                     data.changed(&id);
                     log(&app, &id, format!("[Bento] 端口 {port} 已就绪"));
-                    emit_status(&app, &data, &id, Some(port));
+                    emit_status(&app, &data, &id, Some(port), &[]);
                     // Still under the pid-match lock: a stopped/replaced start cannot open a URL.
                     if auto_open {
                         if let Err(error) =
@@ -474,16 +801,45 @@ async fn start(app: &AppHandle, id: &str, state: &ProcessMap) -> Result<(), Stri
         if data.owns(id, pid) {
             data.managed.get_mut(id).unwrap().phase = Phase::Running;
             data.changed(id);
-            emit_status(app, &data, id, None);
+            emit_status(app, &data, id, None, &[]);
         }
     }
     let app = app.clone();
     let state = state.clone();
     let id = id.to_string();
     tauri::async_runtime::spawn(async move {
-        let result = child.wait().await;
-        let code = result.as_ref().ok().and_then(|status| status.code());
-        let signal = result.as_ref().ok().and_then(|status| status.signal());
+        let (code, signal) = child.wait(sender).await;
+        run.exit(code, signal);
+        if let Some(tree) = tree {
+            let ports: Vec<_> = project.ports().collect();
+            let grace = Instant::now()
+                + if code == Some(0) {
+                    Duration::from_millis(500)
+                } else {
+                    Duration::ZERO
+                };
+            while state.lock().await.owns(&id, pid) {
+                let tree = tree.clone();
+                let ports = ports.clone();
+                let descendants_alive = tauri::async_runtime::spawn_blocking(move || {
+                    let listeners = if ports.is_empty() {
+                        Vec::new()
+                    } else {
+                        pids_on_ports(ports, &processes::listening_ports())
+                    };
+                    tree.capture(&processes::process_table(), listeners)
+                        .pids()
+                        .next()
+                        .is_some()
+                })
+                .await
+                .unwrap_or(false);
+                if !descendants_alive && Instant::now() >= grace {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
         if tokio::time::timeout(Duration::from_secs(1), &mut delivery)
             .await
             .is_err()
@@ -491,11 +847,15 @@ async fn start(app: &AppHandle, id: &str, state: &ProcessMap) -> Result<(), Stri
             let _ = finish_logs.send(());
             let _ = delivery.await;
         }
-        let mut data = state.lock().await;
-        if !data.exited(&id, pid, code, signal) {
-            return;
+        run.finish_logs();
+        {
+            let mut data = state.lock().await;
+            if !data.exited(&id, pid, code, signal) {
+                return;
+            }
+            emit_status(&app, &data, &id, project.port, &project.services);
         }
-        emit_status(&app, &data, &id, project.port);
+        persist_run(&app, &id, run, project.ports().collect(), false).await;
         let reason = signal
             .map(|signal| format!("信号 {signal}"))
             .unwrap_or_else(|| {
@@ -515,10 +875,168 @@ async fn start(app: &AppHandle, id: &str, state: &ProcessMap) -> Result<(), Stri
             ),
         );
         if code == Some(127) {
-            log(&app, &id, format!("[Bento] 状态码 127 通常表示找不到命令，请确认「{}」在项目终端中能直接运行", project.start_command));
+            log(
+                &app,
+                &id,
+                format!(
+                    "[Bento] 状态码 127 通常表示找不到命令，请确认「{}」在项目终端中能直接运行",
+                    project.start_command
+                ),
+            );
         }
     });
     Ok(())
+}
+
+fn watch_resources(state: ProcessMap, id: String, pid: u32, project: ProjectConfig) {
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let info = state.lock().await.managed.get(&id).filter(|info| info.pid == pid).cloned();
+            let Some(info) = info else { break; };
+            let project = project.clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || dashboard::observe_managed(&project, &info)).await;
+        }
+    });
+}
+
+async fn persist_run(app: &AppHandle, id: &str, run: dashboard::Run, ports: Vec<u16>, stopped: bool) {
+    let key = id.to_owned();
+    let result = tauri::async_runtime::spawn_blocking(move || dashboard::save_run(&key, &run, &ports, stopped)).await;
+    match result {
+        Ok(Ok(())) => { let _ = app.emit("dashboard-run-saved", id); }
+        Ok(Err(error)) => eprintln!("保存上次运行失败 ({id}): {error}"),
+        Err(error) => eprintln!("保存上次运行任务失败 ({id}): {error}"),
+    }
+}
+
+fn watch_service_tree(
+    app: AppHandle,
+    state: ProcessMap,
+    id: String,
+    pid: u32,
+    tree: Arc<processes::TrackedTree>,
+    project: ProjectConfig,
+) {
+    let auto_open = project.auto_open && project.project_type.as_deref() == Some("web");
+    let ports: Vec<_> = project.ports().collect();
+    tauri::async_runtime::spawn(async move {
+        let started = Instant::now();
+        let mut warned = false;
+        let mut pending_port = project.port;
+        while state.lock().await.owns(&id, pid) {
+            let tree = tree.clone();
+            let port = pending_port;
+            let ports = ports.clone();
+            let ready = tauri::async_runtime::spawn_blocking(move || {
+                let listeners = if port.is_some() {
+                    processes::listening_ports()
+                } else {
+                    HashMap::new()
+                };
+                let tree = tree.capture(
+                    &processes::process_table(),
+                    pids_on_ports(ports, &listeners),
+                );
+                port.and_then(|port| listeners.get(&port))
+                    .is_some_and(|pids| pids.iter().any(|&pid| tree.owns(pid)))
+            })
+            .await
+            .unwrap_or(false);
+            let data = state.lock().await;
+            if !data.owns(&id, pid) {
+                break;
+            }
+            if let Some(port) = pending_port {
+                if ready {
+                    pending_port = None;
+                    log(&app, &id, format!("[Bento] 端口 {port} 已就绪"));
+                    if auto_open {
+                        if let Err(error) =
+                            crate::open_url_sync(&format!("http://localhost:{port}"))
+                        {
+                            log(&app, &id, format!("[Bento] 自动打开网页失败：{error}"));
+                        }
+                    }
+                } else if !warned && started.elapsed() >= Duration::from_secs(60) {
+                    warned = true;
+                    log(
+                        &app,
+                        &id,
+                        format!(
+                            "[Bento] 端口 {port} 仍未监听，请确认配置端口与项目实际监听端口一致"
+                        ),
+                    );
+                }
+            }
+            drop(data);
+            tokio::time::sleep(Duration::from_millis(
+                if pending_port.is_some() && !warned {
+                    400
+                } else {
+                    1000
+                },
+            ))
+            .await;
+        }
+    });
+}
+
+fn verify_stopped_ports(
+    ports: &HashSet<u16>,
+    trees: &[Arc<processes::ProcessTree>],
+    tracked: Option<&processes::TrackedTree>,
+) -> (bool, Vec<String>) {
+    if ports.is_empty() {
+        return (true, Vec::new());
+    }
+    let deadline = Instant::now() + Duration::from_millis(600);
+    let mut killed = HashSet::new();
+    let mut messages = Vec::new();
+    loop {
+        let listeners = processes::listening_ports();
+        let tracked = tracked.map(|tree| {
+            tree.capture(
+                &processes::process_table(),
+                pids_on_ports(ports.iter().copied(), &listeners),
+            )
+        });
+        let mut remaining_owned = false;
+        let mut external = Vec::new();
+        for &port in ports {
+            let mut foreign = Vec::new();
+            for &pid in listeners.get(&port).into_iter().flatten() {
+                let tree = tracked.iter().chain(trees).find(|tree| tree.owns(pid));
+                if let Some(tree) = tree {
+                    remaining_owned = true;
+                    if tree.kill_listener(pid) && killed.insert((port, pid)) {
+                        messages.push(format!(
+                            "[Bento] 已补杀仍在监听端口 {port} 的项目子进程 PID {pid}"
+                        ));
+                    }
+                } else {
+                    foreign.push(pid.to_string());
+                }
+            }
+            if !foreign.is_empty() {
+                external.push(format!(
+                    "[Bento] 端口 {port} 仍被外部进程 PID {} 占用",
+                    foreign.join("、")
+                ));
+            } else if !listeners.contains_key(&port) && processes::probe_loopback(port) {
+                external.push(format!("[Bento] 端口 {port} 仍有监听，无法确认进程归属"));
+            }
+        }
+        if Instant::now() >= deadline
+            && (!remaining_owned || Instant::now() >= deadline + Duration::from_millis(600))
+        {
+            messages.extend(external);
+            return (!remaining_owned, messages);
+        }
+        std::thread::sleep(Duration::from_millis(60));
+    }
 }
 
 // Keep captured trees visible to synchronous quit cleanup even while an async stop is in flight.
@@ -537,10 +1055,34 @@ pub async fn stop_managed(
             Ok(())
         };
     };
+    let tracked = info.tree.clone();
     let root = info.root();
-    let trees = tauri::async_runtime::spawn_blocking(move || processes::capture_trees(&[root]))
-        .await
-        .map_err(|err| format!("读取进程树失败：{err}"))?;
+    let sampled = info.clone();
+    let mut ports: HashSet<_> = info.configured_ports().collect();
+    let project_id = id.to_owned();
+    let (trees, ports) = tauri::async_runtime::spawn_blocking(move || {
+        // Include edited ports as well as those used for this launch.
+        if let Ok(response) = get_projects_sync() {
+            if let Some(project) = response
+                .projects
+                .iter()
+                .find(|project| project.id == project_id)
+            {
+                ports.extend(project.ports());
+                dashboard::observe_managed(project, &sampled);
+            }
+        }
+        let trees = match tracked {
+            Some(tree) => vec![tree.capture(
+                &processes::process_table(),
+                pids_on_ports(ports.iter().copied(), &processes::listening_ports()),
+            )],
+            None => processes::capture_trees(&[root]),
+        };
+        (trees, ports)
+    })
+    .await
+    .map_err(|err| format!("读取进程树失败：{err}"))?;
     {
         let mut data = state.lock().await;
         if data.owns(id, info.pid) {
@@ -559,47 +1101,35 @@ pub async fn stop_managed(
             info.pid, info.pgid
         ),
     );
-    tauri::async_runtime::spawn_blocking(move || processes::terminate_trees_blocking(&trees))
-        .await
-        .map_err(|err| format!("停止进程失败：{err}"))?;
-    let remaining = if let Some(port) = info.port {
-        tauri::async_runtime::spawn_blocking(move || {
-            // A new external owner can bind just after the managed root exits.
-            // Native enumeration can outrun that handoff; briefly recheck so
-            // Stop still reports the occupied port without touching its owner.
-            let deadline = Instant::now() + Duration::from_millis(500);
-            loop {
-                let owners = processes::port_pids(port);
-                if !owners.is_empty() || Instant::now() >= deadline {
-                    break owners;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-        })
-            .await
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let tracked = info.tree.clone();
+    let stopped = tauri::async_runtime::spawn_blocking(move || {
+        processes::terminate_trees_blocking(&trees);
+        verify_stopped_ports(&ports, &trees, tracked.as_deref())
+    })
+    .await
+    .map_err(|err| format!("停止进程失败：{err}"));
+    let (released, messages) = stopped.unwrap_or_else(|error| (false, vec![error]));
+    if released {
+        let mut ports: Vec<_> = info.configured_ports().collect();
+        ports.sort_unstable();
+        ports.dedup();
+        info.run.wait_logs().await;
+        persist_run(app, id, info.run.clone(), ports, true).await;
+    }
     {
         let mut data = state.lock().await;
         data.stopping.remove(&info.pid);
+        if !released {
+            data.managed.insert(id.into(), info.clone());
+        }
         data.clear_failure(id);
-        emit_status(app, &data, id, info.port);
+        emit_status(app, &data, id, info.port, &info.services);
     }
-    if let Some(port) = info.port.filter(|_| !remaining.is_empty()) {
-        log(
-            app,
-            id,
-            format!(
-                "[Bento] 端口 {port} 仍被外部进程 PID {} 占用",
-                remaining
-                    .iter()
-                    .map(u32::to_string)
-                    .collect::<Vec<_>>()
-                    .join("、")
-            ),
-        );
+    for message in messages {
+        log(app, id, message);
+    }
+    if !released {
+        return Err("仍有项目子进程监听端口，请再次停止".into());
     }
     log(app, id, "[Bento] 托管进程已停止".into());
     Ok(())
@@ -677,10 +1207,25 @@ pub async fn get_port_owners(id: String) -> Result<Vec<processes::PortOwner>, St
             .into_iter()
             .find(|p| p.id == id)
             .ok_or("未找到项目")?;
-        Ok(project
-            .port
-            .map(|port| processes::port_owners(port, &project.path))
-            .unwrap_or_default())
+        if project.services.is_empty() {
+            return Ok(project
+                .port
+                .map(|port| processes::port_owners(port, &project.path))
+                .unwrap_or_default());
+        }
+        let listeners = processes::listening_ports();
+        let mut pids: Vec<_> = project
+            .ports()
+            .filter_map(|port| listeners.get(&port))
+            .flatten()
+            .copied()
+            .collect();
+        pids.sort_unstable();
+        pids.dedup();
+        Ok(processes::owners_for_pids(pids, Some(&project.path))
+            .into_iter()
+            .filter(|owner| owner.in_project)
+            .collect())
     })
     .await
     .map_err(|err| format!("读取端口进程失败：{err}"))?
@@ -699,39 +1244,64 @@ pub async fn stop_external_process(
         return Err("该项目现已由 Bento 管理，请刷新后停止".into());
     }
     let project_id = id.clone();
-    let port = tauri::async_runtime::spawn_blocking(move || {
+    let (port, services) = tauri::async_runtime::spawn_blocking(move || {
         get_projects_sync()?
             .projects
             .into_iter()
             .find(|p| p.id == project_id)
             .ok_or_else(|| "未找到项目".to_string())
-            .map(|p| p.port)
+            .map(|p| {
+                let mut messages = Vec::new();
+                if p.services.is_empty() {
+                    if let Some(port) = p.port {
+                        messages = processes::stop_external(port, pids);
+                    }
+                } else {
+                    let path = std::path::PathBuf::from(crate::expand_tilde(&p.path))
+                        .canonicalize()
+                        .ok();
+                    let listeners = processes::listening_ports();
+                    for port in p.ports() {
+                        let selected = pids
+                            .iter()
+                            .copied()
+                            .filter(|pid| {
+                                listeners
+                                    .get(&port)
+                                    .is_some_and(|owners| owners.contains(pid))
+                                    && path
+                                        .as_ref()
+                                        .is_some_and(|path| processes::cwd_matches(*pid, path))
+                            })
+                            .collect::<Vec<_>>();
+                        if !selected.is_empty() {
+                            messages.extend(processes::stop_external(port, selected));
+                        }
+                    }
+                }
+                (p.port, (p.services, messages))
+            })
     })
     .await
     .map_err(|err| err.to_string())??;
-    if let Some(port) = port {
-        let messages =
-            tauri::async_runtime::spawn_blocking(move || processes::stop_external(port, pids))
-                .await
-                .map_err(|err| format!("结束外部进程失败：{err}"))?;
-        for message in messages {
-            log(&app, &id, message);
-        }
+    let (services, messages) = services;
+    for message in messages {
+        log(&app, &id, message);
     }
     let mut data = state.lock().await;
     data.clear_failure(&id);
-    emit_status(&app, &data, &id, port);
+    emit_status(&app, &data, &id, port, &services);
     Ok(())
 }
 
 pub fn shutdown(state: &ProcessMap, mut terminal_roots: Vec<processes::ManagedRoot>) {
     SHUTTING_DOWN.store(true, Ordering::SeqCst);
     let deadline = Instant::now() + Duration::from_millis(500);
-    let (roots, mut trees) = loop {
+    let (mut trees, active) = loop {
         if let Ok(mut data) = state.try_lock() {
-            let roots: Vec<_> = data.managed.drain().map(|(_, info)| info.root()).collect();
+            let active: Vec<_> = data.managed.drain().collect();
             let trees: Vec<_> = data.stopping.drain().map(|(_, (_, tree))| tree).collect();
-            break (roots, trees);
+            break (trees, active);
         }
         if Instant::now() >= deadline {
             eprintln!("Bento quit: process state lock timed out");
@@ -739,9 +1309,24 @@ pub fn shutdown(state: &ProcessMap, mut terminal_roots: Vec<processes::ManagedRo
         }
         std::thread::sleep(Duration::from_millis(5));
     };
-    terminal_roots.extend(roots);
+    terminal_roots.extend(active.iter().filter(|(_, info)| info.tree.is_none()).map(|(_, info)| info.root()));
     trees.extend(processes::capture_trees(&terminal_roots));
+    if active.iter().any(|(_, info)| info.tree.is_some()) {
+        let rows = processes::process_table();
+        let listeners = processes::listening_ports();
+        trees.extend(active.iter().filter_map(|(_, info)| {
+            info.tree
+                .as_ref()
+                .map(|tree| tree.capture(&rows, pids_on_ports(info.configured_ports(), &listeners)))
+        }));
+    }
     processes::terminate_trees_blocking(&trees);
+    for (id, info) in active {
+        let ports: Vec<_> = info.configured_ports().collect::<HashSet<_>>().into_iter().collect();
+        if let Err(error) = dashboard::save_run(&id, &info.run, &ports, true) {
+            eprintln!("保存上次运行失败 ({id}): {error}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -754,6 +1339,9 @@ mod tests {
             port: Some(5301),
             phase,
             identity: None,
+            services: Vec::new(),
+            tree: None,
+            run: dashboard::Run::new(),
         }
     }
     #[test]
