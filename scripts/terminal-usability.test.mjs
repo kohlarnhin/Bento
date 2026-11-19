@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { clampTerminalFontSize, createTitlePublisher, normalizeTerminalTitle, terminalsNeedingAttention } from '../src/lib/terminalUsability.ts';
+import { clampTerminalFontSize, createTitlePublisher, firstOpenedTerminalSlot, normalizeTerminalTitle, terminalsNeedingAttention } from '../src/lib/terminalUsability.ts';
+
+test('project navigation takes the earliest opened label, including an exited session', () => {
+  const other = { projectId: 'other', slot: 1, sessionId: 'other' };
+  const placeholder = { projectId: 'project', slot: 1, opening: true };
+  const third = { projectId: 'project', slot: 3, sessionId: 'third', alive: true };
+  const second = { projectId: 'project', slot: 2, sessionId: 'second', alive: false };
+  assert.equal(firstOpenedTerminalSlot('project', [other, placeholder]), undefined);
+  assert.equal(firstOpenedTerminalSlot('project', [third, other, placeholder, second]), 2);
+  assert.equal(firstOpenedTerminalSlot('project', [third, other, placeholder]), 3);
+});
 
 for (const spinner of ['✳', '✶', '✻', '✽', '·', '✢', '⠋', '⠙', '⠸', '⣿', '🌱', '']) {
   test('Title strips spinner ' + spinner, () => {

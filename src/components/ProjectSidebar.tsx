@@ -45,6 +45,7 @@ interface Props {
   loading: boolean;
   projectsLoaded: boolean;
   onSelect: (selection: ProjectSelection) => void;
+  onSelectProject: (projectId: string) => void;
   onSelectTerminal: (projectId: string, slot: number) => void;
   onCreateTerminal: (projectId: string) => Promise<void>;
   onRefresh: () => void;
@@ -213,7 +214,7 @@ function SidebarPort({ project, hideOnHover }: { project: ProjectConfig; hideOnH
   </span>;
 }
 
-export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDropName, groups: projectGroups, filter, onFilterChange, attentionProjects, changedProjects, onQuickSwitch, onUpdateGroup, onReorderGroups, onGroupAction, onProjectFlags, visibleProjects, searchQuery, searchInputRef, onSearchChange, onReorder, reordering, statuses, conflicts, selection, activeSlots, maxPerProject, loading, projectsLoaded, onSelect, onSelectTerminal, onCreateTerminal, onRefresh, onCreate, managedCount, onStopAll, currentVersion, availableVersion, onCheckUpdates, onOpenSettings }: Props) {
+export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDropName, groups: projectGroups, filter, onFilterChange, attentionProjects, changedProjects, onQuickSwitch, onUpdateGroup, onReorderGroups, onGroupAction, onProjectFlags, visibleProjects, searchQuery, searchInputRef, onSearchChange, onReorder, reordering, statuses, conflicts, selection, activeSlots, maxPerProject, loading, projectsLoaded, onSelect, onSelectProject, onSelectTerminal, onCreateTerminal, onRefresh, onCreate, managedCount, onStopAll, currentVersion, availableVersion, onCheckUpdates, onOpenSettings }: Props) {
   recordRender('projectSidebar');
   const [runningCollapsed, setRunningCollapsed] = useState(readRunningCollapsed);
   const [archivedCollapsed, setArchivedCollapsed] = useState(() => {
@@ -419,9 +420,6 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
       if (changed) void onReorder(ids, moved ? { id: current.id, groupId: current.targetGroupId } : undefined);
     }
   };
-  const selectOverview = (id: string) => {
-    onSelect({ projectId: id, view: 'overview' });
-  };
   const projectMenu = (project: ProjectConfig, x: number, y: number) => setMenu({ x, y, items: [
     { label: project.pinned ? '取消置顶' : '置顶项目', icon: project.pinned ? <PinOff /> : <Pin />, onSelect: () => { void onProjectFlags(project.id, { pinned: !project.pinned }); } },
     { label: project.archived ? '取消归档' : '归档项目', icon: project.archived ? <ArchiveRestore /> : <Archive />, onSelect: () => { void onProjectFlags(project.id, { archived: !project.archived }); } },
@@ -463,7 +461,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
           }}
           onClick={event => {
             if (suppressClick.current && event.detail !== 0) { event.preventDefault(); event.stopPropagation(); suppressClick.current = false; return; }
-            selectOverview(project.id);
+            onSelectProject(project.id);
           }}
           title={`${name}${shortcutIndex >= 0 && shortcutIndex < 9 ? ` · ⌘${shortcutIndex + 1}` : ''}\n${filtering ? '清除搜索和筛选后可拖动排序' : '拖动排序 · ⌥↑ / ⌥↓'}`}
           data-project-row={project.id} data-running-project={inRunning ? project.id : undefined} aria-current={selected ? 'page' : undefined} data-search-highlighted={searchFocused && highlighted === project.id || undefined} data-reorder-draggable={canReorder || undefined}>
@@ -565,9 +563,9 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
         {runningProjects.map(project => {
           if (runningUngroupedIds.has(project.id)) return renderProject(project, runningUngrouped, true);
           const selected = selection?.projectId === project.id;
-          return <button key={project.id} data-running-project={project.id} data-selected={selected || undefined} aria-current={selected && selection.view === 'overview' ? 'page' : undefined}
+          return <button key={project.id} data-running-project={project.id} data-selected={selected || undefined} aria-current={selected ? 'page' : undefined}
             className="sidebar-project-item sidebar-project-row sidebar-project-surface flex w-full shrink-0 items-center gap-2.5 px-2.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-            onClick={() => selectOverview(project.id)} onContextMenu={event => { event.preventDefault(); projectMenu(project, event.clientX, event.clientY); }}>
+            onClick={() => onSelectProject(project.id)} onContextMenu={event => { event.preventDefault(); projectMenu(project, event.clientX, event.clientY); }}>
             <ProjectAvatar project={project} status={statuses[project.id]} />
             <span className="min-w-0 flex-1 truncate">{project.displayName || project.name}</span>
             {attentionProjects.has(project.id) && <span className="size-1.5 shrink-0 rounded-full bg-attention" aria-label="终端有新动静" />}
@@ -603,7 +601,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
             const index = Math.max(0, visibleProjects.findIndex(project => project.id === highlighted));
             const next = visibleProjects[Math.max(0, Math.min(visibleProjects.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)))];
             if (next) { setHighlightedId(next.id); rows.current.get(next.id)?.scrollIntoView({ block: 'nearest' }); }
-          } else if (event.key === 'Enter') { event.preventDefault(); if (highlighted) selectOverview(highlighted); }
+          } else if (event.key === 'Enter') { event.preventDefault(); if (highlighted) onSelectProject(highlighted); }
           else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (searchQuery) { onSearchChange(''); setHighlightedId(null); } else event.currentTarget.blur(); }
         }} />
       {searchQuery ? <Button variant="ghost" size="icon-sm" className="absolute right-1 top-1/2 -translate-y-1/2" aria-label="清除搜索" onClick={() => { onSearchChange(''); setHighlightedId(null); searchInputRef.current?.focus(); }}><X className="size-3.5" /></Button>

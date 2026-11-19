@@ -54,3 +54,17 @@ export function terminalsNeedingAttention<T extends AttentionTarget>(terminals: 
       || a.projectId.localeCompare(b.projectId) || a.slot - b.slot,
   );
 }
+
+export function firstOpenedTerminalSlot(projectId: string, terminals: readonly {
+  projectId: string;
+  slot: number;
+  sessionId?: string;
+}[]): number | undefined {
+  let first: number | undefined;
+  for (const terminal of terminals) {
+    if (terminal.projectId === projectId && terminal.sessionId && (first === undefined || terminal.slot < first)) {
+      first = terminal.slot;
+    }
+  }
+  return first;
+}

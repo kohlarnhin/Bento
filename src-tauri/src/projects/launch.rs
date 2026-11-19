@@ -7,6 +7,8 @@ use serde_json::Value;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+pub(super) mod tauri_dev;
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchConfig {
@@ -185,7 +187,7 @@ fn make_step(
         "通过环境变量向总启动命令传递各服务端口".into()
     } else {
         let port = port.unwrap();
-        let adapted = adapt(&command, &cwd, port, &mut env, explicit);
+        let adapted = adapt(&command, &cwd, port, &mut env, explicit, true);
         command = adapted.command;
         placeholder_hint = adapted.fallback;
         adapted.description
@@ -746,6 +748,7 @@ fn adapt(
     port: u16,
     env: &mut Vec<EnvVar>,
     explicit: &[EnvVar],
+    allow_tauri: bool,
 ) -> Adapted {
     let unknown = || Adapted {
         command: command.into(),
@@ -757,6 +760,13 @@ fn adapt(
     };
     let start = program_start(&outer_words);
     let package_script = package_script(cwd, &outer_words, start);
+    if allow_tauri {
+        if let Some(result) = tauri_dev::adapt_tauri(
+            command, cwd, &outer_words, start, package_script.as_ref(), port, env, explicit,
+        ) {
+            return result;
+        }
+    }
     let package = package_script.as_ref().map(|script| &script.package);
     let direct_package = if package.is_none() {
         read_json(&cwd.join("package.json"))
@@ -972,6 +982,169 @@ mod tests {
             .iter()
             .find(|entry| entry.key == key)
             .map(|entry| entry.value.clone())
+    }
+
+    fn tauri_config(fixture: &Fixture, file: &str, content: &str) {
+        let directory = fixture.0.join("src-tauri");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join(file), content).unwrap();
+    }
+
+    fn tauri_override(step: &LaunchStep) -> Value {
+        let args = words(&step.command).unwrap();
+        let index = args.iter().position(|arg| arg.value == "--config").unwrap();
+        assert!(args[index + 1].literal);
+        serde_json::from_str(&args[index + 1].value).unwrap()
+    }
+
+    #[test]
+    fn tauri_dev_overrides_only_the_dev_port_and_hook_with_package_manager_forwarding() {
+        let fixture = Fixture::new();
+        let config = r#"{"build":{"devUrl":"https://localhost:5200/workspace/a?mode=dev#preview","beforeDevCommand":"pnpm dev","frontendDist":"../dist"}}"#;
+        tauri_config(&fixture, "tauri.conf.json", config);
+        fs::write(
+            fixture.0.join("package.json"),
+            r#"{"scripts":{"tauri":"tauri","desktop":"tauri dev --no-watch","dev":"vite"}}"#,
+        )
+        .unwrap();
+        for (command, prefix) in [
+            ("pnpm tauri dev", "pnpm tauri dev --config "),
+            ("cargo tauri dev", "cargo tauri dev --config "),
+            ("pnpm exec tauri dev", "pnpm exec tauri dev --config "),
+            ("pnpm run desktop", "pnpm run desktop --config "),
+            ("npm run desktop", "npm run desktop -- --config "),
+            ("npm run tauri -- dev", "npm run tauri -- dev --config "),
+            ("yarn desktop", "yarn desktop --config "),
+            ("bun run desktop", "bun run desktop --config "),
+        ] {
+            let plan = fixture.plan(command);
+            let step = &plan.steps[0];
+            assert!(step.command.starts_with(prefix), "{}", step.command);
+            assert!(!step.placeholder_hint);
+            assert_eq!(value(step, "PORT").as_deref(), Some("5201"));
+            assert_eq!(
+                tauri_override(step),
+                serde_json::json!({"build": {
+                    "devUrl": "https://localhost:5201/workspace/a?mode=dev#preview",
+                    "beforeDevCommand": "pnpm dev --port 5201 --strictPort"
+                }})
+            );
+        }
+        let plan = fixture.plan("pnpm tauri dev --no-watch -- --my-app-flag");
+        assert!(plan.steps[0].command.ends_with("' -- --my-app-flag"));
+        let plan = fixture.plan("pnpm run desktop -- --my-app-flag");
+        assert!(plan.steps[0]
+            .command
+            .starts_with("pnpm run desktop --config "));
+        assert!(plan.steps[0].command.ends_with("' -- --my-app-flag"));
+        assert!(!fixture.plan("pnpm tauri build").steps[0]
+            .command
+            .contains("--config"));
+        assert_eq!(
+            fs::read_to_string(fixture.0.join("src-tauri/tauri.conf.json")).unwrap(),
+            config
+        );
+    }
+
+    #[test]
+    fn tauri_v1_dev_path_and_toml_aliases_reuse_the_next_adapter() {
+        let fixture = Fixture::new();
+        fixture.package("next dev -p 5200");
+        tauri_config(
+            &fixture,
+            "Tauri.toml",
+            r#"
+[build]
+dev-path = "http://[::1]:5200/legacy/page?q=1"
+before-dev-command = "npm run dev"
+"#,
+        );
+        let plan = fixture.plan("tauri dev");
+        let overrides = tauri_override(&plan.steps[0]);
+        assert_eq!(
+            overrides["build"]["dev-path"],
+            "http://[::1]:5201/legacy/page?q=1"
+        );
+        let hook = overrides["build"]["before-dev-command"].as_str().unwrap();
+        assert!(hook.contains("next dev -p 5201"), "{hook}");
+        assert!(!hook.contains("5200"));
+        assert_eq!(
+            tauri_dev::detected_port(&fixture.0),
+            Some((5200, "src-tauri/Tauri.toml".into()))
+        );
+    }
+
+    #[test]
+    fn tauri_json5_preserves_hook_options_and_quotes_as_one_json_shell_argument() {
+        let fixture = Fixture::new();
+        let web = fixture.0.join("frontend's app");
+        fs::create_dir(&web).unwrap();
+        fs::write(web.join("package.json"), r#"{"scripts":{"dev":"vite"}}"#).unwrap();
+        tauri_config(
+            &fixture,
+            "tauri.conf.json5",
+            r#"
+{
+  // Tauri v2, using a custom working directory.
+  build: {
+    devUrl: 'http://dev.local:5200/some/path',
+    beforeDevCommand: {
+      script: "pnpm dev --mode 'test\\profile'",
+      cwd: "../frontend's app",
+      wait: true,
+    },
+  },
+}
+"#,
+        );
+        let plan = fixture.plan("pnpm tauri dev");
+        let step = &plan.steps[0];
+        let value = tauri_override(step);
+        let hook = &value["build"]["beforeDevCommand"];
+        assert_eq!(hook["cwd"], "../frontend's app");
+        assert_eq!(hook["wait"], true);
+        assert_eq!(
+            hook["script"],
+            r"pnpm dev --mode 'test\profile' --port 5201 --strictPort"
+        );
+        let tail = step.command.split_once(" --config ").unwrap().1;
+        let output = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                &format!("set -- {tail}; test \"$#\" = 1 && printf '%s' \"$1\""),
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            value
+        );
+    }
+
+    #[test]
+    fn unsupported_tauri_config_retains_the_command_and_suggests_a_placeholder() {
+        let fixture = Fixture::new();
+        fixture.package("vite");
+        for source in [
+            "{invalid",
+            r#"{"build":{"devPath":"../dist","beforeDevCommand":"pnpm dev"}}"#,
+            r#"{"build":{"devUrl":"http://localhost:5200","beforeDevCommand":"./custom.sh"}}"#,
+        ] {
+            tauri_config(&fixture, "tauri.conf.json", source);
+            let plan = fixture.plan("pnpm tauri dev");
+            assert_eq!(plan.steps[0].command, "pnpm tauri dev");
+            assert!(plan.steps[0].placeholder_hint);
+        }
+        tauri_config(
+            &fixture,
+            "tauri.conf.json",
+            r#"{"build":{"devUrl":"http://localhost:5200","beforeDevCommand":"pnpm dev"}}"#,
+        );
+        let original = "pnpm tauri dev --config ./custom.json";
+        let plan = fixture.plan(original);
+        assert_eq!(plan.steps[0].command, original);
+        assert!(plan.steps[0].placeholder_hint);
     }
 
     #[test]
