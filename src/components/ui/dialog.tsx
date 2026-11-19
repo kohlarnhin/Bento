@@ -40,7 +40,7 @@ export const DialogContent = React.forwardRef<
         onEscapeKeyDown?.(event);
       }}
       className={cn(
-        'fixed left-1/2 top-1/2 z-50 grid w-[calc(100%-3rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 rounded-lg border bg-background p-6 text-foreground shadow-lg outline-none duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0 data-[state=open]:zoom-in-95 data-[state=closed]:zoom-out-95',
+        'h1-dialog fixed left-1/2 top-1/2 z-50 grid w-[calc(100%-3rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 p-6 outline-none duration-150 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0',
         className
       )}
       {...props}
@@ -49,7 +49,7 @@ export const DialogContent = React.forwardRef<
       {!hideClose && (
         <DialogPrimitive.Close
           className={cn(
-            'absolute right-4 top-4 rounded-sm text-muted-foreground opacity-70 outline-none transition-[opacity,box-shadow] hover:opacity-100 focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none',
+            'absolute right-4 top-4 grid size-7 place-items-center rounded-full bg-[var(--h1-track)] text-muted-foreground outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none',
             closeClassName
           )}
         >

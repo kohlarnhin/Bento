@@ -38,9 +38,9 @@ export function ExternalProcessDialog({ project, owners, restart, onClose, onCom
             ? '下列进程正在监听该项目的服务端口，由 Bento 之外的程序启动。'
             : <>端口 :{project.port} 由外部进程占用。</>}</DialogDescription>
         </DialogHeader>
-        <div className="min-h-0 space-y-3 overflow-y-auto">
+        <div className="h1-group h1-form-group min-h-0 overflow-y-auto">
           {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
-          {owners.map(owner => <div key={owner.pid} className="space-y-2 rounded-lg border bg-muted/30 p-3" data-port-owner={owner.pid}>
+          {owners.map(owner => <div key={owner.pid} className="space-y-2" data-port-owner={owner.pid}>
             <p className="truncate select-text font-mono text-xs" title={`${owner.pid} · ${owner.command}`}>{owner.pid} · {owner.command || '未知命令'}</p>
             <p className="truncate select-text text-xs text-muted-foreground" title={owner.cwd || undefined}>目录 {owner.cwd || '未知'}</p>
             {owner.inProject ? <Badge variant="secondary">看起来是该项目的进程</Badge> : <p className="flex items-start gap-1.5 text-xs leading-relaxed text-warning-foreground"><AlertCircle className="mt-0.5 size-3.5 shrink-0" />该进程不在项目目录中运行，可能是其他程序</p>}

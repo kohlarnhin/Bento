@@ -29,7 +29,7 @@ export function ProjectAdvancedFields({ values, onChange, errors, onBlur, open, 
   };
   const error = (id: string, text?: string) => text && <p id={id} className="text-[11px] leading-relaxed text-destructive" aria-live="polite">{text}</p>;
   return (
-    <Collapsible open={open} onOpenChange={onOpenChange} className="rounded-lg border" data-project-advanced>
+    <Collapsible open={open} onOpenChange={onOpenChange} className="h1-group" data-project-advanced>
       <CollapsibleTrigger asChild><button type="button" disabled={disabled} className="group flex w-full items-center gap-2 rounded-lg px-3 py-3 text-left text-xs font-medium outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50" data-advanced-toggle><ChevronRight className="size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />高级设置<span className="ml-auto text-[11px] font-normal text-muted-foreground">环境变量 · 其他命令</span></button></CollapsibleTrigger>
       <CollapsibleContent className="space-y-5 border-t px-3 py-4">
         <section className="space-y-2" aria-label="环境变量">

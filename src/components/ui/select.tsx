@@ -20,6 +20,7 @@ interface Props {
   onValueChange: (value: string) => void;
   disabled?: boolean;
   className?: string;
+  popupClassName?: string;
   'aria-describedby'?: string;
   search?: {
     placeholder: string;
@@ -32,7 +33,7 @@ function Dot({ color }: { color: string }) {
   return <span aria-hidden="true" className="size-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />;
 }
 
-export function Select({ id, label, value, options, onValueChange, disabled, className, search, ...props }: Props) {
+export function Select({ id, label, value, options, onValueChange, disabled, className, popupClassName, search, ...props }: Props) {
   const trigger = useRef<HTMLButtonElement>(null);
   const popup = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -171,15 +172,14 @@ export function Select({ id, label, value, options, onValueChange, disabled, cla
       aria-activedescendant={!search ? activeId : undefined} data-select-open={open ? '' : undefined}
       disabled={disabled} aria-busy={search?.creating || undefined} onBlur={onBlur} onKeyDown={onKeyDown}
       onClick={() => { if (open) close(true); else openMenu(); }}
-      className={cn('flex h-9 w-full min-w-0 items-center gap-2 rounded-md border border-input bg-background px-3 text-left text-[13px] shadow-sm outline-none transition-[border-color,box-shadow] focus-visible:border-foreground/60 focus-visible:ring-[3px] focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50',
-        open && 'border-foreground/60 ring-[3px] ring-ring/30', className)}>
+      className={cn('h1-field flex h-9 w-full min-w-0 items-center gap-2 px-3 text-left text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50', className)}>
       {selected?.color && <Dot color={selected.color} />}
       <span className="min-w-0 flex-1 truncate">{selected?.label ?? '—'}</span>
       <ChevronDown aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
     </button>
     {host && createPortal(
-      <div ref={popup} data-select-open className={cn('z-[60] flex max-h-72 flex-col overflow-hidden rounded-lg border bg-popover p-1.5 text-popover-foreground shadow-lg',
-        host === host.ownerDocument.body ? 'fixed' : 'absolute')}>
+      <div ref={popup} data-select-open className={cn('h1-popup z-[60] flex max-h-72 flex-col overflow-hidden p-1.5',
+        host === host.ownerDocument.body ? 'fixed' : 'absolute', popupClassName)}>
         {search && <div className="mb-1 flex shrink-0 items-center gap-2 border-b px-2 pb-1.5 pt-0.5">
           <Search aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
           <input ref={input} role="combobox" aria-label={search.placeholder} aria-expanded="true" aria-autocomplete="list"

@@ -22,27 +22,10 @@ export default {
         accent: { DEFAULT: 'hsl(var(--accent))', foreground: 'hsl(var(--accent-foreground))' },
         popover: { DEFAULT: 'hsl(var(--popover))', foreground: 'hsl(var(--popover-foreground))' },
         card: { DEFAULT: 'var(--card)', foreground: 'hsl(var(--card-foreground))', border: 'var(--card-border)' },
-        sidebar: {
-          DEFAULT: 'var(--sidebar-background)',
-          foreground: 'hsl(var(--sidebar-foreground))',
-          primary: 'hsl(var(--sidebar-primary))',
-          'primary-foreground': 'hsl(var(--sidebar-primary-foreground))',
-          accent: 'hsl(var(--sidebar-accent))',
-          'accent-foreground': 'hsl(var(--sidebar-accent-foreground))',
-          border: 'hsl(var(--sidebar-border))',
-          ring: 'hsl(var(--sidebar-ring))',
-        },
         success: { DEFAULT: 'hsl(var(--success))', foreground: 'hsl(var(--success-foreground))', muted: 'hsl(var(--success-muted))' },
         attention: 'hsl(var(--attention))',
         warning: { DEFAULT: 'hsl(var(--warning))', foreground: 'hsl(var(--warning-foreground))', muted: 'hsl(var(--warning-muted))' },
         terminal: { DEFAULT: 'hsl(var(--terminal-background))', foreground: 'hsl(var(--terminal-foreground))', muted: 'hsl(var(--terminal-muted))', border: 'hsl(var(--terminal-border))' },
-        mac: {
-          bg: '#1e1e24',
-          card: '#282933',
-          cardHover: '#30313d',
-          border: '#3c3d4a',
-          accent: '#3b82f6',
-        }
       },
       borderRadius: {
         control: 'var(--radius-control)',
@@ -56,7 +39,6 @@ export default {
       },
       fontSize: {
         sm: ['var(--text-body)', '1.5'],
-        brand: ['var(--text-brand)', '1.25'],
         title: ['var(--text-title)', '1.25'],
         meta: ['var(--text-meta)', '1.35'],
         label: ['var(--text-label)', '1.35'],

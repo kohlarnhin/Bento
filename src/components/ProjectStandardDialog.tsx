@@ -66,7 +66,7 @@ export function ProjectStandardDialog({ request, onClose, onGenerated }: {
 
   return <Dialog open onOpenChange={open => { if (!open && !busy) onClose(); }}>
     <DialogContent data-standard-dialog={request.mode} hideClose={busy}
-      className="flex max-h-[calc(100dvh-4rem)] max-w-[700px] flex-col gap-4 rounded-[14px] p-6">
+      className="flex max-h-[calc(100dvh-4rem)] max-w-[700px] flex-col gap-4 p-6">
       <DialogHeader>
         <DialogTitle>{generating ? '生成标准启动脚本' : 'Bento 启动标准模板'}</DialogTitle>
         <DialogDescription>{generating ? '确认后写入项目目录，并将脚本填入启动命令。保存项目后才应用新命令。'
@@ -84,7 +84,7 @@ export function ProjectStandardDialog({ request, onClose, onGenerated }: {
           </p>}
         </div>
         <textarea ref={code} readOnly spellCheck={false} wrap="off" aria-label="启动脚本预览" data-standard-script-preview
-          value={preview.script} className="min-h-[180px] w-full flex-1 resize-none rounded-lg border border-card-border bg-muted/60 p-3 font-mono text-xs leading-5 select-text outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          value={preview.script} className="h1-group min-h-[180px] w-full flex-1 resize-none p-3 font-mono text-xs leading-5 select-text outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
           rows={18} />
         {!!preview.notes.length && <ul className="max-h-24 shrink-0 space-y-1 overflow-y-auto text-xs text-warning-foreground">
           {preview.notes.map(note => <li key={note}>{note}</li>)}

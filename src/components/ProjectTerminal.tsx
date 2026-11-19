@@ -5,6 +5,8 @@ import { attachTerminal, fitTerminal, getTerminal, getTerminalSearch, getTermina
 import { TerminalFindBar, type TerminalFindControls } from './TerminalFindBar';
 import Button from './ui/button';
 
+export interface TerminalDimensions { cols: number; rows: number }
+
 export interface ProjectTerminalControls {
   openFind: () => void;
   closeFind: () => void;
@@ -13,8 +15,12 @@ export interface ProjectTerminalControls {
 }
 
 export const ProjectTerminal = forwardRef<ProjectTerminalControls, {
-  project: ProjectConfig; activeSlot: number;
-}>(function ProjectTerminal({ project, activeSlot }, ref) {
+  project: ProjectConfig;
+  activeSlot: number;
+  autofocus?: boolean;
+  onFocus: () => void;
+  onResize: (slot: number, size: TerminalDimensions) => void;
+}>(function ProjectTerminal({ project, activeSlot, autofocus = true, onFocus, onResize }, ref) {
   const host = useRef<HTMLDivElement>(null);
   const terminals = useSyncExternalStore(subscribeTerminals, getTerminalSnapshot);
   const status = terminals[terminalKey(project.id, activeSlot)];
@@ -40,23 +46,33 @@ export const ProjectTerminal = forwardRef<ProjectTerminalControls, {
   useEffect(() => {
     const container = host.current;
     if (!container || !canAttach) return;
-    const detach = attachTerminal(project.id, activeSlot, container);
-    let timeout: ReturnType<typeof setTimeout>;
+    const detach = attachTerminal(project.id, activeSlot, container, autofocus);
+    const terminal = getTerminal(project.id, activeSlot);
+    const sizeSubscription = terminal?.onResize(size => onResize(activeSlot, size));
+    if (terminal) onResize(activeSlot, { cols: terminal.cols, rows: terminal.rows });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     const observer = new ResizeObserver(() => {
-      clearTimeout(timeout);
-      timeout = setTimeout(() => fitTerminal(project.id, activeSlot), 80);
+      timeout ??= setTimeout(() => {
+        timeout = undefined;
+        fitTerminal(project.id, activeSlot);
+      }, 80);
     });
     observer.observe(container);
-    return () => { clearTimeout(timeout); observer.disconnect(); detach(); };
+    return () => {
+      clearTimeout(timeout);
+      observer.disconnect();
+      sizeSubscription?.dispose();
+      detach();
+    };
     // Session hydration and restart reuse the slot's renderer. Keep it attached through both.
-  }, [project.id, activeSlot, canAttach]);
+  }, [project.id, activeSlot, canAttach, autofocus, onResize]);
 
   const exited = !!status?.sessionId && !status.alive && !status.opening;
   const overlay = status?.opening || (!status?.alive && status?.error) || exited;
   return (
-    <section className="group/pane flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-terminal text-terminal-foreground" data-terminal-pane={project.id} data-terminal-active-slot={activeSlot} aria-label={`${project.displayName || project.name} 终端`}>
-      <div data-tauri-drag-region className="h-8 shrink-0" aria-hidden="true" />
-      <div className="relative min-h-0 min-w-0 flex-1 p-3" data-terminal-area>
+    <section className="group/pane relative min-h-0 min-w-0 flex-1 overflow-hidden" data-terminal-pane={project.id} data-terminal-active-slot={activeSlot}
+      aria-label={`${project.displayName || project.name} 终端 ${activeSlot}`} onFocusCapture={onFocus}>
+      <div className="relative size-full min-h-0 min-w-0" data-terminal-area>
         <div ref={host} className="size-full min-h-0 min-w-0" />
         {findOpen && getTerminalSearch(project.id, activeSlot) && <TerminalFindBar key={findKey}
           ref={find} search={getTerminalSearch(project.id, activeSlot)!} terminal={getTerminal(project.id, activeSlot)!}

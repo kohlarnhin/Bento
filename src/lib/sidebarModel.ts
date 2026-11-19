@@ -1,17 +1,13 @@
 import type { ProjectConfig, ProjectGroup, ProjectStatus } from '../types.ts';
 
 // A fixed palette keeps identities stable across sorting, groups and app restarts.
-const avatarColors = ['#4f46e5', '#0284c7', '#7c3aed', '#ea580c', '#0d9488', '#64748b', '#db2777', '#4d7c0f', '#b45309', '#27272a'];
+const avatarColors = ['#343436', '#3a3a3c', '#414143', '#474749', '#38383a', '#3d3d3f', '#434345', '#4b4b4d', '#3b3b3d', '#454547'];
 export function projectAvatar(name: string) {
   let hash = 2166136261;
   for (const character of name.trim().normalize('NFC').toLowerCase()) {
     hash = Math.imul(hash ^ character.codePointAt(0)!, 16777619) >>> 0;
   }
   return { color: avatarColors[hash % avatarColors.length], initial: Array.from(name.trim())[0]?.toLocaleUpperCase() || '?' };
-}
-
-export function groupColor(name?: string) {
-  return name ? projectAvatar(name).color : '#d4d4d8';
 }
 
 export function sidebarDensity(projects: readonly Pick<ProjectConfig, 'archived'>[]): 'comfortable' | 'compact' {

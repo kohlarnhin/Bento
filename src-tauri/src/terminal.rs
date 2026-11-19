@@ -42,6 +42,12 @@ pub struct TerminalSessionInfo {
     pub attention: bool,
 }
 
+#[derive(Serialize)]
+pub struct TerminalContext {
+    shell: Option<String>,
+    cwd: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalOutput {
@@ -211,6 +217,25 @@ impl Session {
             snapshot: lock(&self.scrollback).snapshot(),
             session: self.info(),
         }
+    }
+
+    fn context(&self) -> Option<TerminalContext> {
+        let pid = self.pid.filter(|_| lock(&self.state.0).alive)?;
+        let mut executable = [0; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        let size = unsafe { libc::proc_pidpath(pid as i32, executable.as_mut_ptr().cast(), executable.len() as u32) };
+        let shell = (size > 0).then(|| {
+            let path = String::from_utf8_lossy(std::ffi::CStr::from_bytes_until_nul(&executable).ok()?.to_bytes());
+            Path::new(path.as_ref()).file_name().map(|name| name.to_string_lossy().into_owned())
+        }).flatten();
+        let cwd = crate::processes::process_cwd(pid).map(|path| {
+            if let Some(home) = dirs::home_dir() {
+                if let Ok(relative) = path.strip_prefix(home) {
+                    return Path::new("~").join(relative).to_string_lossy().into_owned();
+                }
+            }
+            path.to_string_lossy().into_owned()
+        });
+        Some(TerminalContext { shell, cwd })
     }
 
     fn terminate(&self) {
@@ -827,6 +852,14 @@ pub fn terminal_list(state: State<'_, TerminalManager>) -> Vec<TerminalSessionIn
 }
 
 #[tauri::command]
+pub fn terminal_context(
+    state: State<'_, TerminalManager>, project_id: String, slot: u8, session_id: String,
+) -> Option<TerminalContext> {
+    let session = state.get(&project_id, slot).ok()?;
+    (session.session_id == session_id).then(|| session.context()).flatten()
+}
+
+#[tauri::command]
 pub fn terminal_focus(state: State<'_, TerminalManager>, project_id: Option<String>, slot: Option<u8>) {
     let key = project_id.zip(slot).map(|(project_id, slot)| TerminalKey { project_id, slot });
     #[cfg(debug_assertions)]
@@ -1382,6 +1415,9 @@ mod tests {
             .unwrap();
         fixture.wait_for("pty", &format!("\r\n{}\r\n", fixture.dir.display()));
         fixture.wait_for("pty", "\r\n你好\r\n");
+        let context = fixture.manager.get("pty", 1).unwrap().context().unwrap();
+        assert!(context.shell.is_some());
+        assert_eq!(crate::expand_tilde(&context.cwd.unwrap()), fixture.dir.to_string_lossy());
         fixture.manager.resize("pty", 1, 103, 37).unwrap();
         fixture.manager.resize("pty", 1, 0, 0).unwrap(); // Hidden panes must not erase the last good size.
         fixture

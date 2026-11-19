@@ -592,6 +592,7 @@ pub fn run() {
         terminal::terminal_create,
         terminal::terminal_close,
         terminal::terminal_list,
+        terminal::terminal_context,
         terminal::terminal_focus,
         terminal::terminal_write,
         terminal::terminal_run,

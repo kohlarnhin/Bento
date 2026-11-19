@@ -379,7 +379,11 @@ pub fn port_owners(port: u16, project_path: &str) -> Vec<PortOwner> {
 }
 
 pub fn cwd_matches(pid: u32, project: &std::path::Path) -> bool {
-    use std::os::unix::ffi::OsStrExt;
+    process_cwd(pid).is_some_and(|cwd| cwd.starts_with(project))
+}
+
+pub fn process_cwd(pid: u32) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
     let mut info = std::mem::MaybeUninit::<libc::proc_vnodepathinfo>::uninit();
     let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as i32;
     let read = unsafe {
@@ -392,7 +396,7 @@ pub fn cwd_matches(pid: u32, project: &std::path::Path) -> bool {
         )
     };
     if read != size {
-        return false;
+        return None;
     }
     let info = unsafe { info.assume_init() };
     let cwd: Vec<u8> = info
@@ -403,7 +407,7 @@ pub fn cwd_matches(pid: u32, project: &std::path::Path) -> bool {
         .map(|&byte| byte as u8)
         .take_while(|&byte| byte != 0)
         .collect();
-    std::path::Path::new(std::ffi::OsStr::from_bytes(&cwd)).starts_with(project)
+    (!cwd.is_empty()).then(|| std::ffi::OsString::from_vec(cwd).into())
 }
 
 pub fn owners_for_pids(pids: Vec<u32>, project_path: Option<&str>) -> Vec<PortOwner> {

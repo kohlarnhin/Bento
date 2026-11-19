@@ -30,8 +30,8 @@ export function UpdateDialog({ updater, projects, terminalCount }: {
 
       {available && <>
         {date && !Number.isNaN(date.getTime()) && <p className="text-xs text-muted-foreground">发布于 {date.toLocaleDateString('zh-CN')}</p>}
-        <ScrollArea className="max-h-52 [&_[data-radix-scroll-area-viewport]]:max-h-52">
-          <p className="whitespace-pre-wrap break-words pr-3 text-sm leading-relaxed select-text" data-update-notes>{update.body || '此版本暂无更新说明。'}</p>
+        <ScrollArea className="h1-group max-h-52 [&_[data-radix-scroll-area-viewport]]:max-h-52">
+          <p className="whitespace-pre-wrap break-words px-4 py-3 text-sm leading-relaxed select-text" data-update-notes>{update.body || '此版本暂无更新说明。'}</p>
         </ScrollArea>
         {(projects.length > 0 || terminalCount > 0) && <Alert>
           <AlertDescription>

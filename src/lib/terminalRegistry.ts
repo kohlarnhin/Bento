@@ -494,7 +494,7 @@ function startHydrate(entry: Entry, restart: boolean): Promise<void> {
     if (entry.disposed) return;
     entry.hydrating = false;
     entry.opening = undefined;
-    fitTerminal(entry.projectId, entry.slot, true);
+    fitTerminal(entry.projectId, entry.slot);
   });
   return entry.opening;
 }
@@ -551,7 +551,7 @@ async function hydrate(entry: Entry, restart: boolean) {
   }
 }
 
-async function showTerminal(entry: Entry) {
+async function showTerminal(entry: Entry, shouldFocus: () => boolean) {
   await initTerminalRegistry(registry.showError);
   // A missing bundled face must not keep the terminal from opening; the fallback fonts still work.
   await loadTerminalFonts().catch((error) => console.warn('Terminal font:', error));
@@ -573,15 +573,16 @@ async function showTerminal(entry: Entry) {
     });
     entry.opened = true;
   }
-  fitTerminal(entry.projectId, entry.slot, true);
+  fitTerminal(entry.projectId, entry.slot, shouldFocus());
   if (!entry.sessionId && !entry.opening) void startHydrate(entry, false);
 }
 
-export function attachTerminal(projectId: string, slot: number, host: HTMLDivElement) {
+export function attachTerminal(projectId: string, slot: number, host: HTMLDivElement, autofocus = true) {
   const entry = registry.entries.get(terminalKey(projectId, slot)) ?? createEntry(projectId, slot);
   host.appendChild(entry.container);
-  void showTerminal(entry).catch((error) => registry.showError(`终端显示失败：${error}`));
-  const frame = requestAnimationFrame(() => fitTerminal(projectId, slot, true));
+  const shouldFocus = () => autofocus && entry.container.parentElement === host;
+  void showTerminal(entry, shouldFocus).catch((error) => registry.showError(`终端显示失败：${error}`));
+  const frame = requestAnimationFrame(() => fitTerminal(projectId, slot, shouldFocus()));
   return () => {
     cancelAnimationFrame(frame);
     // Detached instances keep receiving output until the backend removes their slot.
@@ -597,7 +598,7 @@ export async function restartTerminal(projectId: string, slot: number) {
 
 export function retryTerminal(projectId: string, slot: number) {
   const entry = registry.entries.get(terminalKey(projectId, slot));
-  if (entry) void showTerminal(entry).catch(error => registry.showError(String(error)));
+  if (entry) void showTerminal(entry, () => true).catch(error => registry.showError(String(error)));
 }
 
 export async function createTerminal(projectId: string): Promise<number> {

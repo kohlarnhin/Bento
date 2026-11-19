@@ -154,7 +154,7 @@ export interface LogEntry {
   timestamp: number;
 }
 
-export type ProjectView = 'overview' | 'terminal';
+export type ProjectView = 'overview' | 'terminal' | 'git';
 
 export interface ProjectSelection {
   projectId: string;
