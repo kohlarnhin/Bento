@@ -807,20 +807,10 @@ pub fn check_ports(
 fn probe_project_ports(
     path: &Path, package: &Value, chosen_script: Option<&str>, start_sh_primary: bool,
 ) -> (Vec<PortCandidate>, Option<PortCandidate>) {
-    let tauri_port = read_json(&path.join("src-tauri/tauri.conf.json")).and_then(|config| {
-        tauri::Url::parse(config["build"]["devUrl"].as_str()?)
-            .ok()?
-            .port()
-    });
     let mut candidates = Vec::new();
     let candidates = &mut candidates;
-    if let Some(port) = tauri_port {
-        add_port_candidate(
-            candidates,
-            port,
-            "src-tauri/tauri.conf.json",
-            PortConfidence::High,
-        );
+    if let Some((port, source)) = launch::tauri_dev::detected_port(path) {
+        add_port_candidate(candidates, port, &source, PortConfidence::High);
     }
     for prefix in ["vite", "next", "nuxt", "astro"] {
         for extension in ["ts", "mts", "js", "mjs", "cjs", "cts"] {
@@ -926,11 +916,10 @@ fn probe_project_ports(
     let detected = recommended.map(|candidate| {
         let source = candidate.source.split("、").next().unwrap_or_default();
         let source = match source {
-            "src-tauri/tauri.conf.json" => "tauri.conf.json",
             "框架默认" => framework_default
                 .map(|(_, _, label)| label)
                 .unwrap_or(source),
-            _ => source,
+            _ => source.strip_prefix("src-tauri/").unwrap_or(source),
         };
         PortCandidate { port: candidate.port, source: source.to_string(), confidence: candidate.confidence }
     });
@@ -981,8 +970,7 @@ pub fn inspect_project_dir(
     {
         result.name = name.into();
     }
-    let tauri_path = path.join("src-tauri/tauri.conf.json");
-    if tauri_path.is_file()
+    if launch::tauri_dev::has_config(&path)
         || dependency(&package, "electron")
         || dependency(&package, "@tauri-apps/cli")
     {

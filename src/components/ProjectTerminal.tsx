@@ -18,6 +18,7 @@ export const ProjectTerminal = forwardRef<ProjectTerminalControls, {
   const host = useRef<HTMLDivElement>(null);
   const terminals = useSyncExternalStore(subscribeTerminals, getTerminalSnapshot);
   const status = terminals[terminalKey(project.id, activeSlot)];
+  const canAttach = activeSlot === 1 || Boolean(status?.sessionId);
   const find = useRef<TerminalFindControls>(null);
   const [findRequest, setFindRequest] = useState<{ key: string; version: number }>();
   const findKey = `${terminalKey(project.id, activeSlot)}:${status?.sessionId}`;
@@ -37,16 +38,18 @@ export const ProjectTerminal = forwardRef<ProjectTerminalControls, {
   useEffect(() => { setFindRequest(undefined); }, [findKey]);
 
   useEffect(() => {
-    if (!host.current || (activeSlot > 1 && !status?.sessionId)) return;
-    const detach = attachTerminal(project.id, activeSlot, host.current);
+    const container = host.current;
+    if (!container || !canAttach) return;
+    const detach = attachTerminal(project.id, activeSlot, container);
     let timeout: ReturnType<typeof setTimeout>;
     const observer = new ResizeObserver(() => {
       clearTimeout(timeout);
       timeout = setTimeout(() => fitTerminal(project.id, activeSlot), 80);
     });
-    observer.observe(host.current);
+    observer.observe(container);
     return () => { clearTimeout(timeout); observer.disconnect(); detach(); };
-  }, [project.id, activeSlot, status?.sessionId]);
+    // Session hydration and restart reuse the slot's renderer. Keep it attached through both.
+  }, [project.id, activeSlot, canAttach]);
 
   const exited = !!status?.sessionId && !status.alive && !status.opening;
   const overlay = status?.opening || (!status?.alive && status?.error) || exited;

@@ -27,7 +27,7 @@ import { createTerminal, getProjectTerminalSlots, getTerminalSnapshot, initTermi
 import { projectLogs } from './lib/useProjectLogs';
 import { recordRender } from './lib/renderMetrics';
 import { DEFAULT_TERMINAL_FONT_SIZE } from './lib/terminalAppearance';
-import { clampTerminalFontSize, terminalsNeedingAttention } from './lib/terminalUsability';
+import { clampTerminalFontSize, firstOpenedTerminalSlot, terminalsNeedingAttention } from './lib/terminalUsability';
 import { matchesSidebarFilter, sidebarNavigation, sidebarSections, type SidebarFilter } from './lib/sidebarModel';
 import { useProjectGitInfos } from './lib/useGitInfo';
 import { sameServiceStatuses } from './lib/projectServices';
@@ -152,14 +152,28 @@ export function App() {
   const [activeLogTarget, setActiveLogTarget] = useState<string>();
   const [loading, setLoading] = useState(true);
   const [projectsLoaded, setProjectsLoaded] = useState(false);
-  const [selection, setSelection] = useState<ProjectSelection | null>(null);
-  const [activeSlots, setActiveSlots] = useState<Record<string, number>>({});
-  const selectTerminalSlot = useCallback((projectId: string, slot: number) => {
-    setActiveSlots(previous => ({ ...previous, [projectId]: slot }));
-    setSelection({ projectId, view: 'terminal' });
+  const [{ selection, activeSlots }, setProjectNavigation] = useState<{
+    selection: ProjectSelection | null;
+    activeSlots: Record<string, number>;
+  }>({ selection: null, activeSlots: {} });
+  const setSelection = useCallback((selection: ProjectSelection) => {
+    setProjectNavigation(previous => ({ ...previous, selection }));
   }, []);
+  const selectTerminalSlot = useCallback((projectId: string, slot: number) => {
+    setProjectNavigation(previous => ({
+      selection: { projectId, view: 'terminal' },
+      activeSlots: { ...previous.activeSlots, [projectId]: slot },
+    }));
+  }, []);
+  const selectProject = useCallback((projectId: string) => {
+    setActiveLogProject(null);
+    const slot = firstOpenedTerminalSlot(projectId, Object.values(getTerminalSnapshot()));
+    if (slot === undefined) setSelection({ projectId, view: 'overview' });
+    else selectTerminalSlot(projectId, slot);
+  }, [selectTerminalSlot, setSelection]);
   useEffect(() => {
-    setActiveSlots(previous => {
+    setProjectNavigation(navigation => {
+      const previous = navigation.activeSlots;
       let next = previous;
       for (const [projectId, slot] of Object.entries(previous)) {
         if (slot === 1 || terminals[terminalKey(projectId, slot)]) continue;
@@ -168,7 +182,7 @@ export function App() {
         if (next === previous) next = { ...previous };
         next[projectId] = replacement;
       }
-      return next;
+      return next === previous ? navigation : { ...navigation, activeSlots: next };
     });
   }, [terminals]);
   const watchedProjectId = selection?.view === 'terminal' && !quickOpen ? selection.projectId : null;
@@ -333,7 +347,7 @@ export function App() {
       }
       else {
         const project = navigation.current.projects[Number(key) - 1];
-        if (project) setSelection({ projectId: project.id, view: navigation.current.view });
+        if (project) selectProject(project.id);
       }
     };
     for (const type of ['keydown', 'keypress', 'keyup'] as const) window.addEventListener(type, onShortcut, true);
@@ -349,7 +363,7 @@ export function App() {
       sidebarDragPaths = [];
       void unlisten.then((stop) => stop());
     };
-  }, [openCreate, openSettings, openQuickSwitcher, openTerminal, selectTerminalSlot, changeFontSize]);
+  }, [openCreate, openSettings, openQuickSwitcher, openTerminal, selectProject, selectTerminalSlot, changeFontSize]);
 
   useEffect(() => {
     const unlisten = listen('bento-open-settings', openSettings);
@@ -363,31 +377,36 @@ export function App() {
   useEffect(() => {
     const unlisten = listen<{ projectId: string }>('apphub-select-project', ({ payload }) => {
       if (!navigation.current.projects.some(project => project.id === payload.projectId)) { setSearchQuery(''); setFilter('all'); }
-      setSelection({ projectId: payload.projectId, view: 'overview' });
+      selectProject(payload.projectId);
     });
     return () => { void unlisten.then(stop => stop()); };
-  }, []);
+  }, [selectProject]);
 
   const showToast = useCallback((msg: string) => {
     toast.error(msg);
   }, []);
 
-  useEffect(() => {
-    void initTerminalRegistry(showToast).catch(() => {});
-  }, [showToast]);
-
   // Fetch projects and current status
   const loadProjects = useCallback(async () => {
     try {
       setLoading(true);
-      const res = await invoke<ProjectsResponse>('get_projects');
+      const [res] = await Promise.all([
+        invoke<ProjectsResponse>('get_projects'),
+        initTerminalRegistry(showToast).catch(() => {}),
+      ]);
       setProjects(res.projects);
       setGroups(res.groups);
       setProjectsLoaded(true);
       setConflicts(res.conflicts);
-      setSelection((previous) => previous && res.projects.some((project) => project.id === previous.projectId)
-        ? previous
-        : (sidebarNavigation(res.projects, res.groups)[0] ?? res.projects[0]) ? { projectId: (sidebarNavigation(res.projects, res.groups)[0] ?? res.projects[0]).id, view: 'overview' } : null);
+      const first = sidebarNavigation(res.projects, res.groups)[0] ?? res.projects[0];
+      const slot = first && firstOpenedTerminalSlot(first.id, Object.values(getTerminalSnapshot()));
+      setProjectNavigation(previous => {
+        if (res.projects.some(project => project.id === previous.selection?.projectId)) return previous;
+        return {
+          selection: first ? { projectId: first.id, view: slot === undefined ? 'overview' : 'terminal' } : null,
+          activeSlots: first && slot !== undefined ? { ...previous.activeSlots, [first.id]: slot } : previous.activeSlots,
+        };
+      });
 
       // Check port in-use / runtime status
       const runtimeStatuses = await invoke<ProjectRuntimeStatus[]>('get_projects_runtime_status');
@@ -575,7 +594,7 @@ export function App() {
   const selectView = useCallback((next: ProjectSelection) => {
     setActiveLogProject(null);
     setSelection(next);
-  }, []);
+  }, [setSelection]);
   const selectSidebarTerminal = useCallback((projectId: string, slot: number) => {
     setActiveLogProject(null);
     selectTerminalSlot(projectId, slot);
@@ -617,6 +636,7 @@ export function App() {
           loading={loading}
           projectsLoaded={projectsLoaded}
           onSelect={selectView}
+          onSelectProject={selectProject}
           onSelectTerminal={selectSidebarTerminal}
           onCreateTerminal={openTerminal}
           onRefresh={loadProjects}
@@ -670,7 +690,7 @@ export function App() {
           onClose={closeQuickSwitcher}
           onCreate={() => { closeQuickSwitcher(); openCreate(); }}
           onCreateGroup={() => { closeQuickSwitcher(); dialogOpen.current = true; setGroupForm({ action: 'create' }); }}
-          onSelect={project => { closeQuickSwitcher(); setSearchQuery(''); setFilter('all'); setSelection({ projectId: project.id, view: 'overview' }); }}
+          onSelect={project => { closeQuickSwitcher(); setSearchQuery(''); setFilter('all'); selectProject(project.id); }}
           onToggle={project => { closeQuickSwitcher(); void (['running', 'starting'].includes(projectStatuses[project.id]) ? handleStop(project.id) : handleStart(project.id)); }}
           onNewTerminal={project => { closeQuickSwitcher(); setSearchQuery(''); setFilter('all'); void openTerminal(project.id); }} />}
         {groupForm && <GroupDialog group={groupForm.group} deleting={groupForm.action === 'delete'} onClose={() => setGroupForm(null)}
