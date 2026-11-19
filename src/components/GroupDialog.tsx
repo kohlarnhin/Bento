@@ -26,7 +26,7 @@ export function GroupDialog({ group, deleting, onClose, onSave }: {
       }} onKeyDown={event => {
         if (event.key === 'Enter' && (event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault();
       }}>
-        {!deleting && <div className="space-y-2"><Label htmlFor="group-name">分组名称</Label><Input id="group-name" autoFocus value={name} maxLength={40} disabled={saving} onChange={event => setName(event.target.value)} /></div>}
+        {!deleting && <div className="h1-group space-y-2 p-3"><Label htmlFor="group-name">分组名称</Label><Input id="group-name" autoFocus value={name} maxLength={40} disabled={saving} onChange={event => setName(event.target.value)} /></div>}
         {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
         <div className="flex justify-end gap-2"><Button type="button" variant="outline" disabled={saving} onClick={onClose}>取消</Button>
           <Button type="submit" variant={deleting ? 'destructive' : 'default'} disabled={saving || (!deleting && !name.trim())}>{saving ? '保存中…' : deleting ? '删除分组' : '保存'}</Button></div>

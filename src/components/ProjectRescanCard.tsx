@@ -29,11 +29,11 @@ export function ProjectRescanCard({ rows, sourceFiles = [], serviceChanges = [],
   onDismiss: () => void;
   onApply: () => void;
 }) {
-  if (error) return <div role="alert" className="flex items-start gap-2 rounded-lg border border-destructive/15 bg-destructive/5 px-3.5 py-3 text-xs leading-relaxed text-destructive">
+  if (error) return <div role="alert" className="flex items-start gap-2 h1-group px-3.5 py-3 text-xs leading-relaxed text-destructive">
     <AlertCircle aria-hidden="true" className="size-4 shrink-0" />{error}
   </div>;
   const changeCount = (rows?.filter(row => row.changed).length ?? 0) + Number(serviceChanges.length > 0);
-  if (!changeCount && !applied && !checkStandard) return <div role="status" className="flex items-center gap-2 rounded-lg border border-success/15 bg-success-muted px-3.5 py-3 text-xs text-success-foreground">
+  if (!changeCount && !applied && !checkStandard) return <div role="status" className="flex items-center gap-2 h1-group px-3.5 py-3 text-xs text-success-foreground">
     <Check aria-hidden="true" className="size-4 shrink-0" />配置已是最新
   </div>;
 
@@ -43,17 +43,17 @@ export function ProjectRescanCard({ rows, sourceFiles = [], serviceChanges = [],
     const port = service.port == null ? '未检测到端口' : `${added ? '' : (previousPort || '未填写') + ' → '}${service.port}`;
     return `${service.dir}/（${[service.portCandidate?.source, port, service.portCandidate && confidenceLabels[service.portCandidate.confidence]].filter(Boolean).join(' · ')}）`;
   }).concat(startScripts.map(script => script.source));
-  return <section aria-label="重新扫描结果" className="overflow-hidden rounded-xl border border-[var(--service-diff-border)] bg-[var(--service-diff-bg)] text-xs">
+  return <section aria-label="重新扫描结果" className="h1-group overflow-hidden text-xs">
     <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-4 py-3.5">
-      <h4 role="status" className="shrink-0 text-[13px] font-semibold text-[var(--service-blue-text)]">
+      <h4 role="status" className="shrink-0 text-[13px] font-semibold text-foreground">
         {!changeCount && !applied ? '启动标准检查' : discovery
           ? `扫描到 ${serviceChanges.length} 个服务和 ${startScripts.length} 个启动脚本` : `发现 ${changeCount} 处变化`}
       </h4>
       {!!sourceFiles.length && <span className="min-w-0 break-words text-[11px] text-muted-foreground">来自 {sourceFiles.join(' · ')}</span>}
-      {discovery && <p className="w-full break-words leading-relaxed text-[var(--service-diff-text)]">{summary.join('、')}。{applied
+      {discovery && <p className="w-full break-words leading-relaxed text-muted-foreground">{summary.join('、')}。{applied
         ? '已填入表单，保存后才生效。' : changeCount > 0 && '点「应用」只填入表单，保存后才生效。'}</p>}
     </div>
-    {checkStandard && <div className="space-y-2 border-t border-[var(--service-diff-border)] px-4 py-3" data-rescan-port-standard aria-live="polite">
+    {checkStandard && <div className="space-y-2 border-t border-card-border px-4 py-3" data-rescan-port-standard aria-live="polite">
       {standardError ? <p className="text-warning-foreground">无法检查启动标准。{standardError}</p> : !standard
         ? <p className="text-muted-foreground">正在检查启动脚本读取的端口变量…</p> : missing.length > 0
           ? <ul className="space-y-1 text-warning-foreground">{missing.map(service => <li key={service.serviceId}
@@ -62,15 +62,15 @@ export function ProjectRescanCard({ rows, sourceFiles = [], serviceChanges = [],
           </li>)}</ul>
           : <p className="flex items-center gap-2 text-success-foreground"><Check aria-hidden="true" className="size-3.5" />
             {standard.services.length ? '已找到各服务读取 Bento 标准端口变量的代码' : '当前服务没有配置监听端口'}</p>}
-      {onViewTemplate && <button type="button" className="rounded text-[var(--service-blue)] hover:underline focus-visible:outline-ring"
+      {onViewTemplate && <button type="button" className="rounded text-foreground hover:underline focus-visible:outline-ring"
         onClick={onViewTemplate} data-view-standard-template>查看标准模板</button>}
     </div>}
-    {!applied && serviceChanges.length > 0 && <label data-rescan-field="services" className="flex items-center gap-2 border-t border-[var(--service-diff-border)] px-4 py-2">
+    {!applied && serviceChanges.length > 0 && <label data-rescan-field="services" className="flex items-center gap-2 border-t border-card-border px-4 py-2">
       <input type="checkbox" className="size-3.5 accent-primary" checked={selected.has('services')} disabled={disabled} onChange={() => onToggle('services')} />
       应用服务与端口
     </label>}
     {!applied && changeCount > 0 && rows?.filter(row => !discovery || row.changed).map(row => <div key={row.field} data-rescan-field={row.field}
-      className={cn('grid grid-cols-[1rem_3.5rem_minmax(0,1fr)_0.75rem_minmax(0,1fr)] items-center gap-x-2 gap-y-1 border-t border-[var(--service-diff-border)] px-4 py-2 sm:grid-cols-[1rem_4rem_minmax(0,1fr)_0.75rem_minmax(0,1fr)_4.5rem]',
+      className={cn('grid grid-cols-[1rem_3.5rem_minmax(0,1fr)_0.75rem_minmax(0,1fr)] items-center gap-x-2 gap-y-1 border-t border-card-border px-4 py-2 sm:grid-cols-[1rem_4rem_minmax(0,1fr)_0.75rem_minmax(0,1fr)_4.5rem]',
         !row.changed && 'text-muted-foreground')}>
       <input type="checkbox" aria-label={`应用${labels[row.field]}`} checked={row.changed && selected.has(row.field)}
         disabled={disabled || !row.changed} onChange={() => onToggle(row.field)} className="size-3.5 accent-primary disabled:opacity-50" />
@@ -81,7 +81,7 @@ export function ProjectRescanCard({ rows, sourceFiles = [], serviceChanges = [],
       {row.changed && row.source && <span className="col-start-3 col-end-6 min-w-0 max-w-full truncate justify-self-start rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground sm:col-auto sm:justify-self-end"
         title={`${row.source}${row.confidence ? ` · ${confidenceLabels[row.confidence]}` : ''}`}>{row.source}</span>}
     </div>)}
-    {!applied && <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--service-diff-border)] bg-background px-4 py-2.5">
+    {!applied && <div className="flex flex-wrap items-center justify-between gap-2 border-t border-card-border px-4 py-2.5">
       {!discovery && <p className="text-[11px] text-muted-foreground">只会填进表单，点「保存修改」才生效</p>}
       <div className="ml-auto flex gap-2">
         <Button type="button" variant="outline" size="sm" className="h-7" disabled={disabled} onClick={onDismiss}>{changeCount ? '忽略' : '关闭结果'}</Button>

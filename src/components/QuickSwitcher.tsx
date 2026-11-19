@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { FolderPlus, Play, Plus, Search, Square, Terminal } from 'lucide-react';
+import { Columns2, Focus, FolderPlus, Play, Plus, Search, Square, Terminal } from 'lucide-react';
 import type { ProjectConfig, ProjectStatus } from '../types';
 import { searchCreationActions, searchProjects } from '../lib/sidebarModel';
-import { cn } from '../lib/utils';
 import { ProjectAvatar } from './ProjectAvatar';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
 import { Input } from './ui/input';
@@ -17,12 +16,13 @@ function Highlight({ text, indices }: { text: string; indices: number[] }) {
     else runs.push({ start: index, text: character, matched: matched.has(index) });
   });
   return <>{runs.map(run => run.matched
-    ? <mark key={run.start} className="bg-transparent font-semibold text-attention">{run.text}</mark> : run.text)}</>;
+    ? <mark key={run.start} className="bg-transparent font-semibold text-foreground">{run.text}</mark> : run.text)}</>;
 }
 
-export function QuickSwitcher({ projects, statuses, onClose, onCreate, onCreateGroup, onSelect, onToggle, onNewTerminal }: {
+export function QuickSwitcher({ projects, statuses, terminalActions, onClose, onCreate, onCreateGroup, onSelect, onToggle, onNewTerminal }: {
   projects: ProjectConfig[];
   statuses: Record<string, ProjectStatus>;
+  terminalActions?: { focused: boolean; onFocus: () => void; onSplit: () => void };
   onClose: () => void;
   onCreate: () => void;
   onCreateGroup: () => void;
@@ -41,11 +41,17 @@ export function QuickSwitcher({ projects, statuses, onClose, onCreate, onCreateG
   const target = matches.find(match => match.project.id === targetId)?.project ?? matches[0]?.project;
   const running = target && ['running', 'starting'].includes(statuses[target.id]);
   const name = target?.displayName || target?.name;
+  const search = query.trim().toLowerCase();
+  const workspaceActions = terminalActions ? [
+    { id: 'terminal-focus', label: terminalActions.focused ? '退出专注' : '专注模式', icon: Focus, key: '⌘⇧↩', run: terminalActions.onFocus, keywords: '专注 focus' },
+    { id: 'terminal-split', label: '切换终端分屏', icon: Columns2, key: '⌘D', run: terminalActions.onSplit, keywords: '分屏 split' },
+  ].filter(action => !search || action.label.includes(search) || action.keywords.includes(search)) : [];
   const actions = [
     ...(target && !creationFirst ? [
       { id: 'toggle', label: `${running ? '停止' : '启动'} ${name}`, icon: running ? Square : Play, key: '⌘↵', run: () => onToggle(target), indices: [] as number[] },
       { id: 'terminal', label: `在 ${name} 中新建终端`, icon: Terminal, key: '⌘T', run: () => onNewTerminal(target), indices: [] as number[] },
     ] : []),
+    ...workspaceActions.map(action => ({ ...action, indices: [] as number[] })),
     ...creationActions.map(action => ({ ...action, icon: action.id === 'add-project' ? Plus : FolderPlus, key: action.id === 'add-project' ? '⌘N' : '', run: action.id === 'add-project' ? onCreate : onCreateGroup })),
   ];
   const count = matches.length + actions.length;
@@ -61,15 +67,16 @@ export function QuickSwitcher({ projects, statuses, onClose, onCreate, onCreateG
     else actions[activeIndex - actionOffset]?.run();
   };
   useEffect(() => { list.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' }); }, [activeIndex]);
-  const projectResults = ((matches.length > 0 || !actions.length) && <div role="group" aria-label="项目">
-          <p className="px-4 pb-1 pt-3 text-[11px] font-medium text-muted-foreground">项目 <span className="ml-1 tabular-nums opacity-60">{matches.length}</span></p>
+  const projectResults = ((matches.length > 0 || !actions.length) && <div className="h1-form-section" role="group" aria-label="项目">
+          <p className="h1-group-title px-2.5 pb-1 pt-3">项目 <span className="ml-1 tabular-nums opacity-60">{matches.length}</span></p>
+          <div className="h1-group h1-palette-options">
           {!matches.length && <p role="status" className="px-4 py-8 text-center text-sm text-muted-foreground">没有匹配的项目</p>}
           {matches.map((match, index) => {
             const project = match.project;
             const status = statuses[project.id] || 'stopped';
             const optionIndex = projectOffset + index;
             return <button key={project.id} role="option" tabIndex={-1} id={`quick-option-${optionIndex}`} aria-selected={activeIndex === optionIndex}
-              data-quick-project={project.id} className={cn('mx-1.5 flex w-[calc(100%-0.75rem)] items-center gap-3 rounded-lg px-3 py-2 text-left outline-none', activeIndex === optionIndex && 'bg-attention/10')}
+              data-quick-project={project.id} className="flex w-full items-center gap-3 px-3 py-2 text-left outline-none"
               onMouseDown={event => event.preventDefault()} onMouseMove={() => { if (activeIndex !== optionIndex) choose(optionIndex); }} onClick={() => onSelect(project)}>
               <ProjectAvatar project={project} status={status} className="size-7 rounded-[7px] text-xs" />
               <span className="min-w-0 flex-1">
@@ -85,27 +92,34 @@ export function QuickSwitcher({ projects, statuses, onClose, onCreate, onCreateG
               {activeIndex === optionIndex && <kbd className="shrink-0 rounded border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">↵ 打开</kbd>}
             </button>;
           })}
+          </div>
         </div>);
-  const actionResults = (actions.length > 0 && <div role="group" aria-label="操作">
-          <p className="px-4 pb-1 pt-3 text-[11px] font-medium text-muted-foreground">操作</p>
+  const actionResults = (actions.length > 0 && <div className="h1-form-section" role="group" aria-label="操作">
+          <p className="h1-group-title px-2.5 pb-1 pt-3">操作</p>
+          <div className="h1-group h1-palette-options">
           {actions.map((action, i) => {
             const index = actionOffset + i;
             return <button key={action.id} id={`quick-option-${index}`} role="option" aria-selected={activeIndex === index} tabIndex={-1}
               data-quick-action={action.id} onMouseDown={event => event.preventDefault()} onMouseMove={() => { if (activeIndex !== index) choose(index); }} onClick={action.run}
-              className={cn('mx-1.5 flex w-[calc(100%-0.75rem)] items-center gap-3 rounded-lg px-3 py-2 text-left text-[13px] outline-none', activeIndex === index && 'bg-attention/10')}>
+              className="flex w-full items-center gap-3 px-3 py-2 text-left text-[13px] outline-none">
               <span className="grid size-7 shrink-0 place-items-center rounded-[7px] bg-muted text-muted-foreground"><action.icon className="size-3.5" /></span>
               <span className="min-w-0 flex-1 truncate"><Highlight text={action.label} indices={action.indices} /></span>{action.key && <kbd className="rounded border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">{action.key}</kbd>}
             </button>;
           })}
+          </div>
         </div>);
   return <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
-    <DialogContent hideClose overlayClassName="bg-foreground/25 backdrop-blur-[3px]"
-      className="max-w-[600px] gap-0 overflow-hidden rounded-xl border-border/70 p-0 shadow-2xl" data-quick-switcher
+    <DialogContent hideClose overlayClassName="backdrop-blur-[2px]"
+      className="max-w-[600px] gap-0 overflow-hidden p-0" data-quick-switcher
       onEscapeKeyDown={event => { if (composing.current || event.isComposing || event.keyCode === 229) event.preventDefault(); }}
       onKeyDown={event => {
         if (composing.current || event.nativeEvent.isComposing || event.keyCode === 229) return;
-        const command = event.metaKey && !event.altKey && !event.ctrlKey && !event.shiftKey;
-        if (command && event.key.toLowerCase() === 'n') {
+        const meta = event.metaKey && !event.altKey && !event.ctrlKey;
+        const command = meta && !event.shiftKey;
+        if (terminalActions && ((command && event.key.toLowerCase() === 'd') || (meta && event.shiftKey && event.key === 'Enter'))) {
+          event.preventDefault(); event.stopPropagation();
+          if (!event.repeat) (event.shiftKey ? terminalActions.onFocus : terminalActions.onSplit)();
+        } else if (command && event.key.toLowerCase() === 'n') {
           event.preventDefault(); event.stopPropagation();
           if (!event.repeat) onCreate();
         } else if (command && (event.key === 'Enter' || event.key.toLowerCase() === 't')) {
@@ -130,10 +144,10 @@ export function QuickSwitcher({ projects, statuses, onClose, onCreate, onCreateG
           onChange={event => { setQuery(event.target.value); setSelectedIndex(0); setTargetId(null); }} />
         <button onClick={onClose} className="rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent" aria-label="关闭快速切换">esc</button>
       </div>
-      <div ref={list} id="quick-switcher-results" role="listbox" aria-label="项目与操作" className="max-h-[min(58vh,460px)] overflow-y-auto pb-2">
+      <div ref={list} id="quick-switcher-results" role="listbox" aria-label="项目与操作" className="max-h-[min(58vh,460px)] overflow-y-auto px-3 pb-3">
         {creationFirst ? <>{actionResults}{projectResults}</> : <>{projectResults}{actionResults}</>}
       </div>
-      <footer className="flex flex-wrap gap-x-5 gap-y-1 border-t bg-muted/40 px-4 py-3 text-[10px] text-muted-foreground">
+      <footer className="h1-form-footer flex flex-wrap gap-x-5 gap-y-1 px-4 py-3 text-[11px] text-muted-foreground">
         <span>↑↓ 选择</span><span>↵ 打开</span><span>⌘↵ 启动 / 停止</span><span>⌘T 新终端</span><span>⌘N 添加</span><span>Esc 关闭</span>
       </footer>
     </DialogContent>

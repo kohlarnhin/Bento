@@ -14,7 +14,6 @@ import { useProjectLaunch } from '../lib/useProjectLaunch';
 import { usePortStandard } from '../lib/usePortStandard';
 import { hasAdvancedErrors, validateAdvanced } from '../lib/projectSettings';
 import type { AdvancedErrors } from '../lib/projectSettings';
-import { groupColor } from '../lib/sidebarModel';
 import { ProjectAdvancedFields } from './ProjectAdvancedFields';
 import { ProjectRescanCard } from './ProjectRescanCard';
 import { ProjectServiceFields, type ServiceErrors, type ServiceField } from './ProjectServiceFields';
@@ -44,7 +43,7 @@ type Field = Exclude<keyof Values, 'env' | 'commands' | 'autoOpen' | 'services' 
 type Errors = Partial<Record<Field, string>>;
 type Rescan = { status: 'scanning' } | { status: 'error'; message: string } |
   { status: 'ready'; result: ProjectDirInspection; unchecked: Set<RescanField> };
-const updatedInput = 'border-amber-300 bg-amber-50';
+const updatedInput = 'border-warning/45';
 const types = [
   { value: 'web', label: 'Web 项目', attributes: { 'data-type': 'web' } },
   { value: 'app', label: '桌面应用', attributes: { 'data-type': 'app' } },
@@ -83,7 +82,7 @@ function validateServices(services: ServiceDraft[], conflictForPort: (port: numb
 }
 
 function UpdatedBadge() {
-  return <span className="ml-1.5 rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-800">已更新</span>;
+  return <span className="ml-1.5 rounded-full bg-success-muted px-1.5 py-0.5 text-[10px] font-medium text-success-foreground">已更新</span>;
 }
 
 export function ProjectFormDialog({ project, initialInspection, focusPort, projects, groups, onCreateGroup, status, onClose, onSaved }: Props) {
@@ -101,8 +100,8 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
     const bucket = item.groupId && counts.has(item.groupId) ? item.groupId : '';
     if (bucket || !item.pinned) counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
   }
-  const groupOptions = [{ value: '', label: '未分组', color: groupColor(), count: counts.get('') },
-    ...groups.map(group => ({ value: group.id, label: group.name, color: groupColor(group.name), count: counts.get(group.id) }))];
+  const groupOptions = [{ value: '', label: '未分组', count: counts.get('') },
+    ...groups.map(group => ({ value: group.id, label: group.name, count: counts.get(group.id) }))];
   const [values, setValues] = useState<Values>(() => ({
     path: project?.path ?? initialInspection?.path ?? '', name: project?.name ?? '',
     displayName: project?.displayName ?? '', description: project?.description ?? '',
@@ -440,11 +439,11 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
 
   const detectedScript = multiService ? inspection?.startScripts?.find(script => script.command === values.startCommand.trim()) : undefined;
   const serviceLayout = multiService || !!diff?.serviceChanges.length;
-  const projectDetails = <>
+  const projectDetails = <div className="h1-group h1-form-group">
       <div className="space-y-2">
         <Label htmlFor="project-path">项目目录 <span className="text-destructive">*</span></Label>
         <div className="flex gap-2">
-        <Input {...fieldProps('path')} placeholder="~/Projects/my-project" autoFocus={!focusPort} className="font-mono text-[length:var(--text-control)]" />
+          <Input {...fieldProps('path')} placeholder="~/Projects/my-project" autoFocus={!focusPort} className="font-mono text-[length:var(--text-control)]" />
           <Button type="button" variant="outline" onClick={() => { void pickFolder(); }} disabled={saving}><FolderOpen data-icon="inline-start" />选择…</Button>
         </div>
         {message('path', '支持 ~，也可以从 Finder 拖入文件夹到侧边栏')}
@@ -463,14 +462,14 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
         <SegmentedControl labelledBy="project-type-label" options={types} value={values.type} onChange={type => change('type', type)}
           className={cn('border', updated.type && updatedInput)} disabled={saving} />
       </div>
-  </>;
+  </div>;
   const singlePort = (
       <div className="space-y-2">
         <Label htmlFor="project-port">端口 <span className="font-normal text-muted-foreground">（可选）</span>{updated.port && <UpdatedBadge />}</Label>
         <Input {...fieldProps('port')} inputMode="numeric" className={cn('font-mono text-[length:var(--text-control)]', updated.port && updatedInput)} placeholder={values.type === 'web' ? '例如 5173' : '无开发服务器时可留空'} />
         {message('port', portHint)}
         <div id="project-port-warnings" className="space-y-2" role="status" aria-live="polite">
-          {checkedPort?.inUse && <div className="flex gap-2 rounded-md border border-warning/20 bg-warning-muted p-2.5 text-[11px] text-warning-foreground">
+          {checkedPort?.inUse && <div className="flex gap-2 rounded-[9px] bg-[var(--h1-track)] p-2.5 text-[11px] text-warning-foreground">
             <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
             <div className="min-w-0 space-y-1">
               <p>此端口正被其他进程监听，仍可保存。</p>
@@ -492,7 +491,7 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
             </Button>)}
           </div>
         </div>}
-        <button type="button" className="flex items-center gap-1 rounded text-[12.5px] text-[var(--service-blue)] hover:underline focus-visible:outline-ring" disabled={saving} onClick={addService} data-add-service>
+        <button type="button" className="flex items-center gap-1 rounded text-[12.5px] text-foreground hover:underline focus-visible:outline-ring" disabled={saving} onClick={addService} data-add-service>
           <Plus className="size-3.5" />添加服务
         </button>
       </div>
@@ -500,7 +499,7 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
 
   return (<>
     <Dialog open onOpenChange={(isOpen) => { if (!isOpen && !saving && !standardDialog) onClose(); }}>
-      <DialogContent className={cn('flex max-h-[calc(100dvh-3rem)] flex-col gap-0 rounded-2xl p-0', serviceLayout ? 'max-w-[760px] rounded-[14px]' : project ? 'max-w-[680px]' : 'max-w-[620px]')}
+      <DialogContent className={cn('flex max-h-[calc(100dvh-3rem)] flex-col gap-0 rounded-2xl p-0', serviceLayout ? 'max-w-[760px]' : project ? 'max-w-[680px]' : 'max-w-[620px]')}
         overlayClassName="backdrop-blur-[1.5px]" hideClose={saving} data-project-form onOpenAutoFocus={event => {
           if (!focusPort) return;
           const control = form.current?.querySelector<HTMLInputElement>(values.services.length
@@ -523,7 +522,7 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
               <DialogTitle className={cn('min-w-0 truncate', serviceLayout && '!text-[17px]')} data-project-form-title>
                 {project ? '编辑项目' + (serviceLayout ? ' · ' + (project.displayName || project.name) : '') : '新建项目'}
               </DialogTitle>
-              {project && <Button ref={rescanButton} type="button" variant="outline" size="sm" className="rounded-lg" disabled={saving || scanning} onClick={() => { void scanAgain(); }}>
+              {project && <Button ref={rescanButton} type="button" variant="outline" size="sm" disabled={saving || scanning} onClick={() => { void scanAgain(); }}>
                 {scanning ? <Loader2 aria-hidden="true" className="!size-3.5 animate-spin" /> : <RotateCw aria-hidden="true" className="!size-3.5" />}
                 {scanning ? '扫描中…' : '重新扫描'}
               </Button>}
@@ -549,7 +548,13 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
                   });
                 }} />
             </div>}
-            {!serviceLayout && projectDetails}
+            {!serviceLayout && <section className="h1-form-section" aria-labelledby="project-details-heading">
+              <h2 id="project-details-heading" className="h1-group-title">项目资料</h2>
+              {projectDetails}
+            </section>}
+            <section className="h1-form-section" aria-labelledby="project-run-heading">
+              <h2 id="project-run-heading" className="h1-group-title">运行配置</h2>
+              <div className="h1-group h1-form-group">
             {!multiService && singlePort}
             <div className="space-y-[7px]">
               <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
@@ -569,7 +574,7 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
               </div>
               {errors.startCommand && message('startCommand')}
               {launchPreview?.error && <p className="text-xs text-warning-foreground" role="status" data-launch-preview-error>{launchPreview.error}</p>}
-              {launchPreview?.data && <div className="space-y-1.5 rounded-lg bg-muted/70 px-3 py-2.5 text-xs leading-relaxed"
+              {launchPreview?.data && <div className="space-y-1.5 rounded-[9px] bg-[var(--h1-track)] px-3 py-2.5 text-xs leading-relaxed"
                 data-launch-preview aria-live="polite">
                 {launchPreview.data.steps.map(step => <p key={step.serviceId ?? 'root'} className="break-words">
                   <span className="text-muted-foreground">启动时将执行：{step.dir !== '.' && step.dir + '/ · '}</span><code className="[overflow-wrap:anywhere]">{step.command}</code>
@@ -599,15 +604,17 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
                   : '按启动方式自动适配已填写的端口'}</span>
               </label>
             </div>
-            {serviceLayout && <details className="rounded-lg border border-card-border" data-project-basic-details>
-              <summary className="cursor-pointer rounded-lg px-3 py-2 text-xs font-medium text-muted-foreground">项目资料</summary>
-              <div className="space-y-4 px-3 pb-3 pt-1">{projectDetails}</div>
+              </div>
+            </section>
+            {serviceLayout && <details className="h1-form-section" data-project-basic-details>
+              <summary className="h1-group-title px-1.5">项目资料 <span aria-hidden="true">›</span></summary>
+              {projectDetails}
             </details>}
             <ProjectAdvancedFields values={canAutoOpen ? values : { ...values, autoOpen: false }} open={advancedOpen} onOpenChange={setAdvancedOpen} disabled={saving} canAutoOpen={canAutoOpen}
               errors={advancedErrors} onBlur={() => setAdvancedErrors(validateAdvanced(values.env, values.commands))}
               onChange={patch => { setValues(current => ({ ...current, ...patch })); setAdvancedErrors({ env: [], commands: [] }); }} />
           </div>
-          <footer className="flex shrink-0 justify-end gap-2.5 border-t border-card-border bg-background px-6 py-3.5">
+          <footer className="h1-form-footer flex shrink-0 justify-end gap-2.5 px-6 py-3.5">
             <Button type="button" variant="outline" disabled={saving} onClick={onClose}>取消</Button>
             <Button type="submit" disabled={saving || groupSaving || !!portConflictMessage || !!Object.keys(serviceConflicts).length} data-project-save>{saving && <Loader2 className="animate-spin" />}{saving ? '保存中…' : project ? '保存修改' : '添加项目'}</Button>
           </footer>

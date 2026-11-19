@@ -2,12 +2,12 @@ import type { HTMLAttributes } from 'react';
 import { cva, type VariantProps } from 'class-variance-authority';
 import { cn } from '../../lib/utils';
 
-const alertVariants = cva('relative w-full rounded-lg border p-4 text-sm [&>svg]:absolute [&>svg]:left-4 [&>svg]:top-4 [&>svg]:size-4 [&>svg~*]:pl-7', {
+const alertVariants = cva('h1-group relative w-full p-4 text-sm [&>svg]:absolute [&>svg]:left-4 [&>svg]:top-4 [&>svg]:size-4 [&>svg~*]:pl-7', {
   variants: {
     variant: {
-      default: 'bg-background text-foreground',
-      destructive: 'border-destructive/25 bg-destructive/5 text-destructive',
-      warning: 'border-warning/20 bg-warning-muted text-warning-foreground',
+      default: 'text-foreground',
+      destructive: '[&>svg]:text-destructive',
+      warning: '[&>svg]:text-warning-foreground',
     },
   },
   defaultVariants: { variant: 'default' },

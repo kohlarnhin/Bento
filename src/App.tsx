@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef, useMemo, useSyncExternalStore } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo, useSyncExternalStore, type CSSProperties } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
@@ -9,7 +9,8 @@ import { TooltipProvider } from './components/ui/tooltip';
 import { ProjectCard } from './components/ProjectCard';
 import { TerminalLogsModal } from './components/TerminalLogs';
 import { ProjectSidebar } from './components/ProjectSidebar';
-import { ProjectTerminal, type ProjectTerminalControls } from './components/ProjectTerminal';
+import { ProjectFocusRail } from './components/ProjectFocusRail';
+import { TerminalWorkspace, type TerminalWorkspaceControls } from './components/TerminalWorkspace';
 import { ProjectFormDialog } from './components/ProjectFormDialog';
 import { ProjectDeleteDialog } from './components/ProjectDeleteDialog';
 import { ExternalProcessDialog } from './components/ExternalProcessDialog';
@@ -26,7 +27,7 @@ import { Empty, EmptyTitle, EmptyDescription } from './components/ui/empty';
 import { createTerminal, getProjectTerminalSlots, getTerminalSnapshot, initTerminalRegistry, subscribeTerminals, terminalKey } from './lib/terminalRegistry';
 import { projectLogs } from './lib/useProjectLogs';
 import { recordRender } from './lib/renderMetrics';
-import { DEFAULT_TERMINAL_FONT_SIZE } from './lib/terminalAppearance';
+import { DEFAULT_TERMINAL_FONT_SIZE, TERMINAL_THEME } from './lib/terminalAppearance';
 import { clampTerminalFontSize, firstOpenedTerminalSlot, terminalsNeedingAttention } from './lib/terminalUsability';
 import { matchesSidebarFilter, sidebarNavigation, sidebarSections, type SidebarFilter } from './lib/sidebarModel';
 import { useProjectGitInfos } from './lib/useGitInfo';
@@ -43,6 +44,7 @@ import {
   PortOwner,
   DashboardConflict,
 } from './types';
+import './components/terminal.css';
 
 let sidebarDropContext: {
   isDialogOpen: () => boolean;
@@ -110,7 +112,13 @@ export function App() {
   recordRender('app');
   const updater = useUpdater();
   const settings = useSettings();
-  const terminalControls = useRef<ProjectTerminalControls>(null);
+  const terminalControls = useRef<TerminalWorkspaceControls>(null);
+  const [focusMode, setFocusMode] = useState(false);
+  const toggleFocusMode = useCallback(() => {
+    setFocusMode(value => !value);
+    terminalControls.current?.focusInput();
+  }, []);
+  const toggleSplit = useCallback(() => terminalControls.current?.toggleSplit(), []);
   const changeFontSize = settings.changeFontSize;
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [folderDropName, setFolderDropName] = useState<string | null>(null);
@@ -175,18 +183,35 @@ export function App() {
     setProjectNavigation(navigation => {
       const previous = navigation.activeSlots;
       let next = previous;
+      let selected = navigation.selection;
       for (const [projectId, slot] of Object.entries(previous)) {
         if (slot === 1 || terminals[terminalKey(projectId, slot)]) continue;
-        const slots = getProjectTerminalSlots(projectId, terminals);
-        const replacement = slots.filter(candidate => candidate < slot).at(-1) ?? slots.find(candidate => candidate > slot) ?? 1;
+        const slots = getProjectTerminalSlots(projectId, terminals).filter(candidate => terminals[terminalKey(projectId, candidate)]?.sessionId);
+        const replacement = slots.filter(candidate => candidate < slot).at(-1) ?? slots.find(candidate => candidate > slot);
         if (next === previous) next = { ...previous };
-        next[projectId] = replacement;
+        if (replacement !== undefined) next[projectId] = replacement;
+        else {
+          delete next[projectId];
+          if (selected?.projectId === projectId && selected.view === 'terminal') selected = { projectId, view: 'overview' };
+        }
       }
-      return next === previous ? navigation : { ...navigation, activeSlots: next };
+      return next === previous ? navigation : { selection: selected, activeSlots: next };
     });
   }, [terminals]);
+  const onTerminalClosed = useCallback((projectId: string, slot: number) => {
+    const replacement = firstOpenedTerminalSlot(projectId, Object.values(getTerminalSnapshot()));
+    setProjectNavigation(previous => {
+      if (previous.selection?.projectId !== projectId || previous.selection.view !== 'terminal' || (previous.activeSlots[projectId] ?? 1) !== slot) return previous;
+      return replacement === undefined ? { ...previous, selection: { projectId, view: 'overview' } } :
+        { ...previous, activeSlots: { ...previous.activeSlots, [projectId]: replacement } };
+    });
+  }, []);
+  const [focusedTerminal, setFocusedTerminal] = useState<{ projectId: string; slot: number }>();
+  const onFocusedTerminal = useCallback((projectId: string, slot: number) => {
+    setFocusedTerminal(previous => previous?.projectId === projectId && previous.slot === slot ? previous : { projectId, slot });
+  }, []);
   const watchedProjectId = selection?.view === 'terminal' && !quickOpen ? selection.projectId : null;
-  const watchedSlot = watchedProjectId ? activeSlots[watchedProjectId] ?? 1 : null;
+  const watchedSlot = watchedProjectId ? (focusedTerminal?.projectId === watchedProjectId ? focusedTerminal.slot : activeSlots[watchedProjectId] ?? 1) : null;
   const reportedTerminal = useRef<string | null>();
   const focusRequests = useRef(Promise.resolve());
   useEffect(() => {
@@ -287,29 +312,32 @@ export function App() {
         // Panel actions may close the dialog on keydown; swallow their later
         // keypress/keyup events before focus returns to an existing terminal.
         if (event.type === 'keydown' && (['Enter', 'Escape', 'ArrowUp', 'ArrowDown'].includes(event.key)
-          || (event.metaKey && ['t', 'n'].includes(event.key.toLowerCase())))) captured.add(physicalKey);
+          || (event.metaKey && ['t', 'n', 'd'].includes(event.key.toLowerCase())))) captured.add(physicalKey);
         return;
       }
       const inTerminal = navigation.current.view === 'terminal';
       const finding = inTerminal && terminalControls.current?.isFindOpen();
-      if (finding && event.key === 'Escape' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      if (finding && event.key === 'Escape' && !event.metaKey && !event.ctrlKey && !event.altKey
+          && !dialogOpen.current && !document.querySelector('[role="dialog"][data-state="open"]')) {
         event.preventDefault();
         event.stopPropagation();
         if (event.type === 'keydown') {
           captured.add(physicalKey);
-          if (!dialogOpen.current) terminalControls.current?.closeFind();
+          terminalControls.current?.closeFind();
         }
         return;
       }
       if (!event.metaKey || event.ctrlKey || event.altKey || event.isComposing || event.keyCode === 229) return;
       const key = event.key.toLowerCase();
+      const focusShortcut = inTerminal && event.shiftKey && key === 'enter';
+      const splitShortcut = inTerminal && !event.shiftKey && key === 'd';
       const cycle = event.shiftKey && ['BracketLeft', 'BracketRight'].includes(event.code) && inTerminal;
       const zoomIn = inTerminal && (event.code === 'Equal' || key === '=' || key === '+');
       const zoomOut = inTerminal && !event.shiftKey && (event.code === 'Minus' || key === '-');
       const zoomReset = inTerminal && !event.shiftKey && (event.code === 'Digit0' || key === '0');
       const jump = event.shiftKey && (event.code === 'KeyU' || key === 'u');
       const findNext = finding && key === 'g';
-      if (!cycle && !zoomIn && !zoomOut && !zoomReset && !jump && !findNext
+      if (!focusShortcut && !splitShortcut && !cycle && !zoomIn && !zoomOut && !zoomReset && !jump && !findNext
           && (event.shiftKey || (key !== 'p' && key !== 't' && key !== 'n' && key !== 'f' && key !== ',' && !/^[1-9]$/.test(key)))) return;
       event.preventDefault();
       event.stopPropagation();
@@ -317,8 +345,10 @@ export function App() {
       // in search and prevents a later event from reaching the old terminal.
       if (event.type !== 'keydown') return;
       captured.add(physicalKey);
-      if (dialogOpen.current) return;
+      if (dialogOpen.current || document.querySelector('[role="dialog"][data-state="open"]')) return;
       if (key === 'p' && !event.repeat) openQuickSwitcher();
+      else if (focusShortcut) { if (!event.repeat) toggleFocusMode(); }
+      else if (splitShortcut) { if (!event.repeat) toggleSplit(); }
       else if (zoomIn || zoomOut || zoomReset) {
         void changeFontSize(current => zoomReset ? DEFAULT_TERMINAL_FONT_SIZE : clampTerminalFontSize(current + (zoomIn ? 1 : -1)));
       } else if (jump) {
@@ -363,7 +393,7 @@ export function App() {
       sidebarDragPaths = [];
       void unlisten.then((stop) => stop());
     };
-  }, [openCreate, openSettings, openQuickSwitcher, openTerminal, selectProject, selectTerminalSlot, changeFontSize]);
+  }, [openCreate, openSettings, openQuickSwitcher, openTerminal, selectProject, selectTerminalSlot, changeFontSize, toggleFocusMode, toggleSplit]);
 
   useEffect(() => {
     const unlisten = listen('bento-open-settings', openSettings);
@@ -603,13 +633,23 @@ export function App() {
   const openStopAll = useCallback(() => {
     if (!dialogOpen.current) { dialogOpen.current = true; setStopAllOpen(true); }
   }, []);
+  const inTerminal = !!selectedProject && selection?.view === 'terminal';
+  const focusActive = inTerminal && focusMode;
+  const projectOrder = useMemo(() => sidebarNavigation(projects, groups), [projects, groups]);
+  const railProjects = focusActive ? [...projectOrder].sort((a, b) =>
+    Number(['running', 'starting'].includes(projectStatuses[b.id])) - Number(['running', 'starting'].includes(projectStatuses[a.id]))) : [];
+  if (focusActive && selectedProject?.archived) railProjects.unshift(selectedProject);
+  const activeSlot = selectedProject ? activeSlots[selectedProject.id] ?? 1 : 1;
+  const slots = selectedProject ? getProjectTerminalSlots(selectedProject.id, terminals) : [];
 
   return (
     <TooltipProvider delayDuration={150}>
-      <div className="flex h-screen overflow-hidden cursor-default select-none">
+      <div className="h1-window flex h-screen cursor-default select-none overflow-hidden" data-terminal-view={inTerminal || undefined}
+        data-focus-mode={focusActive || undefined} style={{ '--terminal-surface': TERMINAL_THEME.background } as CSSProperties}>
         <Toaster theme={settings.colorScheme} />
 
-        <ProjectSidebar
+        {focusActive && selectedProject ? <ProjectFocusRail projects={railProjects} statuses={projectStatuses}
+          selectedId={selectedProject.id} onSelect={selectProject} /> : <ProjectSidebar
           projects={projects}
           folderDropName={folderDropName}
           groups={groups}
@@ -631,13 +671,10 @@ export function App() {
           statuses={projectStatuses}
           conflicts={conflicts}
           selection={selection}
-          activeSlots={activeSlots}
           maxPerProject={settings.maxPerProject}
           loading={loading}
           projectsLoaded={projectsLoaded}
-          onSelect={selectView}
           onSelectProject={selectProject}
-          onSelectTerminal={selectSidebarTerminal}
           onCreateTerminal={openTerminal}
           onRefresh={loadProjects}
           onCreate={createProject}
@@ -647,12 +684,12 @@ export function App() {
           availableVersion={updater.update?.version}
           onCheckUpdates={updater.checkNow}
           onOpenSettings={openSettings}
-        />
+        />}
 
-        <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background">
-          {!selectedProject && <div data-tauri-drag-region className="h-8 shrink-0" aria-hidden="true" />}
+        <main className={'h1-main flex min-h-0 min-w-0 flex-1 flex-col' + (inTerminal ? ' terminal-chrome' : '')}>
+          {!selectedProject && <div data-tauri-drag-region className="h-10 shrink-0" aria-hidden="true" />}
           {projects.length === 0 ? (
-            <Empty className="m-6 flex-1">
+            <Empty className="h1-group flex-1">
               <FolderPlus className="size-8 text-muted-foreground" />
               <EmptyTitle>暂无配置项目</EmptyTitle>
               <EmptyDescription>
@@ -660,12 +697,23 @@ export function App() {
               </EmptyDescription>
               <Button onClick={() => openCreate()}>新建项目</Button>
             </Empty>
-          ) : selectedProject && selection?.view === 'terminal' ? (
-            <ProjectTerminal ref={terminalControls} key={selectedProject.id} project={selectedProject} activeSlot={activeSlots[selectedProject.id] ?? 1} />
           ) : selectedProject ? (
                 <ProjectCard
                   key={selectedProject.id}
                   project={selectedProject}
+                  view={selection?.view ?? 'overview'}
+                  slots={slots}
+                  activeSlot={activeSlot}
+                  terminals={terminals}
+                  maxTerminals={settings.maxPerProject}
+                  focused={focusActive}
+                  onToggleFocus={toggleFocusMode}
+                  onNewTerminal={() => openTerminal(selectedProject.id)}
+                  onTerminalClosed={slot => onTerminalClosed(selectedProject.id, slot)}
+                  terminalPane={<TerminalWorkspace ref={terminalControls} project={selectedProject} activeSlot={activeSlot}
+                    slots={slots} terminals={terminals} focused={focusActive} onFocusedSlot={onFocusedTerminal} />}
+                  onSelectView={view => selectView({ projectId: selectedProject.id, view })}
+                  onSelectTerminal={slot => selectSidebarTerminal(selectedProject.id, slot)}
                   status={projectStatuses[selectedProject.id] || 'stopped'}
                   runtime={runtimes[selectedProject.id]}
                   conflicts={selectedConflicts}
@@ -686,7 +734,12 @@ export function App() {
         </main>
 
         <UpdateDialog updater={updater} projects={managedProjects} terminalCount={terminalCount} />
-        {quickOpen && <QuickSwitcher projects={[...sidebarNavigation(projects, groups), ...projects.filter(project => project.archived)]} statuses={projectStatuses}
+        {quickOpen && <QuickSwitcher projects={[...projectOrder, ...projects.filter(project => project.archived)]} statuses={projectStatuses}
+          terminalActions={inTerminal ? {
+            focused: focusActive,
+            onFocus: () => { closeQuickSwitcher(); toggleFocusMode(); },
+            onSplit: () => { closeQuickSwitcher(); toggleSplit(); },
+          } : undefined}
           onClose={closeQuickSwitcher}
           onCreate={() => { closeQuickSwitcher(); openCreate(); }}
           onCreateGroup={() => { closeQuickSwitcher(); dialogOpen.current = true; setGroupForm({ action: 'create' }); }}

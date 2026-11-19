@@ -2,7 +2,7 @@ import type { HTMLAttributes } from 'react';
 import { cn } from '../../lib/utils';
 
 export function Empty({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('flex min-h-48 flex-col items-center justify-center gap-4 rounded-lg border border-dashed p-8 text-center', className)} {...props} />;
+  return <div className={cn('h1-group flex min-h-48 flex-col items-center justify-center gap-3 p-8 text-center', className)} {...props} />;
 }
 export function EmptyTitle({ className, ...props }: HTMLAttributes<HTMLHeadingElement>) {
   return <h3 className={cn('text-sm font-medium', className)} {...props} />;

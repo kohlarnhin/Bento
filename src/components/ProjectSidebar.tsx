@@ -1,19 +1,16 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { PointerEvent as ReactPointerEvent, RefObject } from 'react';
-import { isTauri } from '@tauri-apps/api/core';
-import { Archive, ArchiveRestore, ArrowDownToLine, ChevronRight, FolderOpen, FolderPlus, GripVertical, LayoutDashboard, MoreHorizontal, Pencil, Pin, PinOff, Plus, RefreshCw, RotateCcw, Search, Settings, Terminal, Trash2, X } from 'lucide-react';
+import { Archive, ArchiveRestore, ArrowDownToLine, Check, ChevronRight, FolderOpen, FolderPlus, GripVertical, ListFilter, MoreHorizontal, Pencil, Pin, PinOff, Plus, RefreshCw, Search, Settings, Square, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import type { PortConflict, ProjectConfig, ProjectGroup, ProjectSelection, ProjectStatus } from '../types';
-import { groupColor, matchesSidebarFilter, moveProjectOrder, sidebarDensity, sidebarSections, type SidebarFilter, type SidebarSection } from '../lib/sidebarModel';
+import { matchesSidebarFilter, moveProjectOrder, sidebarDensity, sidebarSections, type SidebarFilter, type SidebarSection } from '../lib/sidebarModel';
 import { projectPorts } from '../lib/projectServices';
-import { closeTerminal, getProjectTerminalSlots, getTerminalSnapshot, restartTerminal, subscribeTerminals, terminalKey, type TerminalStatus } from '../lib/terminalRegistry';
+import { getProjectTerminalSlots, getTerminalSnapshot, subscribeTerminals } from '../lib/terminalRegistry';
 import { cn } from '../lib/utils';
 import { recordRender } from '../lib/renderMetrics';
-import logo from '../assets/logo.svg';
 import Button from './ui/button';
 import { ActionTooltip } from './ui/tooltip';
 import { ScrollArea } from './ui/scroll-area';
-import { SegmentedControl } from './ui/segmented-control';
 import { Input } from './ui/input';
 import { ProjectAvatar } from './ProjectAvatar';
 import { SidebarMenu, type SidebarMenuItem } from './SidebarMenu';
@@ -40,13 +37,10 @@ interface Props {
   statuses: Record<string, ProjectStatus>;
   conflicts: PortConflict[];
   selection: ProjectSelection | null;
-  activeSlots: Record<string, number>;
   maxPerProject: number;
   loading: boolean;
   projectsLoaded: boolean;
-  onSelect: (selection: ProjectSelection) => void;
   onSelectProject: (projectId: string) => void;
-  onSelectTerminal: (projectId: string, slot: number) => void;
   onCreateTerminal: (projectId: string) => Promise<void>;
   onRefresh: () => void;
   onCreate: () => void;
@@ -81,97 +75,15 @@ interface ProjectDrag {
 
 const RUNNING_COLLAPSED_KEY = 'bento.sidebar.runningCollapsed';
 const ARCHIVED_COLLAPSED_KEY = 'bento.sidebar.archivedCollapsed';
-const nativeVibrancy = isTauri() && navigator.platform.startsWith('Mac');
 
 function readRunningCollapsed(): boolean {
   try { return JSON.parse(localStorage.getItem(RUNNING_COLLAPSED_KEY) ?? 'false') === true; }
   catch { return false; }
 }
 
-function GroupHeadingMarker({ color, expanded }: { color: string; expanded?: boolean }) {
-  return <span aria-hidden="true" className="relative size-[7px] shrink-0">
-    {expanded !== undefined && <ChevronRight className={cn('sidebar-heading-disclosure absolute left-1/2 top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 motion-safe:transition-transform', expanded && 'rotate-90')} />}
-    <span className="sidebar-heading-dot block size-full rounded-full" style={{ backgroundColor: color }} />
-  </span>;
-}
-
-function RestartTerminalButton({ projectId, slot, status, active, onSelect }: {
-  projectId: string; slot: number; status?: TerminalStatus; active: boolean; onSelect: Props['onSelectTerminal'];
-}) {
-  const [confirmUntil, setConfirmUntil] = useState(0);
-  const timer = useRef<ReturnType<typeof setTimeout>>();
-  useEffect(() => {
-    setConfirmUntil(0);
-    return () => clearTimeout(timer.current);
-  }, [status?.sessionId]);
-  const confirming = !!status?.alive && confirmUntil > 0;
-  const label = confirming ? '再次点击确认重启' : `重启终端 ${slot}`;
-  return (
-    <ActionTooltip label={label} side="right">
-      <Button
-        size="icon-sm"
-        variant={confirming ? 'ghost-destructive' : 'ghost'}
-        className={cn('sidebar-terminal-action no-drag shrink-0 opacity-0 transition-opacity group-hover/terminal:opacity-100 group-focus-within/terminal:opacity-100', (active || confirming) && 'opacity-100')}
-        aria-label={label}
-        title={label}
-        data-sidebar-terminal-restart={projectId}
-        data-sidebar-terminal-slot={slot}
-        data-confirming={confirming}
-        disabled={status?.opening}
-        onClick={() => {
-          onSelect(projectId, slot);
-          if (status?.alive && Date.now() >= confirmUntil) {
-            setConfirmUntil(Date.now() + 3000);
-            clearTimeout(timer.current);
-            timer.current = setTimeout(() => setConfirmUntil(0), 3000);
-            return;
-          }
-          clearTimeout(timer.current);
-          setConfirmUntil(0);
-          void restartTerminal(projectId, slot);
-        }}
-      >
-        <RotateCcw data-icon="inline-start" className={cn(status?.opening && 'animate-spin')} />
-      </Button>
-    </ActionTooltip>
-  );
-}
-
-function CloseTerminalButton({ projectId, slot, status, active }: {
-  projectId: string; slot: number; status?: TerminalStatus; active: boolean;
-}) {
-  const [confirmUntil, setConfirmUntil] = useState(0);
-  const [closing, setClosing] = useState(false);
-  const pending = useRef(false);
-  const timer = useRef<ReturnType<typeof setTimeout>>();
-  useEffect(() => {
-    setConfirmUntil(0);
-    return () => clearTimeout(timer.current);
-  }, [status?.sessionId]);
-  const confirming = !!status?.alive && confirmUntil > 0;
-  const label = confirming ? '再次点击确认关闭' : `关闭终端 ${slot}`;
-  return <ActionTooltip label={label} side="right">
-    <Button variant={confirming ? 'ghost-destructive' : 'ghost'} size="icon-sm"
-      className={cn('sidebar-terminal-action no-drag shrink-0 opacity-0 transition-opacity group-hover/terminal:opacity-100 group-focus-within/terminal:opacity-100', (active || confirming) && 'opacity-100')}
-      aria-label={label} title={label} data-sidebar-terminal-close={projectId} data-sidebar-terminal-slot={slot} data-confirming={confirming} disabled={closing || status?.opening}
-      onClick={() => {
-        if (pending.current) return;
-        if (status?.alive && Date.now() >= confirmUntil) {
-          setConfirmUntil(Date.now() + 3000);
-          clearTimeout(timer.current);
-          timer.current = setTimeout(() => setConfirmUntil(0), 3000);
-          return;
-        }
-        clearTimeout(timer.current);
-        setConfirmUntil(0);
-        pending.current = true;
-        setClosing(true);
-        void closeTerminal(projectId, slot).catch(error => toast.error(`关闭终端失败：${error}`)).finally(() => {
-          pending.current = false;
-          setClosing(false);
-        });
-      }}><X /></Button>
-  </ActionTooltip>;
+function GroupHeadingMarker({ expanded }: { expanded?: boolean }) {
+  return expanded === undefined ? null : <ChevronRight aria-hidden="true"
+    className={cn('sidebar-heading-disclosure absolute left-0 size-2.5 motion-safe:transition-transform', expanded && 'rotate-90')} />;
 }
 
 function NewTerminalButton({ projectId, atLimit, maxPerProject, onCreate }: {
@@ -190,22 +102,6 @@ function NewTerminalButton({ projectId, atLimit, maxPerProject, onCreate }: {
   </ActionTooltip>;
 }
 
-function TerminalStatusDot({ projectId, slot, status }: { projectId: string; slot: number; status?: TerminalStatus }) {
-  if (!status?.attention && !status?.alive) return null;
-  const label = status.attention ? '终端有新动静' : '终端会话已打开';
-  return <span className={cn('ml-auto size-1.5 shrink-0 rounded-full', status.attention ? 'bg-attention' : 'bg-[var(--sidebar-port)]')}
-    aria-label={label} title={label} data-terminal-attention={status.attention ? projectId : undefined} data-sidebar-terminal-slot={slot} />;
-}
-
-function TerminalRowLabel({ slot, title }: { slot: number; title?: string }) {
-  return <span className={cn('flex min-w-0 flex-1 items-baseline', title ? 'gap-1' : 'gap-2')}>
-    <span className="shrink-0">终端 {slot}</span>
-    {title && <span className="min-w-0 truncate text-label font-normal text-muted-foreground">
-      <span aria-hidden="true">· </span><span data-terminal-title>{title}</span>
-    </span>}
-  </span>;
-}
-
 function SidebarPort({ project, hideOnHover }: { project: ProjectConfig; hideOnHover?: boolean }) {
   const extra = projectPorts(project).filter(port => port !== project.port).length;
   if (project.port == null && !extra) return null;
@@ -214,7 +110,17 @@ function SidebarPort({ project, hideOnHover }: { project: ProjectConfig; hideOnH
   </span>;
 }
 
-export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDropName, groups: projectGroups, filter, onFilterChange, attentionProjects, changedProjects, onQuickSwitch, onUpdateGroup, onReorderGroups, onGroupAction, onProjectFlags, visibleProjects, searchQuery, searchInputRef, onSearchChange, onReorder, reordering, statuses, conflicts, selection, activeSlots, maxPerProject, loading, projectsLoaded, onSelect, onSelectProject, onSelectTerminal, onCreateTerminal, onRefresh, onCreate, managedCount, onStopAll, currentVersion, availableVersion, onCheckUpdates, onOpenSettings }: Props) {
+function ProjectRowStatus({ project, status, conflict, hideOnHover }: {
+  project: ProjectConfig; status: ProjectStatus; conflict?: boolean; hideOnHover?: boolean;
+}) {
+  if (status === 'stopped' && !conflict) return <SidebarPort project={project} hideOnHover={hideOnHover} />;
+  const label = conflict ? '端口冲突' : status === 'running' ? '运行中' : status === 'starting' ? '启动中' : '运行异常';
+  return <span className={cn('h1-status-dot', hideOnHover && 'group-hover/project:opacity-0 group-focus-within/project:opacity-0')}
+    title={[label, ...projectPorts(project).map(port => ':' + port)].join(' · ')} aria-label={label}
+    data-tone={conflict ? 'warning' : status} />;
+}
+
+export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDropName, groups: projectGroups, filter, onFilterChange, attentionProjects, changedProjects, onQuickSwitch, onUpdateGroup, onReorderGroups, onGroupAction, onProjectFlags, visibleProjects, searchQuery, searchInputRef, onSearchChange, onReorder, reordering, statuses, conflicts, selection, maxPerProject, loading, projectsLoaded, onSelectProject, onCreateTerminal, onRefresh, onCreate, managedCount, onStopAll, currentVersion, availableVersion, onCheckUpdates, onOpenSettings }: Props) {
   recordRender('projectSidebar');
   const [runningCollapsed, setRunningCollapsed] = useState(readRunningCollapsed);
   const [archivedCollapsed, setArchivedCollapsed] = useState(() => {
@@ -389,7 +295,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
         if (node instanceof HTMLButtonElement) node.tabIndex = -1;
       }
       ghost.dataset.density = density;
-      ghost.classList.add('sidebar-drag-preview', 'pointer-events-none', 'rounded-md', 'bg-sidebar', 'text-sidebar-foreground', 'shadow-xl', 'ring-1', 'ring-sidebar-border');
+      ghost.classList.add('sidebar-drag-preview', 'h1-popup', 'pointer-events-none');
       Object.assign(ghost.style, { position: 'fixed', left: '0', top: '0', width: `${rect.width}px`, zIndex: '60' });
       document.body.appendChild(ghost);
       current.ghost = ghost;
@@ -430,8 +336,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
   ] });
 
   const renderProject = (project: ProjectConfig, peers: ProjectConfig[], inRunning = false) => {
-    const selectedView = selection?.projectId === project.id ? selection.view : null;
-    const selected = selectedView !== null;
+    const selected = selection?.projectId === project.id;
     const slots = getProjectTerminalSlots(project.id, terminals);
     const conflict = conflicts.some(item => item.projectIds.includes(project.id));
     const status = statuses[project.id] || 'stopped';
@@ -442,7 +347,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
       <div className="sidebar-project-item sidebar-project-surface group/project relative flex items-center"
         data-selected={selected || undefined} data-highlighted={searchFocused && highlighted === project.id || undefined}
         onContextMenu={event => { event.preventDefault(); projectMenu(project, event.clientX, event.clientY); }}>
-        <button className={cn('sidebar-project-row flex min-w-0 flex-1 items-center gap-2.5 rounded-[inherit] px-2.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/50', canReorder && 'touch-none cursor-grab active:cursor-grabbing')}
+        <button className={cn('sidebar-project-row flex min-w-0 flex-1 items-center gap-2.5 rounded-[inherit] px-2.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50', canReorder && 'touch-none cursor-grab active:cursor-grabbing')}
           onPointerDown={event => startPointer(event, project.id)} onPointerMove={movePointer} onPointerUp={finishPointer} onPointerCancel={clearDrag}
           onLostPointerCapture={event => { if (drag.current?.pointerId === event.pointerId) clearDrag(); }}
           onKeyDown={event => {
@@ -468,7 +373,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
           <ProjectAvatar project={project} status={status} conflict={conflict} />
           <span className="min-w-0 flex-1 truncate">{name}</span>
           {attentionProjects.has(project.id) && <span className="size-1.5 shrink-0 rounded-full bg-attention" aria-label="终端有新动静" title="终端有新动静" data-terminal-attention={project.id} />}
-          <SidebarPort project={project} hideOnHover />
+          <ProjectRowStatus project={project} status={status} conflict={conflict} hideOnHover />
         </button>
         <div className="pointer-events-none absolute right-1 flex shrink-0 items-center rounded-control opacity-0 group-hover/project:pointer-events-auto group-hover/project:opacity-100 group-focus-within/project:pointer-events-auto group-focus-within/project:opacity-100">
           <NewTerminalButton projectId={project.id} atLimit={slots.length >= maxPerProject} maxPerProject={maxPerProject} onCreate={() => onCreateTerminal(project.id)} />
@@ -476,38 +381,13 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
             onClick={event => { const rect = event.currentTarget.getBoundingClientRect(); projectMenu(project, rect.left, rect.bottom); }}><MoreHorizontal className="size-3.5" /></Button>
         </div>
       </div>
-      {selected && (
-        <div className="sidebar-subitems flex flex-col">
-          <button data-project-view="overview" data-project-target={project.id} aria-current={selectedView === 'overview' ? 'page' : undefined} data-current={selectedView === 'overview' || undefined}
-            onClick={() => onSelect({ projectId: project.id, view: 'overview' })}
-            className="sidebar-subrow sidebar-subitem sidebar-project-surface flex min-w-0 items-center gap-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/50">
-            <LayoutDashboard className="size-[13px] shrink-0 stroke-[1.8]" /><span className="truncate">概览</span>
-          </button>
-          {slots.map(slot => {
-            const active = selectedView === 'terminal' && (activeSlots[project.id] ?? 1) === slot;
-            const terminal = terminals[terminalKey(project.id, slot)];
-            return <div key={slot} data-current={active || undefined} className="sidebar-subitem sidebar-project-surface group/terminal relative flex min-w-0 items-center">
-              <button data-project-view="terminal" data-project-target={project.id} data-project-terminal-slot={slot} aria-current={active ? 'page' : undefined}
-                title={terminal?.title ? `终端 ${slot} · ${terminal.title}` : undefined} onClick={() => onSelectTerminal(project.id, slot)}
-                className={cn('sidebar-subrow flex min-w-0 flex-1 items-center gap-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring/50', active && (slot === 1 ? 'pr-8' : 'pr-14'))}>
-                <Terminal className="size-[13px] shrink-0 stroke-[1.8]" /><TerminalRowLabel slot={slot} title={terminal?.title} />
-                <span className="ml-auto flex shrink-0 group-hover/terminal:opacity-0 group-focus-within/terminal:opacity-0"><TerminalStatusDot projectId={project.id} slot={slot} status={terminal} /></span>
-              </button>
-              <div className={cn('absolute right-1 flex items-center rounded-control bg-[var(--sidebar-background)]', !active && 'invisible group-hover/terminal:visible group-focus-within/terminal:visible')}>
-                <RestartTerminalButton projectId={project.id} slot={slot} status={terminal} active={active} onSelect={onSelectTerminal} />
-                {slot > 1 && <CloseTerminalButton projectId={project.id} slot={slot} status={terminal} active={active} />}
-              </div>
-            </div>;
-          })}
-        </div>
-      )}
     </div>;
   };
 
   const renderSection = (section: SidebarSection) => {
     const visible = section.projects.filter(project => visibleIds.has(project.id) && !runningUngroupedIds.has(project.id));
     if (filtering && !visible.length) return null;
-    if (section.id === 'ungrouped' && !projectGroups.length && !visible.length && projects.length) return null;
+    if (section.id === 'ungrouped' && !visible.length && projects.length && !draggingId) return null;
     const open = filtering ? !temporaryCollapsed.has(section.id) : section.id === 'archived' ? !archivedCollapsed : !section.group?.collapsed;
     const members = section.group ? projects.filter(project => !project.archived && project.groupId === section.group!.id) : section.projects.filter(project => !runningUngroupedIds.has(project.id));
     const runningCount = members.filter(project => runningIds.has(project.id)).length;
@@ -524,9 +404,9 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
             else if (section.group) void onUpdateGroup(section.id, { collapsed: open }).catch(error => toast.error(`保存折叠状态失败：${error}`));
           }}>
           {section.id === 'pinned' ? <Pin aria-hidden="true" className="size-3 shrink-0" />
-            : (collapsible || projectGroups.length > 0) && <GroupHeadingMarker color={groupColor(section.group?.name)} expanded={collapsible ? open : undefined} />}
+            : (collapsible || projectGroups.length > 0) && <GroupHeadingMarker expanded={collapsible ? open : undefined} />}
           <span className="truncate" title={section.name}>{section.name}</span>
-          {runningCount > 0 && <span className="ml-1.5 shrink-0 rounded-full bg-[rgba(16,185,129,.12)] px-[7px] py-px text-[10px] leading-[14px] text-[#047857]" data-group-running={section.id}>{runningCount} 运行</span>}
+          {runningCount > 0 && <span className="sr-only" data-group-running={section.id}>{runningCount} 运行</span>}
         </button>
         <div className="flex h-0 shrink-0 items-center">
           {section.group && <>
@@ -544,7 +424,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
           </>}
           {(section.group || section.id === 'ungrouped') && <ActionTooltip label="新建分组"><Button variant="ghost" size="icon-sm" className="sidebar-heading-action size-[18px]" aria-label="新建分组" data-create-group onClick={() => onGroupAction('create')}><FolderPlus className="size-3.5" /></Button></ActionTooltip>}
         </div>
-        <span className="sidebar-number font-medium" data-group-count={section.id}>{filtering ? `${visible.length} / ${members.length}` : members.length}</span>
+        <span className="sr-only" data-group-count={section.id}>{filtering ? `${visible.length} / ${members.length}` : members.length}</span>
       </div>
       {open && <div id={`sidebar-section-${section.id}`} className="sidebar-project-list">
         {visible.map(project => renderProject(project, visible))}
@@ -555,8 +435,8 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
   const renderRunning = () => !filtering && runningProjects.length > 0 && <section ref={runningSection} aria-labelledby="sidebar-running-heading" data-running-section>
     <button className="sidebar-group-heading flex w-full items-center gap-[7px] text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
       aria-label={runningCollapsed ? '展开运行中项目' : '收起运行中项目'} aria-expanded={!runningCollapsed} aria-controls="sidebar-running-projects" data-running-toggle onClick={() => setRunningCollapsed(previous => !previous)}>
-      <GroupHeadingMarker color="#10b981" expanded={!runningCollapsed} /><span id="sidebar-running-heading">运行中</span>
-      <span className="sidebar-number ml-auto font-medium" data-running-count>{running}</span>
+      <GroupHeadingMarker expanded={!runningCollapsed} /><span id="sidebar-running-heading">运行中</span>
+      <span className="sr-only" data-running-count>{running}</span>
     </button>
     {!runningCollapsed && <ScrollArea className="[&>[data-radix-scroll-area-viewport]]:max-h-[28vh]">
       <nav id="sidebar-running-projects" aria-label="运行中的项目" className="sidebar-project-list">
@@ -569,30 +449,45 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
             <ProjectAvatar project={project} status={statuses[project.id]} />
             <span className="min-w-0 flex-1 truncate">{project.displayName || project.name}</span>
             {attentionProjects.has(project.id) && <span className="size-1.5 shrink-0 rounded-full bg-attention" aria-label="终端有新动静" />}
-            <SidebarPort project={project} />
+            <ProjectRowStatus project={project} status={statuses[project.id] ?? 'stopped'} />
           </button>;
         })}
       </nav>
     </ScrollArea>}
   </section>;
 
-  return <aside className="app-sidebar relative flex shrink-0 flex-col text-sidebar-foreground" aria-label="项目侧边栏" data-density={density} data-native-vibrancy={nativeVibrancy || undefined} data-folder-drag={folderDropName ? 'true' : undefined}
+  const sidebarActions = (button: HTMLButtonElement) => {
+    const rect = button.getBoundingClientRect();
+    const filters = [
+      { value: 'all', label: '全部项目', count: projects.length },
+      { value: 'running', label: '运行中', count: running },
+      { value: 'attention', label: '终端提醒', count: projects.filter(project => attentionProjects.has(project.id)).length },
+      { value: 'changes', label: '有改动', count: projects.filter(project => changedProjects.has(project.id)).length },
+    ] as const;
+    setMenu({ x: rect.right - 160, y: rect.bottom + 6, items: [
+      ...filters.map(item => ({ label: item.label + ' · ' + item.count,
+        icon: filter === item.value ? <Check /> : <span className="size-3.5" />,
+        current: filter === item.value, onSelect: () => onFilterChange(item.value) })),
+      { label: '刷新项目状态', icon: <RefreshCw />, disabled: loading, onSelect: onRefresh },
+      { label: updateLabel + (currentVersion && !availableVersion ? ' · ' + versionLabel : ''), icon: <ArrowDownToLine />, onSelect: onCheckUpdates },
+      ...(managedCount > 0 ? [{ label: '全部停止', icon: <Square />, onSelect: onStopAll }] : []),
+    ] });
+  };
+
+  return <aside className="app-sidebar relative flex shrink-0 flex-col" aria-label="项目侧边栏" data-density={density} data-folder-drag={folderDropName ? 'true' : undefined}
     onKeyDownCapture={event => { if (event.key === 'Escape' && drag.current?.active) { event.preventDefault(); event.stopPropagation(); clearDrag(); } }}>
-    <div className="sidebar-glass" aria-hidden="true" />
-    <div data-tauri-drag-region className="h-[46px] shrink-0" />
-    <header data-tauri-drag-region className="flex shrink-0 items-center gap-2.5 px-4 pb-3.5">
-      <img src={logo} alt="" className="pointer-events-none size-8 shrink-0" />
-      <div className="pointer-events-none min-w-0 flex-1"><h1 className="text-brand font-heading leading-[21px] tracking-title text-foreground">Bento</h1>
-        <p className="mt-px truncate text-meta leading-4 text-muted-foreground">{projects.length} 个项目 · <span className="font-semibold text-success" data-running-header>{running} 运行中</span></p></div>
-      <div className="no-drag flex shrink-0 items-center gap-2.5">
-        <ActionTooltip label="刷新项目状态" side="bottom"><Button variant="ghost" size="icon-sm" aria-label="刷新项目状态" onClick={onRefresh} disabled={loading}><RefreshCw className={cn(loading && 'animate-spin')} /></Button></ActionTooltip>
-        <ActionTooltip label="添加项目 ⌘N" side="bottom" align="end"><Button size="sm" className="h-[31px] gap-1 rounded-[8px] px-3 font-semibold shadow-none hover:ring-[3px] hover:ring-primary/15" aria-label="添加项目" aria-keyshortcuts="Meta+n" onClick={onCreate} data-create-project><Plus data-icon="inline-start" />添加</Button></ActionTooltip>
-      </div>
+    <header data-tauri-drag-region className="sidebar-chrome">
+      <ActionTooltip label="项目筛选与操作" side="bottom">
+        <Button size="icon-sm" variant="ghost" aria-label="项目筛选与操作" aria-haspopup="menu" data-sidebar-tools
+          data-filter-active={filter !== 'all' || undefined} onClick={event => sidebarActions(event.currentTarget)}>
+          {filter !== 'all' ? <ListFilter /> : <MoreHorizontal />}
+        </Button>
+      </ActionTooltip>
     </header>
-    <div className="relative mx-3 shrink-0">
-      <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3 -translate-y-1/2 text-[#a1a1aa]" />
-      <Input ref={searchInputRef} type="search" placeholder="搜索或跳转项目…" aria-label="搜索项目" aria-controls="project-list" data-project-search
-        className="sidebar-search h-[35px] border-0 pl-[30px] pr-14 placeholder:text-[#a1a1aa] [&::-webkit-search-cancel-button]:hidden" value={searchQuery}
+    <div className="sidebar-search-wrap relative shrink-0">
+      <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />
+      <Input ref={searchInputRef} type="search" placeholder="搜索项目" aria-label="搜索项目" aria-controls="project-list" data-project-search
+        className="sidebar-search [&::-webkit-search-cancel-button]:hidden" value={searchQuery}
         onFocus={() => setSearchFocused(true)} onBlur={() => setSearchFocused(false)} onChange={event => { onSearchChange(event.target.value); setHighlightedId(null); }}
         onKeyDown={event => {
           if (event.nativeEvent.isComposing || event.keyCode === 229) return;
@@ -605,58 +500,38 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
           else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (searchQuery) { onSearchChange(''); setHighlightedId(null); } else event.currentTarget.blur(); }
         }} />
       {searchQuery ? <Button variant="ghost" size="icon-sm" className="absolute right-1 top-1/2 -translate-y-1/2" aria-label="清除搜索" onClick={() => { onSearchChange(''); setHighlightedId(null); searchInputRef.current?.focus(); }}><X className="size-3.5" /></Button>
-        : <button aria-label="快速切换项目 (⌘P)" aria-keyshortcuts="Meta+p" title="快速切换项目 (⌘P)" className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded border border-black/[.08] px-[5px] py-px text-keycap leading-[15px] text-muted-foreground hover:bg-[var(--sidebar-hover)]" onClick={onQuickSwitch}>⌘P</button>}
+        : <button aria-label="快速切换项目 (⌘P)" aria-keyshortcuts="Meta+p" title="快速切换项目 (⌘P)" className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded px-[5px] py-px text-keycap leading-[15px] text-muted-foreground hover:bg-[var(--h1-hover)]" onClick={onQuickSwitch}>⌘P</button>}
     </div>
-    {projects.length > 0 && <SegmentedControl label="项目状态筛选" className="mx-3 mb-1 mt-2.5 shrink-0" value={filter} onChange={onFilterChange}
-      options={([{ id: 'all', label: '全部', count: null }, { id: 'running', label: '运行中', count: running },
-        { id: 'attention', label: '提醒', count: projects.filter(project => attentionProjects.has(project.id)).length },
-        { id: 'changes', label: '改动', count: projects.filter(project => changedProjects.has(project.id)).length }] as const).map(item => ({
-          value: item.id, attributes: { 'data-sidebar-filter': item.id },
-          label: <>{item.label}{item.count != null && <span className="sidebar-filter-count tabular-nums">{item.count}</span>}</>,
-        }))} />}
-    <ScrollArea ref={scrollArea} className="min-h-0 flex-1 px-3 pb-2">
+    <ScrollArea ref={scrollArea} className="sidebar-scroll min-h-0 flex-1">
       <nav id="project-list" aria-label="项目列表" className="flex min-h-full flex-col">
-        {projectsLoaded && !loading && projects.length === 0 ? <div className="mx-2 mt-6 rounded-lg border border-dashed border-muted-foreground/35 px-3 py-5 text-center" data-sidebar-empty>
+        {projectsLoaded && !loading && projects.length === 0 ? <div className="h1-group mt-4 px-3 py-5 text-center" data-sidebar-empty>
           <p className="text-sm font-medium text-foreground">还没有项目</p>
           <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">把项目文件夹拖到这里</p>
           <p className="mt-0.5 text-[11px] text-muted-foreground">或者</p>
           <Button size="sm" className="mt-3 gap-1 px-2.5 text-[11px]" onClick={onCreate} data-add-first-project><Plus className="!size-3.5" />添加第一个项目</Button>
         </div> : <>
         {filtering && <p className="px-2 pb-1 pt-2 text-[10px] leading-relaxed text-muted-foreground" data-reorder-search-hint>清除搜索和筛选后可拖动排序</p>}
-        {filtering && !visibleProjects.length && <p role="status" className="px-2 py-6 text-xs leading-relaxed text-muted-foreground break-all" data-project-search-empty>{searching ? `没有匹配「${searchQuery.trim()}」的项目` : '没有符合筛选条件的项目'}</p>}
+        {filtering && !visibleProjects.length && <p role="status" className="h1-group mt-2 break-all px-3 py-5 text-xs leading-relaxed text-muted-foreground" data-project-search-empty>{searching ? `没有匹配「${searchQuery.trim()}」的项目` : '没有符合筛选条件的项目'}</p>}
         {sections.filter(section => section.id === 'pinned').map(renderSection)}
         {renderRunning()}
         {sections.filter(section => section.id !== 'pinned').map(renderSection)}
         </>}
       </nav>
     </ScrollArea>
-    <footer className="sidebar-footer mx-3 flex shrink-0 items-center gap-2 px-1.5 pb-3 pt-2.5 text-meta text-muted-foreground" data-update-footer data-managed-footer={managedCount > 0 || undefined}>
-      <div className="flex min-w-0 items-center gap-1">
-        {running > 0 && <>
-          <span aria-hidden="true" className="mr-0.5 size-1.5 shrink-0 rounded-full bg-[#10b981]" />
-          <span className="whitespace-nowrap" data-running-footer>{running} 运行中</span>
-          <span aria-hidden="true">·</span>
-        </>}
-        <ActionTooltip label={updateLabel} side="right">
-          <Button variant="ghost" size="sm" className="h-6 min-w-0 gap-1 px-0.5 text-meta font-normal hover:bg-[var(--sidebar-hover)]" aria-label={currentVersion ? `${versionLabel}，${updateLabel}` : updateLabel} onClick={onCheckUpdates} data-check-updates>
-            <span className="truncate">{versionLabel}</span>
-            {availableVersion && <ArrowDownToLine aria-hidden="true" className="text-foreground" />}
-          </Button>
-        </ActionTooltip>
-      </div>
-      <div className="ml-auto flex shrink-0 items-center gap-1.5">
-        {managedCount > 0 && <Button variant="outline" size="sm" className="h-6 border-0 bg-background/70 px-[9px] text-meta font-normal text-foreground shadow-[0_0_0_.5px_rgba(0,0,0,.12)]" onClick={onStopAll} data-stop-all>全部停止</Button>}
-        <ActionTooltip label="设置" side="right">
-          <Button variant="ghost" size="icon-sm" className="size-6 hover:bg-[var(--sidebar-hover)]" aria-label="设置" onClick={onOpenSettings} data-open-settings><Settings /></Button>
-        </ActionTooltip>
-      </div>
+    <footer className="sidebar-footer" data-update-footer data-managed-footer={managedCount > 0 || undefined}>
+      <Button variant="outline" className="flex-1" aria-label="添加项目" aria-keyshortcuts="Meta+n" onClick={onCreate} data-create-project>
+        <Plus data-icon="inline-start" />添加项目
+      </Button>
+      <ActionTooltip label="设置" side="right">
+        <Button variant="outline" className="sidebar-settings" aria-label="设置" onClick={onOpenSettings} data-open-settings><Settings /></Button>
+      </ActionTooltip>
     </footer>
-    {folderDropName && <div className="pointer-events-none absolute inset-2 z-40 flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed border-success bg-success-muted/95 px-4 text-center text-success-foreground backdrop-blur-[1px]" role="status" aria-live="polite" data-folder-drop-overlay>
-      <FolderOpen className="mb-1 size-12 text-success/75" strokeWidth={1.5} />
+    {folderDropName && <div className="pointer-events-none absolute inset-2 z-40 flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed border-border bg-popover px-4 text-center text-foreground" role="status" aria-live="polite" data-folder-drop-overlay>
+      <FolderOpen className="mb-1 size-12 text-muted-foreground" strokeWidth={1.5} />
       <p className="max-w-full break-words text-sm font-semibold">松开以添加 {folderDropName}</p>
-      <p className="text-[11px] leading-relaxed text-success">会自动识别启动命令和端口</p>
+      <p className="text-[11px] leading-relaxed text-muted-foreground">会自动识别启动命令和端口</p>
     </div>}
-    <div ref={indicator} hidden={!draggingId} aria-hidden="true" data-reorder-indicator className="pointer-events-none fixed z-[70] h-0.5 rounded-full bg-attention" />
+    <div ref={indicator} hidden={!draggingId} aria-hidden="true" data-reorder-indicator className="pointer-events-none fixed z-[70] h-0.5 rounded-full bg-foreground/60" />
     {menu && <SidebarMenu {...menu} onClose={closeMenu} />}
   </aside>;
 });

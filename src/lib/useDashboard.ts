@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { DashboardGit, DashboardHealth, DashboardSnapshot, ProjectConfig, ProjectRuntimeStatus } from '../types';
+import type { DashboardGit, DashboardHealth, DashboardSnapshot, ProjectConfig, ProjectRuntimeStatus, ProjectView } from '../types';
 
 function useDashboardPoll(task: () => void, delay: number, events: { focus?: boolean } = {}) {
   const action = useRef(task);
@@ -27,7 +27,7 @@ function useDashboardPoll(task: () => void, delay: number, events: { focus?: boo
   }, [delay, onFocus]);
 }
 
-export function useDashboard(project: ProjectConfig, runtime?: ProjectRuntimeStatus) {
+export function useDashboard(project: ProjectConfig, runtime: ProjectRuntimeStatus | undefined, view: ProjectView) {
   const { id, path } = project;
   const [snapshot, setSnapshot] = useState<DashboardSnapshot>();
   const [snapshotError, setSnapshotError] = useState<string>();
@@ -84,7 +84,7 @@ export function useDashboard(project: ProjectConfig, runtime?: ProjectRuntimeSta
       .then(value => { if (instance === lifetime.current) setGit(value); })
       .catch(() => {})
       .finally(() => { if (gitPending.current === instance) gitPending.current = undefined; });
-  }, 15_000, { focus: true });
+  }, view === 'terminal' ? 0 : 15_000, { focus: view !== 'terminal' });
 
   const listening = snapshot?.services.some(service => service.state === 'listening') ?? false;
   useDashboardPoll(() => {
@@ -103,7 +103,7 @@ export function useDashboard(project: ProjectConfig, runtime?: ProjectRuntimeSta
         setHealth(previous => ({ ...previous, ...results }));
       }).catch(() => {})
       .finally(() => { if (healthPending.current === request) healthPending.current = undefined; });
-  }, listening ? 10_000 : 0);
+  }, listening && view === 'overview' ? 10_000 : 0);
 
   useEffect(() => {
     const unlisten = listen<string>('dashboard-run-saved', ({ payload }) => {
