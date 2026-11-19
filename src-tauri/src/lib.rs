@@ -20,6 +20,7 @@ mod git;
 mod settings;
 mod sidebar;
 mod autostart;
+mod traffic_lights;
 use lifecycle::ProcessMap;
 use projects::{PortConflictCheck, ProjectDraft, ProjectDirInspection};
 #[cfg(debug_assertions)]
@@ -537,6 +538,12 @@ pub fn run() {
             if let Err(error) = settings::initialize_appearance(app.handle()) {
                 eprintln!("Bento appearance: {error}");
             }
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(error) = traffic_lights::install(&window) {
+                    eprintln!("Bento traffic lights: {error}");
+                }
+            }
             show_initial_window(app.handle());
             Ok(())
         })
@@ -585,6 +592,7 @@ pub fn run() {
         open_config_file,
         settings::get_settings,
         settings::set_setting,
+        traffic_lights::set_traffic_light_layout,
         autostart::autostart_status,
         autostart::set_autostart,
         terminal::terminal_open,

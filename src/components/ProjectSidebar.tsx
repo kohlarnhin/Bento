@@ -500,7 +500,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, folderDro
           else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (searchQuery) { onSearchChange(''); setHighlightedId(null); } else event.currentTarget.blur(); }
         }} />
       {searchQuery ? <Button variant="ghost" size="icon-sm" className="absolute right-1 top-1/2 -translate-y-1/2" aria-label="清除搜索" onClick={() => { onSearchChange(''); setHighlightedId(null); searchInputRef.current?.focus(); }}><X className="size-3.5" /></Button>
-        : <button aria-label="快速切换项目 (⌘P)" aria-keyshortcuts="Meta+p" title="快速切换项目 (⌘P)" className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded px-[5px] py-px text-keycap leading-[15px] text-muted-foreground hover:bg-[var(--h1-hover)]" onClick={onQuickSwitch}>⌘P</button>}
+        : <button aria-label="快速切换项目 (⌘P)" aria-keyshortcuts="Meta+p" title="快速切换项目 (⌘P)" className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded px-[5px] py-px text-keycap leading-[15px] text-[var(--h1-label)] hover:bg-[var(--h1-hover)]" onClick={onQuickSwitch}>⌘P</button>}
     </div>
     <ScrollArea ref={scrollArea} className="sidebar-scroll min-h-0 flex-1">
       <nav id="project-list" aria-label="项目列表" className="flex min-h-full flex-col">

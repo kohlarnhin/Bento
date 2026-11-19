@@ -94,7 +94,7 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
         },
         accessory: <>{status?.sessionId && <button type="button" className="terminal-tab-close" title={`关闭终端 ${slot}`}
           aria-label={`关闭终端 ${slot}`} data-terminal-tab-close={slot} disabled={busy || status.opening}
-          onClick={() => request('close', slot)}><X size={12} aria-hidden="true" /></button>}</>,
+          onClick={() => request('close', slot)}><X size={10} aria-hidden="true" /></button>}</>,
         after: index === slots.length - 1 ? add : undefined,
       };
     }),
