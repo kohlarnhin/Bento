@@ -5,8 +5,8 @@
 @layer base {
   :root, .h1-window[data-terminal-view] > .app-sidebar {
     color-scheme: light;
-    --font-ui: -apple-system, "SF Pro Text", "PingFang SC", sans-serif;
-    --font-mono: "SF Mono", Menlo, "JetBrains Mono", monospace;
+    --font-ui: -apple-system, "PingFang SC", sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
     --text-title: 19px;
     --text-body: 13px;
     --text-control: 12.5px;
@@ -290,6 +290,7 @@
     padding: 0 36px 0 28px;
     box-shadow: none;
   }
+  .sidebar-search-wrap input.sidebar-search::placeholder { color: var(--h1-label); }
   .sidebar-search-wrap input.sidebar-search:focus-visible { box-shadow: inset 0 0 0 1px hsl(var(--ring) / .7); }
   .sidebar-scroll { padding: 0 12px 8px; }
 
@@ -342,7 +343,7 @@
   .sidebar-group-heading:hover .sidebar-heading-action:not(:disabled),
   .sidebar-heading-action:focus-visible { pointer-events: auto; }
   .sidebar-footer { display: flex; flex: none; align-items: center; gap: 8px; padding: 12px 18px 22px; }
-  .sidebar-footer button { height: 32px; }
+  .sidebar-footer button { height: 32px; font-size: 13px; }
   .sidebar-settings { width: 43px; flex: none; padding: 0; }
 
   .segmented-control {

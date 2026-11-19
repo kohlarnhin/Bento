@@ -635,6 +635,10 @@ export function App() {
   }, []);
   const inTerminal = !!selectedProject && selection?.view === 'terminal';
   const focusActive = inTerminal && focusMode;
+  useEffect(() => {
+    void invoke('set_traffic_light_layout', { layout: focusActive ? 'focus' : 'sidebar' })
+      .catch(error => console.warn('Bento traffic lights:', error));
+  }, [focusActive]);
   const projectOrder = useMemo(() => sidebarNavigation(projects, groups), [projects, groups]);
   const railProjects = focusActive ? [...projectOrder].sort((a, b) =>
     Number(['running', 'starting'].includes(projectStatuses[b.id])) - Number(['running', 'starting'].includes(projectStatuses[a.id]))) : [];
@@ -645,7 +649,10 @@ export function App() {
   return (
     <TooltipProvider delayDuration={150}>
       <div className="h1-window flex h-screen cursor-default select-none overflow-hidden" data-terminal-view={inTerminal || undefined}
-        data-focus-mode={focusActive || undefined} style={{ '--terminal-surface': TERMINAL_THEME.background } as CSSProperties}>
+        data-focus-mode={focusActive || undefined} style={{
+          '--terminal-surface': TERMINAL_THEME.background,
+          '--terminal-text-color': TERMINAL_THEME.foreground,
+        } as CSSProperties}>
         <Toaster theme={settings.colorScheme} />
 
         {focusActive && selectedProject ? <ProjectFocusRail projects={railProjects} statuses={projectStatuses}

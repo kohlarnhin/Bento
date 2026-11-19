@@ -27,10 +27,9 @@
 }
 
 .h1-toolbar h1 {
-  font-size: 15.5px;
+  font-size: 15px;
   line-height: 21px;
-  font-weight: 650;
-  letter-spacing: -.015em;
+  font-weight: 600;
 }
 
 .dash-badge {

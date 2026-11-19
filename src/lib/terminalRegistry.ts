@@ -8,11 +8,9 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { SearchAddon } from '@xterm/addon-search';
 import '@xterm/xterm/css/xterm.css';
-import '@fontsource/jetbrains-mono/latin-400.css';
-import '@fontsource/jetbrains-mono/latin-700.css';
 import type { TerminalAttention, TerminalOpenResult, TerminalOutput, TerminalSessionInfo } from '../types';
 import { formatDroppedPaths, recoverShiftedImeInput, trackBareShift, transformTypedInput, type TerminalImeState } from './terminalInput';
-import { DEFAULT_TERMINAL_FONT_SIZE, TERMINAL_FONT_FAMILY, TERMINAL_LINE_HEIGHT, TERMINAL_THEME } from './terminalAppearance';
+import { DEFAULT_TERMINAL_FONT_SIZE, TERMINAL_FALLBACK_FONT_FAMILY, TERMINAL_FONT_FAMILY, TERMINAL_LINE_HEIGHT, TERMINAL_THEME } from './terminalAppearance';
 import { createTitlePublisher } from './terminalUsability';
 
 type TerminalExit = Pick<TerminalSessionInfo, 'projectId' | 'slot' | 'sessionId' | 'exitCode'>;
@@ -120,8 +118,12 @@ function loadTerminalFonts(): Promise<void> {
     )).then(async (faces) => {
       if (faces.some((weight) => weight.length === 0)) throw new Error('JetBrains Mono 字体未加载');
       await document.fonts.ready;
-      // Also re-fit retained instances if the bundled faces finish loading after a remount.
-      requestAnimationFrame(() => registry.entries.forEach((entry) => fitTerminal(entry.projectId, entry.slot)));
+      requestAnimationFrame(() => registry.entries.forEach((entry) => {
+        if (!entry.opened || !visible(entry)) return;
+        // Updating the family invalidates xterm's cached measurements if it opened on the fallback.
+        entry.terminal.options.fontFamily = TERMINAL_FONT_FAMILY;
+        fitTerminal(entry.projectId, entry.slot);
+      }));
     }).catch((error) => {
       terminalFonts = undefined;
       throw error;
@@ -554,8 +556,12 @@ async function hydrate(entry: Entry, restart: boolean) {
 async function showTerminal(entry: Entry, shouldFocus: () => boolean) {
   await initTerminalRegistry(registry.showError);
   // A missing bundled face must not keep the terminal from opening; the fallback fonts still work.
-  await loadTerminalFonts().catch((error) => console.warn('Terminal font:', error));
+  const fontFamily = await loadTerminalFonts().then(() => TERMINAL_FONT_FAMILY, (error) => {
+    console.warn('Terminal font:', error);
+    return TERMINAL_FALLBACK_FONT_FAMILY;
+  });
   if (entry.disposed || !visible(entry)) return;
+  entry.terminal.options.fontFamily = fontFamily;
   if (!entry.opened) {
     entry.terminal.open(entry.container);
     const textarea = entry.terminal.textarea!;

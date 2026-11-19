@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { ArrowUpRight, CodeXml, Ellipsis, Globe2, Play, Square } from 'lucide-react';
+import { ArrowUpRight, CodeXml, Ellipsis, Globe2, Maximize2, Minimize2, Play, Square } from 'lucide-react';
 import { toast } from 'sonner';
 import type {
   DashboardConflict, DashboardCpuPoint, DashboardHealth, DashboardRun, DashboardServiceSample, DashboardUsage,
@@ -16,6 +16,7 @@ import { ProjectTabs } from './ProjectTabs';
 import Button from './ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
 import { Empty, EmptyDescription, EmptyTitle } from './ui/empty';
+import { ActionTooltip } from './ui/tooltip';
 import './dashboard.css';
 
 interface ProjectCardProps {
@@ -257,6 +258,8 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
   };
   const showWeb = (service: Service) => dashboardPortListening(service, snapshot?.services);
   const name = project.displayName || project.name;
+  const focusLabel = focused ? '退出专注' : '专注';
+  const FocusIcon = focused ? Minimize2 : Maximize2;
   const config = <details className="dash-config" data-dashboard-config>
     <summary className="h1-tag" aria-label="启动配置与更多项目操作"><Ellipsis size={16} aria-hidden="true" /></summary>
     <div className="h1-popup dash-config-panel">
@@ -302,9 +305,12 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
             </OpenServiceButton>)}
         {!focused && active && <button type="button" className="h1-button" disabled={pending || !running} onClick={() => act('restart')}
           aria-keyshortcuts="Meta+R" title="重启 ⌘R" data-project-action="restart">重启</button>}
-        {view === 'terminal' && <button type="button" className="h1-button" aria-keyshortcuts="Meta+Shift+Enter"
-          aria-pressed={focused} title={(focused ? '退出专注' : '专注') + ' ⌘⇧↩'} data-terminal-focus-toggle
-          onClick={onToggleFocus}>{focused ? '退出专注' : '专注'}</button>}
+        {view === 'terminal' && <ActionTooltip label={focusLabel + ' ⌘⇧↩'}>
+          <button type="button" className="h1-button terminal-focus-toggle" aria-label={focusLabel} aria-keyshortcuts="Meta+Shift+Enter"
+            aria-pressed={focused} data-terminal-focus-toggle onClick={onToggleFocus}>
+            <FocusIcon size={14} aria-hidden="true" />
+          </button>
+        </ActionTooltip>}
         {active ? <>
           <button type="button" className="h1-button h1-button-primary" disabled={pending} onClick={() => act('stop')}
             aria-keyshortcuts="Meta+." title="停止 ⌘." data-project-action="stop"><Square size={10} fill="currentColor" aria-hidden="true" />停止</button>
