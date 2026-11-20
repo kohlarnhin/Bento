@@ -27,8 +27,9 @@ export function advanceProjectViewTime(elapsed: number, frameSeconds: number) {
   return Math.min(projectViewBlendSeconds, elapsed + Math.min(frameSeconds, .024));
 }
 
-export function readyProjectView(request: ProjectView, shown: ProjectView, terminalReady: boolean, gitReady: boolean) {
-  if ((request === 'terminal' && !terminalReady) || (request === 'git' && !gitReady)) return shown;
+export function readyProjectView(request: ProjectView, shown: ProjectView | undefined, terminalReady: boolean, gitReady: boolean) {
+  // A newly selected project has no previous surface to keep while its content starts.
+  if (shown && ((request === 'terminal' && !terminalReady) || (request === 'git' && !gitReady))) return shown;
   return request;
 }
 

@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState, useSyncExternalStore } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { FileUp, Loader2, RotateCcw, TriangleAlert } from 'lucide-react';
 import type { ProjectConfig } from '../types';
 import { attachTerminal, fitTerminal, getTerminal, getTerminalSearch, getTerminalSnapshot, restartTerminal, retryTerminal, subscribeTerminals, terminalKey } from '../lib/terminalRegistry';
@@ -50,7 +50,7 @@ export const ProjectTerminal = forwardRef<ProjectTerminalControls, {
     }
   }, [interactive, findOpen, project.id, activeSlot]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const container = host.current;
     if (!container || !canAttach) return;
     const detach = attachTerminal(project.id, activeSlot, container, onReady && (() => onReady(activeSlot)));

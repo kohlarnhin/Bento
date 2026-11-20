@@ -62,6 +62,7 @@ interface Entry {
 
 interface Registry {
   entries: Map<string, Entry>;
+  inactiveHost?: HTMLDivElement;
   snapshot: Record<string, TerminalStatus>;
   subscribers: Set<() => void>;
   initialized?: Promise<void>;
@@ -138,7 +139,7 @@ export function setTerminalFontSize(fontSize: number) {
   registry.entries.forEach((entry) => {
     const atBottom = entry.terminal.buffer.active.viewportY >= entry.terminal.buffer.active.baseY;
     entry.terminal.options.fontSize = fontSize;
-    // Detached terminals retain the option and fit when they are attached again.
+    // Inactive terminals retain the option and fit when they are shown again.
     fitTerminal(entry.projectId, entry.slot);
     if (atBottom) entry.terminal.scrollToBottom();
   });
@@ -147,7 +148,7 @@ export function setTerminalFontSize(fontSize: number) {
 function receiveOutput(entry: Entry, output: TerminalOutput) {
   if (output.sessionId !== entry.sessionId || output.seq <= entry.seq) return;
   entry.seq = output.seq;
-  // Output never passes through React, including when the container is detached.
+  // Output never passes through React, including when the terminal is hidden.
   entry.terminal.write(output.data);
 }
 
@@ -619,8 +620,20 @@ export function attachTerminal(projectId: string, slot: number, host: HTMLDivEle
     detached = true;
     cancelAnimationFrame(frame);
     cancelAnimationFrame(readyFrame);
-    // Detached instances keep receiving output until the backend removes their slot.
-    if (entry.container.parentElement === host) entry.container.remove();
+    if (entry.container.parentElement !== host) return;
+    if (!entry.opened || entry.disposed) {
+      entry.container.remove();
+      return;
+    }
+    // Keep xterm's renderer mounted while its project or slot is hidden.
+    if (!registry.inactiveHost) {
+      const inactiveHost = document.createElement('div');
+      inactiveHost.hidden = true;
+      inactiveHost.inert = true;
+      document.body.appendChild(inactiveHost);
+      registry.inactiveHost = inactiveHost;
+    }
+    registry.inactiveHost.appendChild(entry.container);
   };
 }
 

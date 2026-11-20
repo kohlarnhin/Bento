@@ -36,6 +36,13 @@ test('Pending terminal paint or Git data preserves the current view in both moti
   assert.ok(projectViewBlendSeconds >= .16 && projectViewBlendSeconds <= .22);
 });
 
+test('A newly selected terminal starts on the terminal surface before xterm is ready', () => {
+  const first = readyProjectView('terminal', undefined, false, false);
+  assert.equal(first, 'terminal');
+  assert.equal(readyProjectView('terminal', first, false, false), 'terminal');
+  assert.deepEqual(projectViewOpacities({ overview: 0, git: 0, terminal: 1 }), { overview: 0, git: 0, terminal: 1 });
+});
+
 const initialView = name => Object.fromEntries(projectViewOrder.map(view => [view, Number(view === name)]));
 const near = (a, b) => assert.ok(Math.abs(a - b) < 1e-12, a + ' != ' + b);
 

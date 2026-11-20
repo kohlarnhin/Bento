@@ -35,7 +35,7 @@ export function useSidebarMotion(list: RefObject<HTMLElement>, marker: RefObject
       if (!parent || !outline) return;
       const row = inactive ? undefined : [...parent.querySelectorAll<HTMLElement>('.sidebar-project-surface[data-selected]:not([data-highlighted])')]
         .find(candidate => {
-          const viewport = candidate.closest('[data-radix-scroll-area-viewport]');
+          const viewport = candidate.closest('[data-sidebar-scroll-viewport]');
           if (!viewport) return true;
           const item = candidate.getBoundingClientRect();
           const bounds = viewport.getBoundingClientRect();

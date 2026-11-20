@@ -1,16 +1,16 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import type { PointerEvent as ReactPointerEvent, RefObject } from 'react';
-import { Archive, ArchiveRestore, ArrowDownToLine, Check, ChevronRight, FolderOpen, FolderPlus, GripVertical, ListFilter, MoreHorizontal, Pencil, Pin, PinOff, Plus, RefreshCw, Search, Settings, Square, Trash2, X } from 'lucide-react';
+import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, RefObject } from 'react';
+import { ArrowDownToLine, Check, ChevronRight, FolderOpen, FolderPlus, GripVertical, ListFilter, MoreHorizontal, Pencil, Pin, Plus, RefreshCw, Search, Settings, Square, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import type { PortConflict, ProjectConfig, ProjectGroup, ProjectSelection, ProjectStatus } from '../types';
 import { matchesSidebarFilter, moveProjectOrder, sidebarSections, type SidebarFilter, type SidebarSection } from '../lib/sidebarModel';
-import { getProjectTerminalSlots, getTerminalSnapshot, subscribeTerminals } from '../lib/terminalRegistry';
+import { getTerminalSnapshot, subscribeTerminals } from '../lib/terminalRegistry';
 import { cn } from '../lib/utils';
 import { recordRender } from '../lib/renderMetrics';
 import { useSidebarMotion } from '../hooks/useSidebarMotion';
 import Button from './ui/button';
 import { ActionTooltip } from './ui/tooltip';
-import { ScrollArea } from './ui/scroll-area';
+import { SidebarScrollArea } from './SidebarScrollArea';
 import { Input } from './ui/input';
 import { ProjectAvatar } from './ProjectAvatar';
 import { StatusDot } from './StatusDot';
@@ -92,30 +92,13 @@ function GroupHeadingMarker({ expanded }: { expanded: boolean }) {
     className={cn('sidebar-heading-disclosure ml-auto size-2.5 shrink-0 motion-safe:transition-transform', expanded && 'rotate-90')} />;
 }
 
-function NewTerminalButton({ projectId, atLimit, maxPerProject, onCreate }: {
-  projectId: string; atLimit: boolean; maxPerProject: number; onCreate: () => Promise<void>;
-}) {
-  const [creating, setCreating] = useState(false);
-  const label = atLimit ? `已达上限（${maxPerProject} 个），可在设置中调整` : '新建终端 (⌘T)';
-  return <ActionTooltip label={label} side="right">
-    <span className="no-drag mr-1 inline-flex shrink-0 opacity-0 transition-opacity group-hover/project:opacity-100 group-focus-within/project:opacity-100" title={label}>
-      <Button variant="ghost" size="icon-sm" aria-label={label} data-sidebar-terminal-new={projectId} disabled={atLimit || creating}
-        onClick={() => {
-          setCreating(true);
-          void onCreate().finally(() => setCreating(false));
-        }}><Plus /></Button>
-    </span>
-  </ActionTooltip>;
-}
-
-function ProjectRowStatus({ projectId, status, conflict, attention, hideOnHover }: {
-  projectId: string; status: ProjectStatus; conflict?: boolean; attention?: boolean; hideOnHover?: boolean;
+function ProjectRowStatus({ projectId, status, conflict, attention }: {
+  projectId: string; status: ProjectStatus; conflict?: boolean; attention?: boolean;
 }) {
   if (status === 'stopped' && !conflict && !attention) return null;
   const runtimeLabel = conflict ? '端口冲突' : { running: '运行中', starting: '启动中', error: '运行异常', stopped: '' }[status];
   const label = [runtimeLabel, attention && '终端有新动静'].filter(Boolean).join(' · ');
-  return <StatusDot className={hideOnHover ? 'group-hover/project:!opacity-0 group-focus-within/project:!opacity-0' : undefined}
-    title={label} aria-label={label} data-terminal-attention={attention ? projectId : undefined}
+  return <StatusDot title={label} aria-label={label} data-terminal-attention={attention ? projectId : undefined}
     tone={conflict ? 'error' : status} />;
 }
 
@@ -131,7 +114,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: SidebarMenuItem[] } | null>(null);
   const closeMenu = useCallback(() => setMenu(null), []);
-  const [rowMenu, setRowMenu] = useState<{ x: number; y: number; project: ProjectConfig }>();
+  const [rowMenu, setRowMenu] = useState<{ x: number; y: number; projectId: string; keyboard: boolean }>();
   const closeRowMenu = useCallback(() => setRowMenu(undefined), []);
   const rows = useRef(new Map<string, HTMLDivElement>());
   const buckets = useRef(new Map<string, HTMLDivElement>());
@@ -148,6 +131,9 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
   const canReorder = !filtering && !loading && !reordering;
   const highlighted = visibleProjects.find(project => project.id === highlightedId)?.id || visibleProjects[0]?.id;
   const terminals = useSyncExternalStore(subscribeTerminals, getTerminalSnapshot);
+  const menuProject = rowMenu && projects.find(project => project.id === rowMenu.projectId);
+  const menuTerminalCount = menuProject
+    ? Object.values(terminals).filter(terminal => terminal.projectId === menuProject.id && terminal.sessionId).length : 0;
   const visibleIds = useMemo(() => new Set(visibleProjects.map(project => project.id)), [visibleProjects]);
   const sections = useMemo(() => sidebarSections(projects, projectGroups), [projects, projectGroups]);
   const orderedGroups = [...projectGroups].sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
@@ -187,8 +173,8 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
   }, []);
   useEffect(() => clearDrag, [clearDrag]);
   useEffect(() => {
-    if (inactive) { closeMenu(); clearDrag(); }
-  }, [inactive, closeMenu, clearDrag]);
+    if (inactive) { closeMenu(); closeRowMenu(); clearDrag(); }
+  }, [inactive, closeMenu, closeRowMenu, clearDrag]);
   useEffect(() => {
     const current = drag.current;
     if (!current) return;
@@ -196,7 +182,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
     if (!canReorder || current.ids.length !== ids.length || current.ids.some((id, index) => id !== ids[index])) clearDrag();
   }, [projects, projectGroups, canReorder, clearDrag]);
 
-  const viewport = () => scrollArea.current?.querySelector<HTMLElement>('[data-radix-scroll-area-viewport]');
+  const viewport = () => scrollArea.current?.querySelector<HTMLElement>('[data-sidebar-scroll-viewport]');
   const updateTarget = (current: ProjectDrag) => {
     const area = viewport()?.getBoundingClientRect();
     const line = indicator.current;
@@ -266,7 +252,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
     });
   };
   const startPointer = (event: ReactPointerEvent<HTMLButtonElement>, id: string, kind: ProjectDrag['kind'] = 'project') => {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || event.ctrlKey) return;
     suppressClick.current = false;
     if (!canReorder) return;
     event.currentTarget.focus({ preventScroll: true });
@@ -330,32 +316,41 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
       if (changed) void onReorder(ids, moved ? { id: current.id, groupId: current.targetGroupId } : undefined);
     }
   };
-  const projectMenu = (project: ProjectConfig, x: number, y: number) => setMenu({ x, y, items: [
-    { label: project.pinned ? '取消置顶' : '置顶项目', icon: project.pinned ? <PinOff /> : <Pin />, onSelect: () => { void onProjectFlags(project.id, { pinned: !project.pinned }); } },
-    { label: project.archived ? '取消归档' : '归档项目', icon: project.archived ? <ArchiveRestore /> : <Archive />, onSelect: () => { void onProjectFlags(project.id, { archived: !project.archived }); } },
-  ] });
-  const groupMenu = (group: ProjectGroup, x: number, y: number) => setMenu({ x, y, items: [
-    { label: '重命名分组', icon: <Pencil />, onSelect: () => onGroupAction('rename', group) },
-    { label: '删除分组', icon: <Trash2 />, destructive: true, onSelect: () => onGroupAction('delete', group) },
-  ] });
+  const projectMenu = (projectId: string, x: number, y: number, keyboard = false) => {
+    closeMenu();
+    setRowMenu({ x, y, projectId, keyboard });
+  };
+  const projectMenuFromKeyboard = (event: ReactKeyboardEvent<HTMLButtonElement>, projectId: string) => {
+    if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return false;
+    event.preventDefault();
+    const { left, bottom } = event.currentTarget.getBoundingClientRect();
+    projectMenu(projectId, left, bottom, true);
+    return true;
+  };
+  const groupMenu = (group: ProjectGroup, x: number, y: number) => {
+    closeRowMenu();
+    setMenu({ x, y, items: [
+      { label: '重命名分组', icon: <Pencil />, onSelect: () => onGroupAction('rename', group) },
+      { label: '删除分组', icon: <Trash2 />, destructive: true, onSelect: () => onGroupAction('delete', group) },
+    ] });
+  };
 
   const renderProject = (project: ProjectConfig, peers: ProjectConfig[], inRunning = false) => {
     const selected = selection?.projectId === project.id;
-    const slots = getProjectTerminalSlots(project.id, terminals);
     const conflict = conflicts.some(item => item.projectIds.includes(project.id));
     const status = statuses[project.id] || 'stopped';
     const name = project.displayName || project.name;
     const shortcutIndex = visibleProjects.filter(project => !project.archived).findIndex(item => item.id === project.id);
     return <div key={project.id} ref={node => { if (node) rows.current.set(project.id, node); else rows.current.delete(project.id); }}
       data-project-id={project.id} data-project-dragging={draggingId === project.id || undefined} className={cn('flex flex-col', draggingId === project.id && 'opacity-40')}>
-      <div className="sidebar-project-item sidebar-project-surface group/project relative flex items-center"
+      <div className="sidebar-project-item sidebar-project-surface relative flex items-center"
         data-selected={selected || undefined} data-highlighted={searchFocused && highlighted === project.id || undefined}
-        onContextMenu={event => { event.preventDefault(); projectMenu(project, event.clientX, event.clientY); }}>
-        <button className={cn('sidebar-project-row flex min-w-0 flex-1 items-center rounded-[inherit] text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/25 group-hover/project:pr-16 group-focus-within/project:pr-16', canReorder && 'touch-none cursor-grab active:cursor-grabbing')}
+        onContextMenu={event => { event.preventDefault(); projectMenu(project.id, event.clientX, event.clientY); }}>
+        <button className={cn('sidebar-project-row flex min-w-0 flex-1 items-center rounded-[inherit] text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/25', canReorder && 'touch-none cursor-grab active:cursor-grabbing')}
           onPointerDown={event => startPointer(event, project.id)} onPointerMove={movePointer} onPointerUp={finishPointer} onPointerCancel={clearDrag}
           onLostPointerCapture={event => { if (drag.current?.pointerId === event.pointerId) clearDrag(); }}
           onKeyDown={event => {
-            if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); projectMenu(project, rect.left, rect.bottom); return; }
+            if (projectMenuFromKeyboard(event, project.id)) return;
             if (!event.altKey || event.metaKey || event.ctrlKey || event.shiftKey || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
             event.preventDefault();
             if (!canReorder) return;
@@ -369,24 +364,17 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
             requestAnimationFrame(() => rows.current.get(project.id)?.querySelector<HTMLButtonElement>('[data-project-row]')?.focus({ preventScroll: true }));
           }}
           onClick={event => {
+            if (event.ctrlKey) return;
             if (suppressClick.current && event.detail !== 0) { event.preventDefault(); event.stopPropagation(); suppressClick.current = false; return; }
             onSelectProject(project.id);
           }}
           title={`${name}${shortcutIndex >= 0 && shortcutIndex < 9 ? ` · ⌘${shortcutIndex + 1}` : ''}\n${filtering ? '清除搜索和筛选后可拖动排序' : '拖动排序 · ⌥↑ / ⌥↓'}`}
-          data-project-row={project.id} data-running-project={inRunning ? project.id : undefined} aria-current={selected ? 'page' : undefined} data-search-highlighted={searchFocused && highlighted === project.id || undefined} data-reorder-draggable={canReorder || undefined}>
+          data-project-row={project.id} data-running-project={inRunning ? project.id : undefined} aria-current={selected ? 'page' : undefined}
+          aria-haspopup="menu" data-search-highlighted={searchFocused && highlighted === project.id || undefined} data-reorder-draggable={canReorder || undefined}>
           <ProjectAvatar project={project} status={status} conflict={conflict} />
           <span className="min-w-0 flex-1 truncate">{name}</span>
-          <ProjectRowStatus projectId={project.id} status={status} conflict={conflict} attention={attentionProjects.has(project.id)} hideOnHover />
+          <ProjectRowStatus projectId={project.id} status={status} conflict={conflict} attention={attentionProjects.has(project.id)} />
         </button>
-        <div className="pointer-events-none absolute right-1 flex shrink-0 items-center rounded-control opacity-0 group-hover/project:pointer-events-auto group-hover/project:opacity-100 group-focus-within/project:pointer-events-auto group-focus-within/project:opacity-100">
-          <NewTerminalButton projectId={project.id} atLimit={slots.length >= maxPerProject} maxPerProject={maxPerProject} onCreate={() => onCreateTerminal(project.id)} />
-          <Button size="icon-sm" variant="ghost" className="size-6 opacity-0 group-hover/project:opacity-100 group-focus-within/project:opacity-100" aria-label={`${name} 的更多操作`}
-            aria-haspopup="menu" aria-expanded={rowMenu?.project.id === project.id} data-project-more={project.id}
-            onClick={event => {
-              const { left, bottom } = event.currentTarget.getBoundingClientRect();
-              setRowMenu({ x: left, y: bottom + 4, project });
-            }}><MoreHorizontal className="size-3.5" /></Button>
-        </div>
       </div>
     </div>;
   };
@@ -442,24 +430,28 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
       <span id="sidebar-running-heading">运行中</span><span className="sidebar-group-count">{runningProjects.length}</span>
       <GroupHeadingMarker expanded={!runningCollapsed} />
     </button>
-    {!runningCollapsed && <ScrollArea className="[&>[data-radix-scroll-area-viewport]]:max-h-[28vh]">
+    {!runningCollapsed && <SidebarScrollArea className="sidebar-running-scroll">
       <nav id="sidebar-running-projects" aria-label="运行中的项目" className="sidebar-project-list">
         {runningProjects.map(project => {
           if (runningUngroupedIds.has(project.id)) return renderProject(project, runningUngrouped, true);
           const selected = selection?.projectId === project.id;
           return <button key={project.id} data-running-project={project.id} data-selected={selected || undefined} aria-current={selected ? 'page' : undefined}
+            aria-haspopup="menu"
             className="sidebar-project-item sidebar-project-row sidebar-project-surface flex w-full shrink-0 items-center text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/25"
-            onClick={() => onSelectProject(project.id)} onContextMenu={event => { event.preventDefault(); projectMenu(project, event.clientX, event.clientY); }}>
+            onClick={event => { if (!event.ctrlKey) onSelectProject(project.id); }}
+            onKeyDown={event => { projectMenuFromKeyboard(event, project.id); }}
+            onContextMenu={event => { event.preventDefault(); projectMenu(project.id, event.clientX, event.clientY); }}>
             <ProjectAvatar project={project} status={statuses[project.id]} />
             <span className="min-w-0 flex-1 truncate">{project.displayName || project.name}</span>
             <ProjectRowStatus projectId={project.id} status={statuses[project.id] ?? 'stopped'} attention={attentionProjects.has(project.id)} />
           </button>;
         })}
       </nav>
-    </ScrollArea>}
+    </SidebarScrollArea>}
   </section>;
 
   const sidebarActions = (button: HTMLButtonElement) => {
+    closeRowMenu();
     const rect = button.getBoundingClientRect();
     const filters = [
       { value: 'all', label: '全部项目' },
@@ -508,7 +500,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
       {searchQuery ? <Button variant="ghost" size="icon-sm" className="absolute right-1 top-1/2 -translate-y-1/2" aria-label="清除搜索" onClick={() => { onSearchChange(''); setHighlightedId(null); searchInputRef.current?.focus(); }}><X className="size-3.5" /></Button>
         : <button aria-label="快速切换项目 (⌘P)" aria-keyshortcuts="Meta+p" title="快速切换项目 (⌘P)" className="absolute right-3 top-1/2 -translate-y-1/2 rounded py-1 text-[11px] leading-[15px] text-[var(--h1-label)] hover:bg-[var(--h1-hover)]" onClick={onQuickSwitch}>⌘P</button>}
     </div>
-    <ScrollArea ref={scrollArea} className="sidebar-scroll min-h-0 flex-1">
+    <SidebarScrollArea ref={scrollArea} className="sidebar-scroll min-h-0 flex-1">
       <nav ref={projectList} id="project-list" aria-label="项目列表" className="relative flex min-h-full flex-col">
         <span ref={selectionMarker} className="sidebar-selection-marker" aria-hidden="true" hidden />
         {projectsLoaded && !loading && projects.length === 0 ? <div className="h1-group mt-4 px-3 py-5 text-center" data-sidebar-empty>
@@ -524,7 +516,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
         {sections.filter(section => section.id !== 'pinned').map(renderSection)}
         </>}
       </nav>
-    </ScrollArea>
+    </SidebarScrollArea>
     <footer className="sidebar-footer" data-update-footer data-managed-footer={managedCount > 0 || undefined}>
       <Button variant="outline" className="min-w-0 flex-1 rounded-full" aria-label="添加项目" aria-keyshortcuts="Meta+n" onClick={onCreate} data-create-project>
         <Plus data-icon="inline-start" />添加项目
@@ -540,7 +532,12 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
     </div>}
     <div ref={indicator} hidden={!draggingId} aria-hidden="true" data-reorder-indicator className="pointer-events-none fixed z-[70] h-0.5 rounded-full bg-foreground/60" />
     <MotionPresence>{!inactive && menu && <SidebarMenu {...menu} onClose={closeMenu} />}</MotionPresence>
-    <MotionPresence>{!inactive && rowMenu && <ProjectActionsMenu {...rowMenu} onClose={closeRowMenu}
-      onOpenLogs={() => onOpenProjectLogs(rowMenu.project)} onDelete={() => onDeleteProject(rowMenu.project)} />}</MotionPresence>
+    <MotionPresence>{!inactive && rowMenu && menuProject && <ProjectActionsMenu x={rowMenu.x} y={rowMenu.y} keyboard={rowMenu.keyboard} project={menuProject} onClose={closeRowMenu}
+      onOpenLogs={() => onOpenProjectLogs(menuProject)} onDelete={() => onDeleteProject(menuProject)} sidebar={{
+        onAddTerminal: () => { void onCreateTerminal(menuProject.id); },
+        terminalLimit: menuTerminalCount >= maxPerProject ? maxPerProject : undefined,
+        onTogglePinned: () => { void onProjectFlags(menuProject.id, { pinned: !menuProject.pinned }); },
+        onToggleArchived: () => { void onProjectFlags(menuProject.id, { archived: !menuProject.archived }); },
+      }} />}</MotionPresence>
   </aside>;
 });

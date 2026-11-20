@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { focusRailSections, fuzzyMatch, matchesSidebarFilter, moveProjectOrder, projectInitial, searchCreationActions, searchProjects, sidebarNavigation, sidebarSections, substringMatch } from '../src/lib/sidebarModel.ts';
+import { sidebarContextPosition, sidebarThumb } from '../src/lib/sidebarLayout.ts';
 
 const project = (id, extra = {}) => ({ id, name: id, path: '~/work/' + id, port: null, groupId: null, pinned: false, archived: false, ...extra });
 const groups = [{ id: 'work', name: '工作', sortOrder: 2, collapsed: false }, { id: 'personal', name: '个人', sortOrder: 1, collapsed: true }];
@@ -123,4 +124,26 @@ test('Filters count projects, include starting services and combine with search 
   assert.ok(matchesSidebarFilter(p, 'attention', {}, attention, changes));
   assert.equal(matchesSidebarFilter(p, 'changes', {}, attention, changes), false);
   assert.equal(matchesSidebarFilter(p, 'running', { a: 'error' }, attention, changes), false);
+});
+
+test('Sidebar thumb is absent for short content and follows the full scroll range', () => {
+  assert.equal(sidebarThumb(400, 400, 0), undefined);
+  assert.equal(sidebarThumb(400, 399, 0), undefined);
+  assert.equal(sidebarThumb(0, 100, 0), undefined);
+  assert.deepEqual(sidebarThumb(400, 800, -12), { height: 200, top: 0, scrollPerPixel: 2 });
+  assert.deepEqual(sidebarThumb(400, 800, 200), { height: 200, top: 100, scrollPerPixel: 2 });
+  assert.deepEqual(sidebarThumb(400, 800, 430), { height: 200, top: 200, scrollPerPixel: 2 });
+});
+
+test('Minimum sidebar thumb size maps back to the real scroll distance when dragged', () => {
+  const thumb = sidebarThumb(400, 8000, 7600);
+  assert.equal(thumb.height, 32);
+  assert.equal(thumb.top, 368);
+  assert.ok(Math.abs(thumb.top * thumb.scrollPerPixel - 7600) < 1e-9);
+});
+
+test('Sidebar context menu opens at the cursor and flips inside both window edges', () => {
+  assert.deepEqual(sidebarContextPosition(100, 120, 180, 210, 850, 600), { left: 100, top: 120 });
+  assert.deepEqual(sidebarContextPosition(840, 570, 180, 210, 850, 600), { left: 660, top: 360 });
+  assert.deepEqual(sidebarContextPosition(0, 0, 180, 210, 850, 600), { left: 8, top: 8 });
 });
