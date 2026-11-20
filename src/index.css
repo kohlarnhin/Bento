@@ -112,7 +112,8 @@
   html, body, #root { height: 100%; margin: 0; overflow: hidden; background-color: transparent; }
   input[type="checkbox"] { accent-color: hsl(var(--primary)); }
   ::selection { background-color: hsl(var(--foreground) / .16); }
-  :where(button, a, input, textarea, summary, [tabindex]):focus-visible {
+  :where(button, a, input, textarea, summary, [tabindex]):focus-visible,
+  :where(.project-actions-menu button[data-keyboard-focus]):focus {
     outline: 2px solid hsl(var(--ring) / .25);
     outline-offset: 2px;
   }
@@ -338,6 +339,9 @@
   .app-sidebar {
     --sidebar-inset-top: 14px;
     --sidebar-inset-inline: 12px;
+    --sidebar-scroll-lane: 11px;
+    --sidebar-thumb: rgb(0 0 0 / .22);
+    --sidebar-thumb-hover: rgb(0 0 0 / .32);
     --sidebar-selected-outline: inset 0 0 0 1px var(--hairline-selection);
     width: var(--sidebar-expanded-width);
     min-height: 0;
@@ -372,6 +376,39 @@
   .sidebar-search-wrap input.sidebar-search::placeholder { color: var(--h1-label); }
   .sidebar-search-wrap input.sidebar-search:focus-visible { box-shadow: 0 0 0 2px hsl(var(--ring) / .25); }
   .sidebar-scroll { padding-bottom: 8px; }
+  .dark .app-sidebar {
+    --sidebar-thumb: rgb(255 255 255 / .22);
+    --sidebar-thumb-hover: rgb(255 255 255 / .32);
+  }
+  /* Extend the viewport into the existing inset. A 5px thumb with a 2px inset leaves 4px clear. */
+  .sidebar-scroll-area { position: relative; margin-inline-end: calc(-1 * var(--sidebar-scroll-lane)); }
+  .sidebar-scroll-viewport {
+    overflow: hidden auto;
+    padding-inline-end: var(--sidebar-scroll-lane);
+    scrollbar-width: none;
+  }
+  .sidebar-scroll-viewport::-webkit-scrollbar { display: none; }
+  .sidebar-scroll > .sidebar-scroll-viewport { height: 100%; }
+  .sidebar-running-scroll > .sidebar-scroll-viewport { max-height: 28vh; }
+  .sidebar-scroll-thumb {
+    position: absolute;
+    z-index: 2;
+    top: 0;
+    inset-inline-end: 2px;
+    width: 5px;
+    border-radius: 999px;
+    background-color: var(--sidebar-thumb);
+    opacity: 0;
+    pointer-events: none;
+    touch-action: none;
+    transition: opacity 150ms ease, background-color 150ms ease;
+  }
+  .sidebar-scroll-thumb[data-visible] { opacity: 1; pointer-events: auto; }
+  .sidebar-scroll-thumb:is(:hover, :active) { background-color: var(--sidebar-thumb-hover); }
+  .sidebar-scroll-thumb:not([data-active]) { visibility: hidden; }
+  @media (prefers-reduced-motion: reduce) {
+    .sidebar-scroll-thumb { transition: none; }
+  }
 
   .sidebar-project-list { display: flex; flex-direction: column; }
   .sidebar-project-item { margin-bottom: 2px; }

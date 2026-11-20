@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import gsap from 'gsap';
 import { invoke } from '@tauri-apps/api/core';
-import { ArrowUpRight, CodeXml, Ellipsis, Folder, GitBranch, Globe2, Maximize2, Minimize2, Pencil, Play, Square, SquareTerminal } from 'lucide-react';
+import { ArrowUpRight, CodeXml, Folder, GitBranch, Globe2, Maximize2, Minimize2, Pencil, Play, Square, SquareTerminal } from 'lucide-react';
 import type {
   DashboardConflict, DashboardCpuPoint, DashboardGit, DashboardHealth, DashboardRun, DashboardServiceSample, DashboardUsage,
   PortConflict, ProjectConfig, ProjectRuntimeStatus, ProjectStatus, ProjectView, Service,
@@ -15,7 +15,6 @@ import { dashboardEntranceLimit, readyProjectView } from '../lib/motionMath';
 import { terminalKey, type TerminalStatus } from '../lib/terminalRegistry';
 import { useProjectViewMotion } from '../hooks/useProjectViewMotion';
 import { DashboardGitCard, DashboardOutput } from './DashboardPanels';
-import { ProjectActionsMenu } from './ProjectActionsMenu';
 import { OpenServiceButton, ProjectWebMenu } from './ProjectServices';
 import { ProjectTabs } from './ProjectTabs';
 import { TerminalWorkspace, type TerminalWorkspaceControls } from './TerminalWorkspace';
@@ -56,7 +55,6 @@ interface ProjectCardProps {
   onOpenLogs: (id?: string) => void;
   onClearLogs: () => void;
   onEdit: (conflict?: DashboardConflict) => void;
-  onDelete: () => void;
 }
 
 const listenerLabels = { listening: '监听中', idle: '未监听', occupied: '端口被占用' };
@@ -246,7 +244,7 @@ function ConflictDialog({ conflict, onClose, onConfirm }: {
 export function ProjectCard({ project, view, slots, activeSlot, terminals, terminalControls, onFocusedTerminal, onSelectView, onSelectTerminal,
   focused, maxTerminals, onToggleFocus, onNewTerminal, onTerminalClosed,
   status: runtimeStatus, runtime, conflicts, onStart, onStop, onRestart, onOpenBrowser,
-  onSetDefaultService, onRevealPath, onOpenEditor, onOpenTerminal, onOpenLogs, onClearLogs, onEdit, onDelete }: ProjectCardProps) {
+  onSetDefaultService, onRevealPath, onOpenEditor, onOpenTerminal, onOpenLogs, onClearLogs, onEdit }: ProjectCardProps) {
   const { snapshot, snapshotError, git, health, now, refresh } = useDashboard(project, runtime, view);
   const launch = useProjectLaunch(project);
   const auditLaunch = launch?.data?.mode === 'shared' && project.injectPorts && project.services.some(service => service.port != null);
@@ -273,18 +271,18 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
   const overviewContent = useRef<HTMLDivElement>(null);
   const [visitedTerminal, setVisitedTerminal] = useState(false);
   const [readySlot, setReadySlot] = useState<number>();
-  const [lastReadyView, setLastReadyView] = useState<ProjectView>('overview');
+  const [lastShownView, setLastShownView] = useState<ProjectView>();
   const terminalView = view === 'terminal';
   const terminalLimit = slots.filter(slot => terminals[terminalKey(project.id, slot)]?.sessionId).length >= maxTerminals;
   const mountTerminal = terminalView || (visitedTerminal && !!terminals[terminalKey(project.id, activeSlot)]);
   const terminalReady = readySlot === activeSlot;
-  const shown = readyProjectView(view, lastReadyView, terminalReady, git !== undefined);
+  const shown = readyProjectView(view, lastShownView, terminalReady, git !== undefined);
   const terminalInteractive = terminalView && shown === 'terminal';
   useLayoutEffect(() => {
     if (terminalView) setVisitedTerminal(true);
     if (!mountTerminal) setReadySlot(undefined);
   }, [terminalView, mountTerminal]);
-  useLayoutEffect(() => { setLastReadyView(shown); }, [shown]);
+  useLayoutEffect(() => { setLastShownView(shown); }, [shown]);
   useProjectViewMotion(workspace, shown, reduced);
 
   const launchLabel = useRef<HTMLSpanElement>(null);
@@ -357,16 +355,8 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
   const name = project.displayName || project.name;
   const focusLabel = focused ? '退出专注' : '专注';
   const FocusIcon = focused ? Minimize2 : Maximize2;
-  const [configMenu, setConfigMenu] = useState<{ x: number; y: number }>();
-  const closeConfigMenu = useCallback(() => setConfigMenu(undefined), []);
-  useEffect(() => { if (view !== 'overview') closeConfigMenu(); }, [view, closeConfigMenu]);
-  const config = <button type="button" className="h1-tag dash-menu-trigger" aria-label="更多项目操作"
-    aria-haspopup="menu" aria-expanded={!!configMenu} data-dashboard-config onClick={event => {
-      const { right, bottom } = event.currentTarget.getBoundingClientRect();
-      setConfigMenu({ x: right - 180, y: bottom + 5 });
-    }}><Ellipsis size={16} aria-hidden="true" /></button>;
 
-  return <div ref={workspace} className="h1-workspace" data-project-details={project.id} data-project-runtime={status}>
+  return <div ref={workspace} className="h1-workspace" data-shown-view={shown} data-project-details={project.id} data-project-runtime={status}>
     <header className="h1-toolbar" data-tauri-drag-region="deep">
       <div className="h1-toolbar-heading">
         <h1 className="dash-truncate" title={name}>{name}</h1>
@@ -446,7 +436,7 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
               onEditor={onOpenEditor} onTerminal={() => { void onNewTerminal(); }} onGit={() => onSelectView('git')}
               onReveal={() => onRevealPath(project.path)} onEdit={() => onEdit()} />
           </div>
-          <DashboardOutput project={project} services={services} active={active} last={last} now={now} config={config}
+          <DashboardOutput project={project} services={services} active={active} last={last} now={now}
             onTerminal={onOpenTerminal} onJump={onOpenLogs} onClear={onClearLogs} />
         </div>
       </div>
@@ -463,7 +453,5 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
       </div>
     </div>
     <MotionPresence>{occupied && <ConflictDialog conflict={occupied} onClose={() => setOccupied(undefined)} onConfirm={verifyRelease} />}</MotionPresence>
-    <MotionPresence>{view === 'overview' && configMenu && <ProjectActionsMenu {...configMenu} project={project} onClose={closeConfigMenu}
-      onOpenLogs={() => onOpenLogs()} onDelete={onDelete} />}</MotionPresence>
   </div>;
 }

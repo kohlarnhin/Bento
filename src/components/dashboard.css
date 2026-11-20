@@ -8,8 +8,13 @@
 
 .h1-main:has(> .h1-workspace) { padding: 0; }
 
+.h1-workspace[data-shown-view="terminal"] {
+  --terminal-initial-share: 1;
+  background-color: var(--terminal-surface);
+}
+
 .h1-toolbar {
-  --terminal-mix: calc(var(--terminal-view-share, 0) * 100%);
+  --terminal-mix: calc(var(--terminal-view-share, var(--terminal-initial-share, 0)) * 100%);
   --toolbar-text: color-mix(in srgb, hsl(var(--foreground)), hsl(240 5% 94%) var(--terminal-mix));
   --toolbar-muted: color-mix(in srgb, hsl(var(--muted-foreground)), hsl(240 3% 70%) var(--terminal-mix));
   --toolbar-button: color-mix(in srgb, var(--button-fill), rgb(255 255 255 / .1) var(--terminal-mix));
@@ -111,7 +116,11 @@
   flex-direction: column;
   isolation: isolate;
   background-color: var(--workspace-background);
+  visibility: hidden;
 }
+.h1-workspace[data-shown-view="overview"] .workspace-view[data-workspace-view="overview"],
+.h1-workspace[data-shown-view="git"] .workspace-view[data-workspace-view="git"],
+.h1-workspace[data-shown-view="terminal"] .workspace-view[data-workspace-view="terminal"] { visibility: visible; }
 .workspace-view[inert] { pointer-events: none; }
 .workspace-view:not([data-workspace-view="terminal"]) { padding: 18px var(--workspace-inset-inline) var(--workspace-inset-bottom); }
 .workspace-view[data-workspace-view="terminal"] { background-color: var(--terminal-surface); }
@@ -355,7 +364,6 @@
 }
 .dash-output-heading .h1-tag { min-height: 21px; padding: 2px 8px; font-size: 12px; line-height: 17px; }
 .dash-output-heading .h1-group-title { font-size: 12px; font-weight: 500; letter-spacing: 0; }
-.dash-output-heading .dash-menu-trigger { padding-inline: 4px; }
 
 .dash-output-panel {
   display: flex;

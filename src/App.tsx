@@ -760,7 +760,6 @@ export function App() {
                   onOpenLogs={id => openProjectLogs(selectedProject, id)}
                   onClearLogs={() => handleClearLogs(selectedProject.id)}
                   onEdit={focusPort => openProjectConfig(selectedProject, focusPort)}
-                  onDelete={() => setDeleteProject(selectedProject)}
                 />
           ) : null}
         </main>
