@@ -53,8 +53,10 @@
 
 .h1-workspace-tabs::-webkit-scrollbar { display: none; }
 .h1-workspace-tabs .segmented-option { flex: none; white-space: nowrap; padding: 6px 14px; font-size: 13px; line-height: 18px; }
-.h1-workspace-tabs .segmented-indicator { inset-block: 3px; }
 .dash-actions { justify-content: flex-end; gap: 10px; }
+.launch-label { display: inline-grid; }
+.launch-label > span { display: inline-flex; grid-area: 1 / 1; gap: 6px; align-items: center; justify-content: center; }
+.launch-label:not([data-running]) > :last-child, .launch-label[data-running] > :first-child { opacity: 0; }
 
 .h1-project-scroll {
   flex: 1;

@@ -7,6 +7,7 @@ import { SidebarMenu } from './SidebarMenu';
 import Button from './ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
 import { SegmentedControl } from './ui/segmented-control';
+import { MotionPresence } from './ui/motion-presence';
 import { ActionTooltip } from './ui/tooltip';
 
 type TerminalAction = 'restart' | 'close';
@@ -107,12 +108,12 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
         if (next === 'overview' || next === 'git') onSelectView(next);
         else onSelectTerminal(Number(next.slice('terminal:'.length)));
       }} />
-    {menu && <SidebarMenu x={menu.x} y={menu.y} label={`终端 ${menu.slot} 操作`} className={terminalView ? 'terminal-chrome' : undefined}
+    <MotionPresence>{menu && <SidebarMenu x={menu.x} y={menu.y} label={`终端 ${menu.slot} 操作`} className={terminalView ? 'terminal-chrome' : undefined}
       items={[
         { label: '重启', icon: <RotateCcw size={14} />, disabled, onSelect: () => request('restart', menu.slot) },
         { label: '关闭', icon: <X size={14} />, disabled, onSelect: () => request('close', menu.slot) },
-      ]} onClose={closeMenu} />}
-    {confirmation && <Dialog open onOpenChange={open => { if (!open && !busy) setConfirmation(undefined); }}>
+      ]} onClose={closeMenu} />}</MotionPresence>
+    <MotionPresence>{confirmation && <Dialog open onOpenChange={open => { if (!open && !busy) setConfirmation(undefined); }}>
       <DialogContent hideClose={busy} data-terminal-tab-confirm>
         <DialogHeader>
           <DialogTitle>{actionLabel[confirmation.action]}终端 {confirmation.slot}</DialogTitle>
@@ -123,6 +124,6 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
           <Button variant="destructive" disabled={busy} onClick={() => { void perform(confirmation); }}>{actionLabel[confirmation.action]}</Button>
         </div>
       </DialogContent>
-    </Dialog>}
+    </Dialog>}</MotionPresence>
   </>;
 }

@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type ComponentPropsWithoutRef } fro
 import { ArrowUpRight, Check, ChevronDown } from 'lucide-react';
 import type { ProjectConfig, Service } from '../types';
 import { ActionTooltip } from './ui/tooltip';
+import { usePopupMotion } from './ui/motion-presence';
 import { cn } from '../lib/utils';
 
 interface WebActions {
@@ -32,7 +33,7 @@ export function ProjectWebMenu({ project, onOpenBrowser, onSetDefault, canOpen }
   const menuId = useId();
   const anchor = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
-  const panel = useRef<HTMLDivElement>(null);
+  const { panel, attach, present } = usePopupMotion(open);
   const port = project.port;
   const services = project.services.filter(service => service.port != null);
   const defaultService = services.find(service => service.openWeb);
@@ -51,7 +52,7 @@ export function ProjectWebMenu({ project, onOpenBrowser, onSetDefault, canOpen }
     };
     document.addEventListener('pointerdown', outside, true);
     return () => document.removeEventListener('pointerdown', outside, true);
-  }, [open]);
+  }, [open, panel]);
 
   return <div ref={anchor} className="relative" onBlur={event => {
     // WebKit can blur the focused item on mouse-down without focusing the clicked item.
@@ -70,7 +71,8 @@ export function ProjectWebMenu({ project, onOpenBrowser, onSetDefault, canOpen }
         <ChevronDown className="size-2.5" />
       </button>
     </div>
-    {open && <div ref={panel} id={menuId} role="menu" aria-label="打开哪个端口" className="h1-popup project-web-menu" data-project-web-menu
+    {present && <div ref={attach} id={menuId} role="menu" aria-label="打开哪个端口" className="h1-popup project-web-menu" data-project-web-menu
+      {...{ inert: open ? undefined : '' }}
       onKeyDown={event => {
         if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(true); return; }
         if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;

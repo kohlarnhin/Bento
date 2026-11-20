@@ -1,4 +1,6 @@
 import { Fragment, useLayoutEffect, useRef, type MouseEventHandler, type ReactNode } from 'react';
+import gsap from 'gsap';
+import { boxIn, moveIndicator, useReducedMotion } from '../../lib/motion';
 import { cn } from '../../lib/utils';
 
 interface Segment<T extends string> {
@@ -22,24 +24,32 @@ export function SegmentedControl<T extends string>({ options, value, onChange, l
 }) {
   const track = useRef<HTMLDivElement>(null);
   const indicator = useRef<HTMLSpanElement>(null);
+  const reduced = useReducedMotion();
+  const last = useRef<{ x: number; width: number; height: number }>();
+  useLayoutEffect(() => {
+    const thumb = indicator.current;
+    return () => { if (thumb) gsap.killTweensOf(thumb); };
+  }, []);
   useLayoutEffect(() => {
     const group = track.current;
     const thumb = indicator.current;
     const active = group?.querySelector<HTMLButtonElement>('[aria-checked="true"]');
     if (!group || !thumb || !active) return;
     if (group.scrollWidth > group.clientWidth) active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-    const measure = () => {
-      const bounds = group.getBoundingClientRect();
-      const segment = active.getBoundingClientRect();
-      thumb.style.transform = 'translateX(' + (segment.left - bounds.left + group.scrollLeft - group.clientLeft) + 'px)';
-      thumb.style.width = segment.width + 'px';
+    const measure = (animate: boolean) => {
+      const { x, width } = boxIn(active, group);
+      const height = group.clientHeight - 6;
+      if (last.current?.x === x && last.current.width === width && last.current.height === height && !reduced) return;
+      if (width <= 0 || height <= 0) return;
+      last.current = { x, width, height };
+      moveIndicator(thumb, { x, y: 3, width, height }, animate ? .26 : 0, reduced);
     };
-    measure();
-    const observer = new ResizeObserver(measure);
+    measure(true);
+    const observer = new ResizeObserver(() => measure(false));
     observer.observe(group);
     observer.observe(active);
     return () => observer.disconnect();
-  }, [value, options.length]);
+  }, [value, options.length, reduced]);
 
   return <div ref={track} role="radiogroup" aria-label={label} aria-labelledby={labelledBy} data-segmented-control
     className={cn('segmented-control', className)}

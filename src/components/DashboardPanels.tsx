@@ -4,7 +4,6 @@ import { dashboardLog, logTime, recentLogCounts, relativeTime } from '../lib/das
 import { usePortStandard } from '../lib/usePortStandard';
 import { useProjectLogLines } from '../lib/useProjectLogs';
 import type { DashboardGit, DashboardRun, ProjectConfig, ProjectLaunchPlan, Service } from '../types';
-import { ProjectStandardDialog } from './ProjectStandardDialog';
 import { LogText } from './LogText';
 import { SegmentedControl } from './ui/segmented-control';
 
@@ -113,18 +112,17 @@ export function DashboardGitCard({ git, now, onEditor }: { git: DashboardGit; no
   </section>;
 }
 
-export function DashboardStandard({ project, plan, planError }: {
-  project: ProjectConfig; plan?: ProjectLaunchPlan; planError?: string;
+export function DashboardStandard({ project, plan, planError, onViewTemplate }: {
+  project: ProjectConfig; plan?: ProjectLaunchPlan; planError?: string; onViewTemplate: () => void;
 }) {
   const shared = plan?.mode === 'shared' && project.injectPorts && project.services.some(service => service.port != null);
   const standard = usePortStandard(project.path, project.startCommand, project.services, shared);
-  const [show, setShow] = useState(false);
   const checks = standard?.data?.services ?? [];
   const missing = checks.filter(service => !service.references.length);
   return <section className="dash-standard" aria-labelledby="dash-standard-heading" data-dashboard-standard>
     <header className="dash-ch">
       <h2 className="h1-group-title" id="dash-standard-heading">启动标准</h2>
-      {shared && <button type="button" className="h1-tag dash-right" onClick={() => setShow(true)} data-view-standard-template>查看模板</button>}
+      {shared && <button type="button" className="h1-tag dash-right" onClick={onViewTemplate} data-view-standard-template>查看模板</button>}
     </header>
     <div className="dash-standard-body">
       {planError && <p className="dash-warn">无法预览启动方式 · {planError}</p>}
@@ -148,6 +146,5 @@ export function DashboardStandard({ project, plan, planError }: {
         </div>;
       })}
     </div>
-    {show && shared && <ProjectStandardDialog request={{ mode: 'view', path: project.path, services: project.services }} onClose={() => setShow(false)} />}
   </section>;
 }

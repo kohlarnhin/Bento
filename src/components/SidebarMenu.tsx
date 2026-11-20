@@ -1,14 +1,17 @@
-import { useEffect, useRef } from 'react';
+import { useContext, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import type { ReactNode } from 'react';
 import { cn } from '../lib/utils';
+import { MotionExit, usePopupMotion } from './ui/motion-presence';
 
 export interface SidebarMenuItem { label: string; icon: ReactNode; onSelect: () => void; destructive?: boolean; current?: boolean; disabled?: boolean }
 export function SidebarMenu({ x, y, items, onClose, label = '侧边栏菜单', className }: {
   x: number; y: number; items: SidebarMenuItem[]; onClose: () => void; label?: string; className?: string;
 }) {
-  const menu = useRef<HTMLDivElement>(null);
+  const onExited = useContext(MotionExit);
+  const { panel: menu, attach, present } = usePopupMotion(!onExited, { onExited: onExited ?? undefined });
   useEffect(() => {
+    if (onExited) return;
     const previous = document.activeElement as HTMLElement | null;
     menu.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
     const outside = (event: PointerEvent) => { if (!menu.current?.contains(event.target as Node)) onClose(); };
@@ -19,8 +22,9 @@ export function SidebarMenu({ x, y, items, onClose, label = '侧边栏菜单', c
       window.removeEventListener('blur', onClose);
       if (previous?.isConnected) previous.focus({ preventScroll: true });
     };
-  }, [onClose]);
-  return createPortal(<div ref={menu} role="menu" aria-label={label} data-sidebar-menu
+  }, [onClose, onExited, menu]);
+  if (!present) return null;
+  return createPortal(<div ref={attach} role="menu" aria-label={label} data-sidebar-menu {...{ inert: onExited ? '' : undefined }}
     className={cn('h1-popup h1-menu-list fixed z-[80] min-w-40', className)}
     style={{ left: Math.max(8, Math.min(x, window.innerWidth - 190)), top: Math.max(8, Math.min(y, window.innerHeight - items.length * 32 - 16)) }}
     onContextMenu={event => event.preventDefault()} onKeyDown={event => {
