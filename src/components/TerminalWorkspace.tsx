@@ -15,11 +15,11 @@ export interface TerminalWorkspaceControls extends ProjectTerminalControls {
 
 interface TerminalContext { shell: string | null; cwd: string | null }
 
-function useTerminalContext(projectId: string, slot: number, session: TerminalStatus | undefined) {
+function useTerminalContext(projectId: string, slot: number, session: TerminalStatus | undefined, interactive: boolean) {
   const [context, setContext] = useState<{ sessionId: string; value: TerminalContext }>();
   const sessionId = session?.sessionId;
   useEffect(() => {
-    if (!sessionId || !session?.alive) return;
+    if (!interactive || !sessionId || !session?.alive) return;
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
     const update = async () => {
@@ -31,7 +31,7 @@ function useTerminalContext(projectId: string, slot: number, session: TerminalSt
     };
     void update();
     return () => { disposed = true; clearTimeout(timer); };
-  }, [projectId, slot, sessionId, session?.alive]);
+  }, [projectId, slot, sessionId, session?.alive, interactive]);
   return context?.sessionId === sessionId ? context?.value : undefined;
 }
 
@@ -65,8 +65,11 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
   slots: number[];
   terminals: Record<string, TerminalStatus>;
   focused: boolean;
+  interactive: boolean;
+  ready: boolean;
+  onReady: (slot: number) => void;
   onFocusedSlot: (projectId: string, slot: number) => void;
-}>(function TerminalWorkspace({ project, activeSlot, slots, terminals, focused, onFocusedSlot }, ref) {
+}>(function TerminalWorkspace({ project, activeSlot, slots, terminals, focused, interactive, ready, onReady, onFocusedSlot }, ref) {
   const [split, setSplit] = useState(false);
   const [source, setSource] = useState<string>();
   const [splitWidth, setSplitWidth] = useState(50);
@@ -84,8 +87,10 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
   const rightSlot = split ? peers.find(slot => selected === `terminal:${slot}`) : undefined;
   const rightService = selected.startsWith('log:') ? selected.slice('log:'.length) : undefined;
   const inputSlot = (inputPane === 'right' ? rightSlot : undefined) ?? activeSlot;
+  const currentInputSlot = useRef(inputSlot);
+  currentInputSlot.current = inputSlot;
   const terminalStatus = terminals[terminalKey(project.id, inputSlot)];
-  const context = useTerminalContext(project.id, inputSlot, terminalStatus);
+  const context = useTerminalContext(project.id, inputSlot, terminalStatus, interactive);
   const size = dimensions[inputSlot];
   const shell = context?.shell ?? 'shell';
   const cwd = context?.cwd ?? project.path;
@@ -95,6 +100,11 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
       ? previous : { ...previous, [slot]: next });
   }, []);
   useEffect(() => { onFocusedSlot(project.id, inputSlot); }, [project.id, inputSlot, onFocusedSlot]);
+  useLayoutEffect(() => {
+    if (!interactive || !ready) return;
+    const frame = requestAnimationFrame(() => getTerminal(project.id, currentInputSlot.current)?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [interactive, ready, project.id, activeSlot]);
 
   const inputControls = inputSlot === activeSlot ? leftControls : rightControls;
   useImperativeHandle(ref, () => ({
@@ -120,12 +130,13 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
     setInputPane('left');
   };
 
-  return <div className="terminal-workspace" data-terminal-workspace={focused ? 'focus' : 'immersive'}>
+  return <div className="terminal-workspace" data-terminal-workspace={focused ? 'focus' : 'immersive'} data-workspace-content>
     <div ref={panes} className="terminal-panes" data-split={split || undefined}
-      style={split ? { gridTemplateColumns: `minmax(0, ${splitWidth}fr) .5px minmax(0, ${100 - splitWidth}fr)` } : undefined}>
+      style={split ? { gridTemplateColumns: `minmax(0, ${splitWidth}fr) 1px minmax(0, ${100 - splitWidth}fr)` } : undefined}>
       <div className="terminal-pane-frame">
         {split && <div className="terminal-pane-heading">终端 {activeSlot}{inputSlot === activeSlot && context?.shell && ` · ${shell}`}</div>}
-        <ProjectTerminal project={project} activeSlot={activeSlot} ref={leftControls} onFocus={focusLeft} onResize={resize} />
+        <ProjectTerminal project={project} activeSlot={activeSlot} ref={leftControls} interactive={interactive}
+          onReady={onReady} onFocus={focusLeft} onResize={resize} />
       </div>
       {split && <>
         <div className="terminal-splitter" role="separator" aria-orientation="vertical" aria-label="分屏宽度" tabIndex={0}
@@ -152,7 +163,7 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
               onValueChange={sourceChanged} className="terminal-source-select" popupClassName="terminal-chrome" />
           </div>
           {rightSlot === undefined ? <ServiceLogPane key={selected} projectId={project.id} services={services} serviceId={rightService} /> :
-            <ProjectTerminal project={project} activeSlot={rightSlot} ref={rightControls} autofocus={false} onFocus={focusRight} onResize={resize} />}
+            <ProjectTerminal project={project} activeSlot={rightSlot} ref={rightControls} interactive={interactive} onFocus={focusRight} onResize={resize} />}
         </div>
       </>}
     </div>

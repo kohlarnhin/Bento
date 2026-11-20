@@ -1,10 +1,18 @@
-import { useContext, useEffect } from 'react';
+import { Fragment, useContext, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import type { ReactNode } from 'react';
 import { cn } from '../lib/utils';
 import { MotionExit, usePopupMotion } from './ui/motion-presence';
 
-export interface SidebarMenuItem { label: string; icon: ReactNode; onSelect: () => void; destructive?: boolean; current?: boolean; disabled?: boolean }
+export interface SidebarMenuItem {
+  label: string;
+  icon?: ReactNode;
+  onSelect: () => void;
+  destructive?: boolean;
+  current?: boolean;
+  disabled?: boolean;
+  separatorBefore?: boolean;
+}
 export function SidebarMenu({ x, y, items, onClose, label = '侧边栏菜单', className }: {
   x: number; y: number; items: SidebarMenuItem[]; onClose: () => void; label?: string; className?: string;
 }) {
@@ -24,9 +32,10 @@ export function SidebarMenu({ x, y, items, onClose, label = '侧边栏菜单', c
     };
   }, [onClose, onExited, menu]);
   if (!present) return null;
-  return createPortal(<div ref={attach} role="menu" aria-label={label} data-sidebar-menu {...{ inert: onExited ? '' : undefined }}
+  const height = items.length * 32 + items.filter(item => item.separatorBefore).length * 9 + 16;
+  return createPortal(<div ref={attach} role="menu" aria-label={label} data-sidebar-menu data-tauri-drag-region="false" {...{ inert: onExited ? '' : undefined }}
     className={cn('h1-popup h1-menu-list fixed z-[80] min-w-40', className)}
-    style={{ left: Math.max(8, Math.min(x, window.innerWidth - 190)), top: Math.max(8, Math.min(y, window.innerHeight - items.length * 32 - 16)) }}
+    style={{ left: Math.max(8, Math.min(x, window.innerWidth - 190)), top: Math.max(8, Math.min(y, window.innerHeight - height)) }}
     onContextMenu={event => event.preventDefault()} onKeyDown={event => {
       if (event.key === 'Escape' || event.key === 'Tab') { event.preventDefault(); event.stopPropagation(); onClose(); }
       if (['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
@@ -38,7 +47,11 @@ export function SidebarMenu({ x, y, items, onClose, label = '侧边栏菜单', c
         buttons[index]?.focus();
       }
     }}>
-    {items.map(item => <button key={item.label} role="menuitem" aria-current={item.current || undefined} disabled={item.disabled} className={cn(item.destructive && 'text-destructive')}
-      onClick={() => { onClose(); item.onSelect(); }}>{item.icon}{item.label}</button>)}
+    {items.map(item => <Fragment key={item.label}>
+      {item.separatorBefore && <div role="separator" className="h1-menu-divider" />}
+      <button type="button" role="menuitem" aria-current={item.current || undefined} disabled={item.disabled}
+        className={cn(item.destructive && 'text-destructive')} data-destructive={item.destructive || undefined}
+        onClick={() => { onClose(); item.onSelect(); }}>{item.icon}{item.label}</button>
+    </Fragment>)}
   </div>, document.body);
 }

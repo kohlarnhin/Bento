@@ -17,10 +17,11 @@ export interface ProjectTerminalControls {
 export const ProjectTerminal = forwardRef<ProjectTerminalControls, {
   project: ProjectConfig;
   activeSlot: number;
-  autofocus?: boolean;
+  interactive: boolean;
+  onReady?: (slot: number) => void;
   onFocus: () => void;
   onResize: (slot: number, size: TerminalDimensions) => void;
-}>(function ProjectTerminal({ project, activeSlot, autofocus = true, onFocus, onResize }, ref) {
+}>(function ProjectTerminal({ project, activeSlot, interactive, onReady, onFocus, onResize }, ref) {
   const host = useRef<HTMLDivElement>(null);
   const terminals = useSyncExternalStore(subscribeTerminals, getTerminalSnapshot);
   const status = terminals[terminalKey(project.id, activeSlot)];
@@ -42,11 +43,17 @@ export const ProjectTerminal = forwardRef<ProjectTerminalControls, {
   }));
   // A slot change invalidates the bar even if the user later returns to it.
   useEffect(() => { setFindRequest(undefined); }, [findKey]);
+  useEffect(() => {
+    if (!interactive && findOpen) {
+      getTerminalSearch(project.id, activeSlot)?.clearDecorations();
+      setFindRequest(undefined);
+    }
+  }, [interactive, findOpen, project.id, activeSlot]);
 
   useEffect(() => {
     const container = host.current;
     if (!container || !canAttach) return;
-    const detach = attachTerminal(project.id, activeSlot, container, autofocus);
+    const detach = attachTerminal(project.id, activeSlot, container, onReady && (() => onReady(activeSlot)));
     const terminal = getTerminal(project.id, activeSlot);
     const sizeSubscription = terminal?.onResize(size => onResize(activeSlot, size));
     if (terminal) onResize(activeSlot, { cols: terminal.cols, rows: terminal.rows });
@@ -66,7 +73,7 @@ export const ProjectTerminal = forwardRef<ProjectTerminalControls, {
       detach();
     };
     // Session hydration and restart reuse the slot's renderer. Keep it attached through both.
-  }, [project.id, activeSlot, canAttach, autofocus, onResize]);
+  }, [project.id, activeSlot, canAttach, onReady, onResize]);
 
   const exited = !!status?.sessionId && !status.alive && !status.opening;
   const overlay = status?.opening || (!status?.alive && status?.error) || exited;

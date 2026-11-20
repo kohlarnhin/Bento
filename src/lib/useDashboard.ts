@@ -31,7 +31,7 @@ export function useDashboard(project: ProjectConfig, runtime: ProjectRuntimeStat
   const { id, path } = project;
   const [snapshot, setSnapshot] = useState<DashboardSnapshot>();
   const [snapshotError, setSnapshotError] = useState<string>();
-  const [git, setGit] = useState<DashboardGit | null>(null);
+  const [git, setGit] = useState<DashboardGit | null>();
   const [health, setHealth] = useState<Record<string, DashboardHealth>>({});
   const [now, setNow] = useState(Date.now);
   const lifetime = useRef(0);
@@ -82,9 +82,9 @@ export function useDashboard(project: ProjectConfig, runtime: ProjectRuntimeStat
     gitPending.current = instance;
     void invoke<DashboardGit | null>('dashboard_git', { id })
       .then(value => { if (instance === lifetime.current) setGit(value); })
-      .catch(() => {})
+      .catch(() => { if (instance === lifetime.current) setGit(previous => previous ?? null); })
       .finally(() => { if (gitPending.current === instance) gitPending.current = undefined; });
-  }, view === 'terminal' ? 0 : 15_000, { focus: view !== 'terminal' });
+  }, view === 'terminal' && git !== undefined ? 0 : 15_000, { focus: view !== 'terminal' });
 
   const listening = snapshot?.services.some(service => service.state === 'listening') ?? false;
   useDashboardPoll(() => {

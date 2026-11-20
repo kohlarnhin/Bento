@@ -14,6 +14,13 @@ type TerminalAction = 'restart' | 'close';
 type Request = { action: TerminalAction; slot: number; sessionId: string };
 const actionLabel = { restart: '重启', close: '关闭' };
 
+function TabLabel({ label, attention }: { label: string; attention?: boolean }) {
+  return <span className="workspace-tab-label" data-tab-label={label}>
+    <span>{label}</span>
+    {attention && <span className="h1-status-dot terminal-tab-attention" data-tone="warning" aria-label="终端有新动静" />}
+  </span>;
+}
+
 interface Props {
   projectId: string;
   view: ProjectView;
@@ -71,10 +78,10 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
 
   const menuStatus = menu && terminals[terminalKey(projectId, menu.slot)];
   const disabled = busy || !menuStatus?.sessionId || menuStatus.opening;
-  const add = terminalView && <ActionTooltip label={createLabel}>
-    <span className="terminal-tab-add-wrap" title={createLabel}>
+  const add = <ActionTooltip label={createLabel}>
+    <span className="terminal-tab-add-wrap" title={createLabel} data-view-control aria-hidden={!terminalView || undefined}>
       <button type="button" aria-label={createLabel} aria-keyshortcuts="Meta+T" className="terminal-tab-add" data-terminal-tab-add
-        disabled={atLimit || creating} onClick={() => {
+        disabled={!terminalView || atLimit || creating} onClick={() => {
           setCreating(true);
           void onNewTerminal().finally(() => setCreating(false));
         }}><Plus size={15} aria-hidden="true" /></button>
@@ -82,12 +89,12 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
   </ActionTooltip>;
 
   const tabs = [
-    { value: 'overview', label: '概览' },
-    ...slots.map((slot, index) => {
+    { value: 'overview', label: <TabLabel label="概览" /> },
+    ...slots.map(slot => {
       const status = terminals[terminalKey(projectId, slot)];
       return {
         value: `terminal:${slot}`, title: status?.title || `终端 ${slot}`,
-        label: <span>终端 {slot}{status?.attention && <span className="h1-status-dot ml-1.5" data-tone="warning" aria-label="终端有新动静" />}</span>,
+        label: <TabLabel label={`终端 ${slot}`} attention={status?.attention} />,
         onContextMenu: (event: React.MouseEvent<HTMLButtonElement>) => {
           event.preventDefault();
           const bounds = event.currentTarget.getBoundingClientRect();
@@ -96,18 +103,20 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
         accessory: <>{status?.sessionId && <button type="button" className="terminal-tab-close" title={`关闭终端 ${slot}`}
           aria-label={`关闭终端 ${slot}`} data-terminal-tab-close={slot} disabled={busy || status.opening}
           onClick={() => request('close', slot)}><X size={10} aria-hidden="true" /></button>}</>,
-        after: index === slots.length - 1 ? add : undefined,
       };
     }),
-    { value: 'git', label: 'Git' },
+    { value: 'git', label: <TabLabel label="Git" /> },
   ];
 
   return <>
-    <SegmentedControl className="h1-workspace-tabs" label="项目视图" options={tabs}
-      value={terminalView ? `terminal:${activeSlot}` : view} onChange={next => {
-        if (next === 'overview' || next === 'git') onSelectView(next);
-        else onSelectTerminal(Number(next.slice('terminal:'.length)));
-      }} />
+    <div className="workspace-tab-controls">
+      <SegmentedControl className="h1-workspace-tabs" label="项目视图" options={tabs}
+        value={terminalView ? `terminal:${activeSlot}` : view} onChange={next => {
+          if (next === 'overview' || next === 'git') onSelectView(next);
+          else onSelectTerminal(Number(next.slice('terminal:'.length)));
+        }} />
+      {add}
+    </div>
     <MotionPresence>{menu && <SidebarMenu x={menu.x} y={menu.y} label={`终端 ${menu.slot} 操作`} className={terminalView ? 'terminal-chrome' : undefined}
       items={[
         { label: '重启', icon: <RotateCcw size={14} />, disabled, onSelect: () => request('restart', menu.slot) },

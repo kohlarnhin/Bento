@@ -65,7 +65,7 @@ export function useWindowMotion(root: RefObject<HTMLDivElement>, focused: boolea
     let timeline!: gsap.core.Timeline;
     const applyLayout = () => {
       const time = timeline.time();
-      surface.style.setProperty('--motion-sidebar-width', width.px + 'px');
+      surface.style.setProperty('--motion-sidebar-width', Math.round(width.px) + 'px');
       expanded.style.visibility = time < resizeStart ? 'visible' : 'hidden';
       rail.style.visibility = time >= resizeEnd ? 'visible' : 'hidden';
     };

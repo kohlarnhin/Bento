@@ -9,7 +9,6 @@ interface Segment<T extends string> {
   title?: string;
   onContextMenu?: MouseEventHandler<HTMLButtonElement>;
   accessory?: ReactNode;
-  after?: ReactNode;
   attributes?: { 'data-sidebar-filter'?: T; 'data-type'?: T };
 }
 
@@ -74,7 +73,6 @@ export function SegmentedControl<T extends string>({ options, value, onChange, l
       </button>;
       return <Fragment key={option.value}>
         {option.accessory ? <div className="segmented-item">{button}{option.accessory}</div> : button}
-        {option.after}
       </Fragment>;
     })}
   </div>;

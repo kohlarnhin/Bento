@@ -4,10 +4,6 @@ export function projectInitial(name: string) {
   return Array.from(name.trim().normalize('NFC'))[0]?.toLocaleUpperCase() || '?';
 }
 
-export function sidebarDensity(projects: readonly Pick<ProjectConfig, 'archived'>[]): 'comfortable' | 'compact' {
-  return projects.filter(project => !project.archived).length > 10 ? 'compact' : 'comfortable';
-}
-
 export type SidebarFilter = 'all' | 'running' | 'attention' | 'changes';
 export function matchesSidebarFilter(project: ProjectConfig, filter: SidebarFilter, statuses: Record<string, ProjectStatus>, attention: ReadonlySet<string>, changes: ReadonlySet<string>) {
   if (filter === 'running') return ['running', 'starting'].includes(statuses[project.id]);

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import gsapPackage from 'gsap';
-import { animateTerminalTab, dashboardEntranceLimit, invertMotionBox, motionSeconds, REDUCED_MOTION_QUERY, settledTerminalTab } from '../src/lib/motionMath.ts';
-
-const gsap = gsapPackage.gsap ?? gsapPackage;
+import {
+  advanceProjectViewTime, blendProjectViews, dashboardEntranceLimit, invertMotionBox, motionSeconds, projectViewBlendSeconds,
+  projectViewContentOpacities, projectViewContentTiming, projectViewOpacities, projectViewOrder, readyProjectView, REDUCED_MOTION_QUERY,
+} from '../src/lib/motionMath.ts';
 
 test('Reduced motion makes an animation settle immediately', () => {
   assert.equal(REDUCED_MOTION_QUERY, '(prefers-reduced-motion: reduce)');
@@ -25,68 +25,79 @@ test('Overview stagger is capped at eight elements', () => {
   assert.equal(dashboardEntranceLimit, 8);
 });
 
-test('The terminal and heading only appear after the dark layer is opaque', t => {
-  const paint = settledTerminalTab(false);
-  const timeline = gsap.timeline({ paused: true });
-  t.after(() => timeline.kill());
-  animateTerminalTab(timeline, paint, true);
-
-  timeline.time(.08);
-  assert.ok(paint.backdrop > 0 && paint.backdrop < 1);
-  assert.equal(paint.content, 0);
-  assert.equal(paint.y, 4);
-
-  timeline.time(.12);
-  assert.deepEqual({ backdrop: paint.backdrop, content: paint.content, y: paint.y }, { backdrop: 1, content: 0, y: 4 });
-  timeline.time(.2);
-  assert.equal(paint.backdrop, 1);
-  assert.ok(paint.content > 0 && paint.content < 1 && paint.y > 0 && paint.y < 4);
-  assert.equal(timeline.duration(), .28);
-  timeline.progress(1);
-  assert.equal(paint.content, 1);
-  assert.equal(paint.y, 0);
+test('Pending terminal paint or Git data preserves the current view in both motion modes', () => {
+  assert.equal(readyProjectView('terminal', 'overview', false, true), 'overview');
+  assert.equal(readyProjectView('terminal', 'git', false, true), 'git');
+  assert.equal(readyProjectView('terminal', 'git', true, true), 'terminal');
+  assert.equal(readyProjectView('git', 'terminal', true, false), 'terminal');
+  assert.equal(readyProjectView('git', 'terminal', true, true), 'git');
+  assert.equal(readyProjectView('overview', 'terminal', false, false), 'overview');
+  assert.equal(motionSeconds(projectViewBlendSeconds, true), 0);
+  assert.ok(projectViewBlendSeconds >= .16 && projectViewBlendSeconds <= .22);
 });
 
-test('Leaving the terminal hides the content before dimming the layer', t => {
-  const paint = settledTerminalTab(true);
-  const timeline = gsap.timeline({ paused: true });
-  t.after(() => timeline.kill());
-  animateTerminalTab(timeline, paint, false);
+const initialView = name => Object.fromEntries(projectViewOrder.map(view => [view, Number(view === name)]));
+const near = (a, b) => assert.ok(Math.abs(a - b) < 1e-12, a + ' != ' + b);
 
-  timeline.time(.08);
-  assert.equal(paint.backdrop, 1);
-  assert.ok(paint.content > 0 && paint.content < 1);
-  timeline.time(.1);
-  assert.equal(paint.backdrop, 1);
-  assert.equal(paint.content, 0);
-  timeline.time(.16);
-  assert.ok(paint.backdrop > 0 && paint.backdrop < 1);
-  assert.equal(paint.content, 0);
-  assert.equal(timeline.duration(), .22);
-  timeline.progress(1);
-  assert.equal(paint.backdrop, 0);
+test('A late frame limits the visual step without changing the regular 200 ms blend', () => {
+  near(advanceProjectViewTime(0, .08), .024);
+  let elapsed = 0;
+  for (let frame = 0; frame < 12; frame++) elapsed = advanceProjectViewTime(elapsed, 1 / 60);
+  near(elapsed, projectViewBlendSeconds);
+  assert.equal(advanceProjectViewTime(elapsed, .02), projectViewBlendSeconds);
 });
 
-test('Retargeting during either phase resumes from the painted values', t => {
-  for (const [entering, points] of [[true, [.04, .16]], [false, [.04, .16]]]) {
-    for (const interruption of points) {
-      const paint = settledTerminalTab(!entering);
-      const first = gsap.timeline({ paused: true });
-      const reversed = gsap.timeline({ paused: true });
-      t.after(() => { first.kill(); reversed.kill(); });
-      animateTerminalTab(first, paint, entering);
-      first.time(interruption);
-      const lastFrame = { backdrop: paint.backdrop, content: paint.content };
-      animateTerminalTab(reversed, paint, !entering);
-      assert.deepEqual({ backdrop: paint.backdrop, content: paint.content }, lastFrame);
-      for (const progress of [.1, .4, .7, 1]) {
-        reversed.progress(progress);
-        assert.ok(paint.backdrop === 1 || paint.content === 0);
+function verifyComposition(mix) {
+  const alpha = projectViewOpacities(mix);
+  near(alpha.overview * (1 - alpha.git) * (1 - alpha.terminal), mix.overview);
+  near(alpha.git * (1 - alpha.terminal), mix.git);
+  near(alpha.terminal, mix.terminal);
+  near((1 - alpha.overview) * (1 - alpha.git) * (1 - alpha.terminal), 0);
+}
+
+test('Every pair of workspace views blends opaque surfaces with no exposed backing frame', () => {
+  for (const from of projectViewOrder) {
+    for (const to of projectViewOrder) {
+      const initial = initialView(from);
+      for (const progress of [0, .08, .35, .5, .92, 1]) {
+        const mix = blendProjectViews(initial, to, progress);
+        verifyComposition(mix);
+        if (from !== to) near(mix[to], progress);
       }
-      const final = settledTerminalTab(!entering);
-      assert.equal(paint.backdrop, final.backdrop);
-      assert.equal(paint.content, final.content);
-      if (!entering) assert.equal(paint.y, final.y);
+      assert.deepEqual(blendProjectViews(initial, to, 1), initialView(to));
     }
   }
+});
+
+test('An interrupted transition keeps the last painted frame across a redirect or reversal', () => {
+  const current = blendProjectViews(initialView('terminal'), 'git', .36);
+  for (const target of projectViewOrder) {
+    assert.deepEqual(blendProjectViews(current, target, 0), current);
+    verifyComposition(blendProjectViews(current, target, .24));
+    verifyComposition(blendProjectViews(current, target, .65));
+    assert.deepEqual(blendProjectViews(current, target, 1), initialView(target));
+  }
+});
+
+test('The workspace foregrounds overlap for 30 ms without a frame with neither visible', () => {
+  const durationMs = projectViewBlendSeconds * 1000;
+  for (const from of projectViewOrder) {
+    for (const to of projectViewOrder.filter(view => view !== from)) {
+      const initial = initialView(from);
+      for (let ms = 0; ms <= durationMs; ms++) {
+        const content = projectViewContentOpacities(initial, to, ms / 1000);
+        assert.ok(content[from] + content[to] > 0);
+        assert.equal(content[from] > 0 && content[to] > 0,
+          ms > projectViewContentTiming.enter * 1000 && ms < projectViewContentTiming.exit * 1000);
+      }
+      assert.deepEqual(projectViewContentOpacities(initial, to, projectViewBlendSeconds), initialView(to));
+    }
+  }
+});
+
+test('Redirecting a foreground blend starts with the exact current foregrounds', () => {
+  const current = projectViewContentOpacities(initialView('overview'), 'terminal', .072);
+  assert.ok(current.overview > 0 && current.terminal > 0);
+  assert.deepEqual(projectViewContentOpacities(current, 'git', 0), current);
+  assert.deepEqual(projectViewContentOpacities(current, 'git', .2), initialView('git'));
 });
