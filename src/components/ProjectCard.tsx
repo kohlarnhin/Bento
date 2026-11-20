@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import gsap from 'gsap';
 import { invoke } from '@tauri-apps/api/core';
 import { ArrowUpRight, CodeXml, Ellipsis, Globe2, Maximize2, Minimize2, Play, Square } from 'lucide-react';
 import { toast } from 'sonner';
@@ -9,19 +10,25 @@ import type {
 import { cpuChart, dashboardPortListening, dashboardServices, dashboardStatus, durationText, relativeTime, runInterval } from '../lib/dashboard';
 import { useDashboard } from '../lib/useDashboard';
 import { useProjectLaunch } from '../lib/useProjectLaunch';
+import { useReducedMotion } from '../lib/motion';
+import { dashboardEntranceLimit } from '../lib/motionMath';
 import type { TerminalStatus } from '../lib/terminalRegistry';
 import { DashboardGitCard, DashboardOutput, DashboardStandard } from './DashboardPanels';
 import { OpenServiceButton, ProjectWebMenu } from './ProjectServices';
 import { ProjectTabs } from './ProjectTabs';
+import { ProjectStandardDialog } from './ProjectStandardDialog';
+import { StatusDot } from './StatusDot';
 import Button from './ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
 import { Empty, EmptyDescription, EmptyTitle } from './ui/empty';
 import { ActionTooltip } from './ui/tooltip';
+import { MotionPresence, usePopupMotion } from './ui/motion-presence';
 import './dashboard.css';
 
 interface ProjectCardProps {
   project: ProjectConfig;
   view: ProjectView;
+  showTerminal: boolean;
   slots: number[];
   activeSlot: number;
   terminals: Record<string, TerminalStatus>;
@@ -190,7 +197,7 @@ function ConflictDialog({ conflict, onClose, onConfirm }: {
   </Dialog>;
 }
 
-export function ProjectCard({ project, view, slots, activeSlot, terminals, terminalPane, onSelectView, onSelectTerminal,
+export function ProjectCard({ project, view, showTerminal, slots, activeSlot, terminals, terminalPane, onSelectView, onSelectTerminal,
   focused, maxTerminals, onToggleFocus, onNewTerminal, onTerminalClosed,
   status: runtimeStatus, runtime, conflicts, onStart, onStop, onRestart, onOpenBrowser,
   onSetDefaultService, onRevealPath, onOpenTerminal, onOpenLogs, onClearLogs, onEdit, onDelete, onRunCommand }: ProjectCardProps) {
@@ -212,6 +219,37 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
   const branch = git?.branch ?? git?.head;
   const envCount = new Set([...project.env, ...(launch?.data?.steps.flatMap(step => step.portEnv) ?? [])]
     .map(variable => variable.key)).size;
+  const reduced = useReducedMotion();
+  const content = useRef<HTMLDivElement>(null);
+  const launchLabel = useRef<HTMLSpanElement>(null);
+  const lastLaunchState = useRef(active);
+  useLayoutEffect(() => {
+    const area = content.current;
+    if (reduced || !area) return;
+    const scope = gsap.context(() => {
+      gsap.fromTo(area, { opacity: 0, y: 6 },
+        { opacity: 1, y: 0, duration: .2, ease: 'power3.out', clearProps: 'opacity,transform' });
+      if (view === 'overview') {
+        const blocks = gsap.utils.toArray('.dash-service, .dash-facts').slice(0, dashboardEntranceLimit);
+        gsap.fromTo(blocks, { opacity: 0, y: 8 }, {
+          opacity: 1, y: 0, stagger: .03, duration: .2, ease: 'power3.out', clearProps: 'opacity,transform',
+        });
+      }
+    }, area);
+    return () => scope.revert();
+  }, [view, showTerminal, project.id, reduced]);
+  useLayoutEffect(() => {
+    const previous = lastLaunchState.current;
+    lastLaunchState.current = active;
+    const label = launchLabel.current;
+    if (reduced || previous === active || !label) return;
+    const layers = [...label.children];
+    const scope = gsap.context(() => {
+      gsap.fromTo(layers, { opacity: (index: number) => Number(Boolean(index) === previous) },
+        { opacity: (index: number) => Number(Boolean(index) === active), duration: .16, ease: 'power3.out', clearProps: 'opacity' });
+    }, label);
+    return () => scope.revert();
+  }, [active, reduced]);
 
   useEffect(() => {
     if (!active && startedAt != null) refresh();
@@ -260,9 +298,16 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
   const name = project.displayName || project.name;
   const focusLabel = focused ? '退出专注' : '专注';
   const FocusIcon = focused ? Minimize2 : Maximize2;
-  const config = <details className="dash-config" data-dashboard-config>
-    <summary className="h1-tag" aria-label="启动配置与更多项目操作"><Ellipsis size={16} aria-hidden="true" /></summary>
-    <div className="h1-popup dash-config-panel">
+  const [configOpen, setConfigOpen] = useState(false);
+  const [showTemplate, setShowTemplate] = useState(false);
+  const configMotion = usePopupMotion(configOpen && view === 'overview');
+  useEffect(() => { if (view !== 'overview') setConfigOpen(false); }, [view]);
+  const config = <details className="dash-config" data-dashboard-config open={configMotion.present || undefined}>
+    <summary className="h1-tag" aria-label="启动配置与更多项目操作" onClick={event => {
+      event.preventDefault();
+      setConfigOpen(previous => !previous);
+    }}><Ellipsis size={16} aria-hidden="true" /></summary>
+    {configMotion.present && <div ref={configMotion.attach} className="h1-popup dash-config-panel" {...{ inert: configOpen ? undefined : '' }}>
       <div className="dash-config-info">
         <h3 className="h1-group-title">启动配置</h3>
         <code className="dash-truncate" title={project.path}>{project.path}</code>
@@ -270,7 +315,7 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
         <p>{services.length} 个服务 · {envCount} 个环境变量</p>
       </div>
       <div className="h1-menu-list" onClick={event => {
-        if ((event.target as HTMLElement).closest('button')) event.currentTarget.closest('details')?.removeAttribute('open');
+        if ((event.target as HTMLElement).closest('button')) setConfigOpen(false);
       }}>
         <button type="button" onClick={() => onEdit()} data-edit-project>编辑配置</button>
         <button type="button" onClick={() => onRevealPath(project.path)} data-reveal-path>在 Finder 中定位</button>
@@ -281,8 +326,8 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
         {project.commands.map(entry => <button type="button" key={entry.name} onClick={() => onRunCommand(entry.command)} data-run-command={entry.name}>运行 {entry.name}</button>)}
         <button type="button" className="dash-error" onClick={onDelete} data-delete-project>删除项目</button>
       </div>
-      <DashboardStandard project={project} plan={launch?.data} planError={launch?.error} />
-    </div>
+      <DashboardStandard project={project} plan={launch?.data} planError={launch?.error} onViewTemplate={() => setShowTemplate(true)} />
+    </div>}
   </details>;
 
   return <div className="h1-workspace" data-project-details={project.id} data-project-runtime={status}>
@@ -290,7 +335,7 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
       <div className="h1-toolbar-heading" data-tauri-drag-region>
         <h1 className="dash-truncate" title={name} data-tauri-drag-region>{name}</h1>
         <span className="dash-badge" data-status={status} title={statusText} data-tauri-drag-region>
-          <span className="h1-status-dot" data-tone={status} aria-hidden="true" /><span className="dash-truncate">{statusText}</span>
+          <StatusDot tone={status} aria-hidden="true" /><span className="dash-truncate">{statusText}</span>
         </span>
       </div>
       <ProjectTabs projectId={project.id} view={view} activeSlot={activeSlot} slots={slots} terminals={terminals}
@@ -311,21 +356,24 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
             <FocusIcon size={14} aria-hidden="true" />
           </button>
         </ActionTooltip>}
-        {active ? <>
-          <button type="button" className="h1-button h1-button-primary" disabled={pending} onClick={() => act('stop')}
-            aria-keyshortcuts="Meta+." title="停止 ⌘." data-project-action="stop"><Square size={10} fill="currentColor" aria-hidden="true" />停止</button>
-        </> : <button type="button" className="h1-button h1-button-primary" disabled={pending || blocked}
-          onClick={() => act('start')} aria-keyshortcuts="Meta+R" title={blocked ? '请先处理端口冲突' : '启动 ⌘R'} data-project-action="start"><Play size={12} fill="currentColor" aria-hidden="true" />启动</button>}
+        <button type="button" className="h1-button h1-button-primary" disabled={pending || (!active && blocked)}
+          onClick={() => act(active ? 'stop' : 'start')} aria-label={active ? '停止' : '启动'}
+          aria-keyshortcuts={active ? 'Meta+.' : 'Meta+R'} title={active ? '停止 ⌘.' : blocked ? '请先处理端口冲突' : '启动 ⌘R'}
+          data-project-action={active ? 'stop' : 'start'}>
+          <span ref={launchLabel} className="launch-label" data-running={active || undefined} aria-hidden="true">
+            <span><Play size={12} fill="currentColor" />启动</span><span><Square size={10} fill="currentColor" />停止</span>
+          </span>
+        </button>
       </div>
     </header>
 
-    {view === 'terminal' ? terminalPane : view === 'git' ? (
-      <div className="h1-project-scroll" data-project-git={project.id}>
+    {showTerminal ? terminalPane : view === 'git' ? (
+      <div ref={content} className="h1-project-scroll" data-project-git={project.id}>
         {git ? <DashboardGitCard git={git} now={now} onEditor={seeEditor} /> :
           <Empty className="h1-group"><EmptyTitle>暂无 Git 信息</EmptyTitle>
             <EmptyDescription>此项目的分支与文件改动会显示在这里。</EmptyDescription></Empty>}
       </div>
-    ) : <div className="h1-project-scroll" data-project-overview={project.id}>
+    ) : <div ref={content} className="h1-project-scroll" data-project-overview={project.id}>
       <div className="dash-main">
         <div className="h1-group dash-summary" aria-label="服务与资源">
           {services.map(service => {
@@ -363,6 +411,8 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
           onTerminal={onOpenTerminal} onJump={onOpenLogs} onClear={onClearLogs} />
       </div>
     </div>}
-    {occupied && <ConflictDialog conflict={occupied} onClose={() => setOccupied(undefined)} onConfirm={verifyRelease} />}
+    <MotionPresence>{occupied && <ConflictDialog conflict={occupied} onClose={() => setOccupied(undefined)} onConfirm={verifyRelease} />}</MotionPresence>
+    <MotionPresence>{showTemplate && <ProjectStandardDialog request={{ mode: 'view', path: project.path, services: project.services }}
+      onClose={() => setShowTemplate(false)} />}</MotionPresence>
   </div>;
 }

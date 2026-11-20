@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom';
 import { Check, ChevronDown, Loader2, Search } from 'lucide-react';
 import { selectKeyAction } from '../../lib/selectKeyboard';
 import { cn } from '../../lib/utils';
+import { usePopupMotion } from './motion-presence';
 
 export interface SelectOption {
   value: string;
@@ -35,7 +36,6 @@ function Dot({ color }: { color: string }) {
 
 export function Select({ id, label, value, options, onValueChange, disabled, className, popupClassName, search, ...props }: Props) {
   const trigger = useRef<HTMLButtonElement>(null);
-  const popup = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLDivElement>(null);
   const composing = useRef(false);
@@ -44,6 +44,10 @@ export function Select({ id, label, value, options, onValueChange, disabled, cla
   const [active, setActive] = useState<number>();
   const [error, setError] = useState('');
   const open = host !== null;
+  const { panel: popup, attach, present } = usePopupMotion(open);
+  const lastHost = useRef<HTMLElement | null>(null);
+  if (host) lastHost.current = host;
+  const popupHost = present ? lastHost.current : null;
   const listId = `${id}-listbox`;
   const selected = options.find(option => option.value === value);
   const name = query.trim();
@@ -90,7 +94,8 @@ export function Select({ id, label, value, options, onValueChange, disabled, cla
       panel.style.left = `${(rect.left - (container?.left ?? 0)) / scale - (container ? host.clientLeft : 0)}px`;
       panel.style.top = `${((up ? rect.top : rect.bottom) - (container?.top ?? 0)) / scale - (container ? host.clientTop : 0) + (up ? -6 : 6)}px`;
       panel.style.maxHeight = `${Math.min(288, Math.max(0, up ? above : below) / scale)}px`;
-      panel.style.transform = up ? 'translateY(-100%)' : '';
+      panel.style.translate = up ? '0 -100%' : '';
+      panel.style.transformOrigin = up ? 'bottom left' : 'top left';
     };
     position();
     win.addEventListener('resize', position);
@@ -177,9 +182,9 @@ export function Select({ id, label, value, options, onValueChange, disabled, cla
       <span className="min-w-0 flex-1 truncate">{selected?.label ?? '—'}</span>
       <ChevronDown aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
     </button>
-    {host && createPortal(
-      <div ref={popup} data-select-open className={cn('h1-popup z-[60] flex max-h-72 flex-col overflow-hidden p-1.5',
-        host === host.ownerDocument.body ? 'fixed' : 'absolute', popupClassName)}>
+    {popupHost && createPortal(
+      <div ref={attach} data-select-open {...{ inert: open ? undefined : '' }} className={cn('h1-popup z-[60] flex max-h-72 flex-col overflow-hidden p-1.5',
+        popupHost === popupHost.ownerDocument.body ? 'fixed' : 'absolute', popupClassName)}>
         {search && <div className="mb-1 flex shrink-0 items-center gap-2 border-b px-2 pb-1.5 pt-0.5">
           <Search aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
           <input ref={input} role="combobox" aria-label={search.placeholder} aria-expanded="true" aria-autocomplete="list"
@@ -213,6 +218,6 @@ export function Select({ id, label, value, options, onValueChange, disabled, cla
           </div>}
         </div>
         {error && <p role="alert" className="shrink-0 break-words px-2.5 py-1 text-xs text-destructive">{error}</p>}
-      </div>, host)}
+      </div>, popupHost)}
   </>;
 }

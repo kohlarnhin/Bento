@@ -469,6 +469,7 @@ export function fitTerminal(projectId: string, slot: number, focus = false) {
   if (!entry?.opened || entry.disposed || !visible(entry)) return;
   // Focus also when the renderer is still measuring cells on the first visible frame.
   if (focus) entry.terminal.focus();
+  if (entry.container.closest('[data-terminal-layout-motion]')) return;
   const atBottom = entry.terminal.buffer.active.viewportY >= entry.terminal.buffer.active.baseY;
   const dimensions = entry.fit.proposeDimensions();
   if (!dimensions || !Number.isFinite(dimensions.cols) || !Number.isFinite(dimensions.rows)
@@ -478,6 +479,10 @@ export function fitTerminal(projectId: string, slot: number, focus = false) {
   void drainResize(entry);
   entry.terminal.refresh(0, entry.terminal.rows - 1);
   if (atBottom) entry.terminal.scrollToBottom();
+}
+
+export function fitVisibleTerminals() {
+  registry.entries.forEach(entry => fitTerminal(entry.projectId, entry.slot));
 }
 
 function startHydrate(entry: Entry, restart: boolean): Promise<void> {

@@ -2,26 +2,19 @@ import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { X } from 'lucide-react';
 import { cn } from '../../lib/utils';
+import { MotionExit, usePopupMotion } from './motion-presence';
 
-export const Dialog = DialogPrimitive.Root;
-export const DialogTrigger = DialogPrimitive.Trigger;
-export const DialogPortal = DialogPrimitive.Portal;
-export const DialogClose = DialogPrimitive.Close;
+const DialogMotion = React.createContext<{ open: boolean; onExited?: () => void }>({ open: false });
 
-export const DialogOverlay = React.forwardRef<
-  React.ElementRef<typeof DialogPrimitive.Overlay>,
-  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
->(({ className, ...props }, ref) => (
-  <DialogPrimitive.Overlay
-    ref={ref}
-    className={cn(
-      'fixed inset-0 z-50 bg-[var(--dialog-overlay)] data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0',
-      className
-    )}
-    {...props}
-  />
-));
-DialogOverlay.displayName = DialogPrimitive.Overlay.displayName;
+export function Dialog({ open, children, ...props }: React.ComponentProps<typeof DialogPrimitive.Root> & { open: boolean }) {
+  const onExited = React.useContext(MotionExit);
+  const visible = open && !onExited;
+  return <DialogMotion.Provider value={{ open: visible, onExited: onExited ?? undefined }}>
+    <MotionExit.Provider value={null}>
+      <DialogPrimitive.Root {...props} open={visible}>{children}</DialogPrimitive.Root>
+    </MotionExit.Provider>
+  </DialogMotion.Provider>;
+}
 
 export const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
@@ -29,17 +22,27 @@ export const DialogContent = React.forwardRef<
     hideClose?: boolean;
     closeClassName?: string;
   }
->(({ className, children, hideClose, closeClassName, onEscapeKeyDown, ...props }, ref) => (
-  <DialogPortal>
-    <DialogOverlay />
+>(({ className, children, hideClose, closeClassName, onEscapeKeyDown, ...props }, ref) => {
+  const { open, onExited } = React.useContext(DialogMotion);
+  const backdrop = React.useRef<HTMLDivElement>(null);
+  const { attach, present } = usePopupMotion(open, { backdrop, onExited });
+  const connect = React.useCallback((node: HTMLDivElement | null) => {
+    attach(node);
+    if (typeof ref === 'function') ref(node);
+    else if (ref) ref.current = node;
+  }, [attach, ref]);
+  if (!present) return null;
+  return <DialogPrimitive.Portal forceMount>
+    <DialogPrimitive.Overlay ref={backdrop} className="fixed inset-0 z-50 bg-[var(--dialog-overlay)]" />
     <DialogPrimitive.Content
-      ref={ref}
+      ref={connect}
+      {...{ inert: open ? undefined : '' }}
       onEscapeKeyDown={event => {
         if (event.target instanceof Element && event.target.closest('[data-select-open]')) event.preventDefault();
         onEscapeKeyDown?.(event);
       }}
       className={cn(
-        'h1-dialog fixed left-1/2 top-1/2 z-50 grid w-[calc(100%-3rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4 p-6 outline-none duration-150 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0',
+        'h1-dialog fixed left-1/2 top-1/2 z-50 grid w-[calc(100%-3rem)] max-w-lg [translate:-50%_-50%] gap-4 p-6 outline-none',
         className
       )}
       {...props}
@@ -57,8 +60,8 @@ export const DialogContent = React.forwardRef<
         </DialogPrimitive.Close>
       )}
     </DialogPrimitive.Content>
-  </DialogPortal>
-));
+  </DialogPrimitive.Portal>;
+});
 DialogContent.displayName = DialogPrimitive.Content.displayName;
 
 export const DialogHeader = ({

@@ -15,6 +15,7 @@ import { usePortStandard } from '../lib/usePortStandard';
 import { hasAdvancedErrors, validateAdvanced } from '../lib/projectSettings';
 import type { AdvancedErrors } from '../lib/projectSettings';
 import { ProjectAdvancedFields } from './ProjectAdvancedFields';
+import { MotionPresence } from './ui/motion-presence';
 import { ProjectRescanCard } from './ProjectRescanCard';
 import { ProjectServiceFields, type ServiceErrors, type ServiceField } from './ProjectServiceFields';
 import { ProjectStandardDialog, type StandardRequest } from './ProjectStandardDialog';
@@ -621,11 +622,11 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
         </form>
       </DialogContent>
     </Dialog>
-    {standardDialog && <ProjectStandardDialog request={standardDialog}
+    <MotionPresence>{standardDialog && <ProjectStandardDialog request={standardDialog}
       onClose={() => setStandardDialog(undefined)} onGenerated={command => {
         change('startCommand', command);
         setRescan(undefined);
         setAppliedServiceDiff(undefined);
-      }} />}
+      }} />}</MotionPresence>
   </>);
 }

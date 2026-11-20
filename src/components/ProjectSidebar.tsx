@@ -7,12 +7,15 @@ import { matchesSidebarFilter, moveProjectOrder, sidebarDensity, sidebarSections
 import { getProjectTerminalSlots, getTerminalSnapshot, subscribeTerminals } from '../lib/terminalRegistry';
 import { cn } from '../lib/utils';
 import { recordRender } from '../lib/renderMetrics';
+import { useSidebarMotion } from '../hooks/useSidebarMotion';
 import Button from './ui/button';
 import { ActionTooltip } from './ui/tooltip';
 import { ScrollArea } from './ui/scroll-area';
 import { Input } from './ui/input';
 import { ProjectAvatar } from './ProjectAvatar';
+import { StatusDot } from './StatusDot';
 import { SidebarMenu, type SidebarMenuItem } from './SidebarMenu';
+import { MotionPresence } from './ui/motion-presence';
 
 interface Props {
   projects: ProjectConfig[];
@@ -108,9 +111,9 @@ function ProjectRowStatus({ projectId, status, conflict, attention, hideOnHover 
   if (status === 'stopped' && !conflict && !attention) return null;
   const runtimeLabel = conflict ? '端口冲突' : { running: '运行中', starting: '启动中', error: '运行异常', stopped: '' }[status];
   const label = [runtimeLabel, attention && '终端有新动静'].filter(Boolean).join(' · ');
-  return <span className={cn('h1-status-dot', hideOnHover && 'group-hover/project:opacity-0 group-focus-within/project:opacity-0')}
+  return <StatusDot className={hideOnHover ? 'group-hover/project:!opacity-0 group-focus-within/project:!opacity-0' : undefined}
     title={label} aria-label={label} data-terminal-attention={attention ? projectId : undefined}
-    data-tone={conflict ? 'error' : status} />;
+    tone={conflict ? 'error' : status} />;
 }
 
 export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive, folderDropName, groups: projectGroups, filter, onFilterChange, attentionProjects, changedProjects, onQuickSwitch, onUpdateGroup, onReorderGroups, onGroupAction, onProjectFlags, visibleProjects, searchQuery, searchInputRef, onSearchChange, onReorder, reordering, statuses, conflicts, selection, maxPerProject, loading, projectsLoaded, onSelectProject, onCreateTerminal, onRefresh, onCreate, managedCount, onStopAll, currentVersion, availableVersion, onCheckUpdates, onOpenSettings }: Props) {
@@ -128,6 +131,9 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
   const rows = useRef(new Map<string, HTMLDivElement>());
   const buckets = useRef(new Map<string, HTMLDivElement>());
   const scrollArea = useRef<HTMLDivElement>(null);
+  const projectList = useRef<HTMLElement>(null);
+  const selectionMarker = useRef<HTMLSpanElement>(null);
+  useSidebarMotion(projectList, selectionMarker, projects, projectsLoaded, inactive);
   const runningSection = useRef<HTMLElement>(null);
   const indicator = useRef<HTMLDivElement>(null);
   const drag = useRef<ProjectDrag | null>(null);
@@ -492,7 +498,8 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
         : <button aria-label="快速切换项目 (⌘P)" aria-keyshortcuts="Meta+p" title="快速切换项目 (⌘P)" className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded px-[5px] py-px text-keycap leading-[15px] text-[var(--h1-label)] hover:bg-[var(--h1-hover)]" onClick={onQuickSwitch}>⌘P</button>}
     </div>
     <ScrollArea ref={scrollArea} className="sidebar-scroll min-h-0 flex-1">
-      <nav id="project-list" aria-label="项目列表" className="flex min-h-full flex-col">
+      <nav ref={projectList} id="project-list" aria-label="项目列表" className="relative flex min-h-full flex-col">
+        <span ref={selectionMarker} className="sidebar-selection-marker" aria-hidden="true" hidden />
         {projectsLoaded && !loading && projects.length === 0 ? <div className="h1-group mt-4 px-3 py-5 text-center" data-sidebar-empty>
           <p className="text-sm font-medium text-foreground">还没有项目</p>
           <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">把项目文件夹拖到这里</p>
@@ -521,6 +528,6 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
       <p className="text-[11px] leading-relaxed text-muted-foreground">会自动识别启动命令和端口</p>
     </div>}
     <div ref={indicator} hidden={!draggingId} aria-hidden="true" data-reorder-indicator className="pointer-events-none fixed z-[70] h-0.5 rounded-full bg-foreground/60" />
-    {!inactive && menu && <SidebarMenu {...menu} onClose={closeMenu} />}
+    <MotionPresence>{!inactive && menu && <SidebarMenu {...menu} onClose={closeMenu} />}</MotionPresence>
   </aside>;
 });

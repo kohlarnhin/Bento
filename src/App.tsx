@@ -18,11 +18,15 @@ import { StopAllProjectsDialog } from './components/StopAllProjectsDialog';
 import { UpdateDialog } from './components/UpdateDialog';
 import { useUpdater } from './hooks/useUpdater';
 import { useSettings } from './hooks/useSettings';
+import { useWindowMotion } from './hooks/useWindowMotion';
+import { useTerminalTabMotion } from './hooks/useTerminalTabMotion';
+import { useButtonPressMotion } from './hooks/useButtonPressMotion';
 import { SettingsDialog } from './components/SettingsDialog';
 import { QuickSwitcher } from './components/QuickSwitcher';
 import { GroupDialog } from './components/GroupDialog';
 import Button from './components/ui/button';
 import { Toaster } from './components/ui/sonner';
+import { MotionPresence } from './components/ui/motion-presence';
 import { Empty, EmptyTitle, EmptyDescription } from './components/ui/empty';
 import { createTerminal, getProjectTerminalSlots, getTerminalSnapshot, initTerminalRegistry, subscribeTerminals, terminalKey } from './lib/terminalRegistry';
 import { projectLogs } from './lib/useProjectLogs';
@@ -636,18 +640,25 @@ export function App() {
   }, []);
   const inTerminal = !!selectedProject && selection?.view === 'terminal';
   const focusActive = inTerminal && focusMode;
+  const windowSurface = useRef<HTMLDivElement>(null);
+  const mainPanel = useRef<HTMLElement>(null);
+  const activeSlot = selectedProject ? activeSlots[selectedProject.id] ?? 1 : 1;
+  const activeTerminalId = selectedProject && terminalKey(selectedProject.id, activeSlot);
+  const focusTerminalInput = useCallback(() => terminalControls.current?.focusInput(), []);
+  const showTerminal = useTerminalTabMotion(mainPanel, activeTerminalId, inTerminal, focusTerminalInput);
+  useWindowMotion(windowSurface, focusActive);
+  useButtonPressMotion();
   useEffect(() => {
     void invoke('set_traffic_light_layout', { layout: focusActive ? 'focus' : 'sidebar' })
       .catch(error => console.warn('Bento traffic lights:', error));
   }, [focusActive]);
   const projectOrder = useMemo(() => sidebarNavigation(projects, groups), [projects, groups]);
-  const activeSlot = selectedProject ? activeSlots[selectedProject.id] ?? 1 : 1;
   const slots = selectedProject ? getProjectTerminalSlots(selectedProject.id, terminals) : [];
 
   return (
     <TooltipProvider delayDuration={150}>
       <Toaster theme={settings.colorScheme} />
-      <div className="h1-window cursor-default select-none" data-terminal-view={inTerminal || undefined}
+      <div ref={windowSurface} className="h1-window cursor-default select-none" data-terminal-view={inTerminal || undefined}
         data-focus-mode={focusActive || undefined} style={{
           '--terminal-surface': TERMINAL_THEME.background,
           '--terminal-text-color': TERMINAL_THEME.foreground,
@@ -694,7 +705,7 @@ export function App() {
             selectedId={selectedProject?.id} onSelect={selectProject} onOpenSettings={openSettings} />
         </div>
 
-        <main className={'h1-main flex min-h-0 min-w-0 flex-col' + (inTerminal ? ' terminal-chrome' : '')}>
+        <main ref={mainPanel} className="h1-main flex min-h-0 min-w-0 flex-col" data-terminal-layout={showTerminal || undefined}>
           {!selectedProject && <div data-tauri-drag-region className="h-10 shrink-0" aria-hidden="true" />}
           {projects.length === 0 ? (
             <Empty className="h1-group flex-1">
@@ -710,6 +721,7 @@ export function App() {
                   key={selectedProject.id}
                   project={selectedProject}
                   view={selection?.view ?? 'overview'}
+                  showTerminal={showTerminal}
                   slots={slots}
                   activeSlot={activeSlot}
                   terminals={terminals}
@@ -739,10 +751,11 @@ export function App() {
                   onRunCommand={command => { void handleRunCommand(selectedProject.id, command); }}
                 />
           ) : null}
+          <div className="terminal-backdrop" aria-hidden="true" />
         </main>
 
         <UpdateDialog updater={updater} projects={managedProjects} terminalCount={terminalCount} />
-        {quickOpen && <QuickSwitcher projects={[...projectOrder, ...projects.filter(project => project.archived)]} statuses={projectStatuses}
+        <MotionPresence>{quickOpen && <QuickSwitcher projects={[...projectOrder, ...projects.filter(project => project.archived)]} statuses={projectStatuses}
           terminalActions={inTerminal ? {
             focused: focusActive,
             onFocus: () => { closeQuickSwitcher(); toggleFocusMode(); },
@@ -753,18 +766,18 @@ export function App() {
           onCreateGroup={() => { closeQuickSwitcher(); dialogOpen.current = true; setGroupForm({ action: 'create' }); }}
           onSelect={project => { closeQuickSwitcher(); setSearchQuery(''); setFilter('all'); selectProject(project.id); }}
           onToggle={project => { closeQuickSwitcher(); void (['running', 'starting'].includes(projectStatuses[project.id]) ? handleStop(project.id) : handleStart(project.id)); }}
-          onNewTerminal={project => { closeQuickSwitcher(); setSearchQuery(''); setFilter('all'); void openTerminal(project.id); }} />}
-        {groupForm && <GroupDialog group={groupForm.group} deleting={groupForm.action === 'delete'} onClose={() => setGroupForm(null)}
+          onNewTerminal={project => { closeQuickSwitcher(); setSearchQuery(''); setFilter('all'); void openTerminal(project.id); }} />}</MotionPresence>
+        <MotionPresence>{groupForm && <GroupDialog group={groupForm.group} deleting={groupForm.action === 'delete'} onClose={() => setGroupForm(null)}
           onSave={async name => {
             if (groupForm.action === 'create') await addGroup(name);
             else if (groupForm.action === 'rename') await updateGroup(groupForm.group!.id, { name });
             else { await invoke('delete_group', { id: groupForm.group!.id }); await loadProjects(); }
-          }} />}
-        {settingsOpen && !updater.isModalOpen && <SettingsDialog settings={settings} updater={updater}
+          }} />}</MotionPresence>
+        <MotionPresence>{settingsOpen && !updater.isModalOpen && <SettingsDialog settings={settings} updater={updater}
           onClose={() => setSettingsOpen(false)}
-          onCheckUpdates={() => { setSettingsOpen(false); void updater.checkNow(); }} />}
+          onCheckUpdates={() => { setSettingsOpen(false); void updater.checkNow(); }} />}</MotionPresence>
 
-        {projectForm && <ProjectFormDialog
+        <MotionPresence>{projectForm && <ProjectFormDialog
           project={projectForm.project}
           initialInspection={projectForm.inspection}
           focusPort={projectForm.focusPort}
@@ -778,36 +791,36 @@ export function App() {
             setSelection({ projectId: project.id, view: 'overview' });
             setProjectForm(null);
           }}
-        />}
-        {deleteProject && <ProjectDeleteDialog project={deleteProject} onClose={() => setDeleteProject(null)} onDeleted={async () => {
+        />}</MotionPresence>
+        <MotionPresence>{deleteProject && <ProjectDeleteDialog project={deleteProject} onClose={() => setDeleteProject(null)} onDeleted={async () => {
           const id = deleteProject.id;
           clearLogs(id, true);
           if (activeLogProject?.id === id) setActiveLogProject(null);
           await loadProjects();
           setDeleteProject(null);
-        }} />}
+        }} />}</MotionPresence>
 
-        {externalStop && <ExternalProcessDialog
+        <MotionPresence>{externalStop && <ExternalProcessDialog
           {...externalStop}
           onClose={() => setExternalStop(null)}
           onCompleted={async () => { await refreshRuntime(); setExternalStop(null); }}
-        />}
+        />}</MotionPresence>
 
-        {stopAllOpen && <StopAllProjectsDialog
+        <MotionPresence>{stopAllOpen && <StopAllProjectsDialog
           projects={managedProjects}
           onClose={() => setStopAllOpen(false)}
           onStopped={async () => { await refreshRuntime(); setStopAllOpen(false); }}
-        />}
+        />}</MotionPresence>
 
         {/* Global Terminal Logs Modal Dialog */}
-        {activeLogProject && (
+        <MotionPresence>{activeLogProject && (
           <TerminalLogsModal
             project={activeLogProject}
             focusEntry={activeLogTarget}
             onClose={() => setActiveLogProject(null)}
             onClear={() => handleClearLogs(activeLogProject.id as string)}
           />
-        )}
+        )}</MotionPresence>
       </div>
     </TooltipProvider>
   );

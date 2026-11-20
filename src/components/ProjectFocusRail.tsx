@@ -3,6 +3,7 @@ import { Settings } from 'lucide-react';
 import type { ProjectConfig, ProjectGroup, ProjectStatus } from '../types';
 import { focusRailSections } from '../lib/sidebarModel';
 import { ProjectAvatar } from './ProjectAvatar';
+import { StatusDot } from './StatusDot';
 
 export function ProjectFocusRail({ projects, groups, active, selectedId, statuses, onSelect, onOpenSettings }: {
   projects: ProjectConfig[];
@@ -24,7 +25,7 @@ export function ProjectFocusRail({ projects, groups, active, selectedId, statuse
           return <button key={project.id} type="button" className="terminal-focus-project" title={name} aria-label={name}
             aria-current={project.id === selectedId ? 'page' : undefined} data-focus-project={project.id} onClick={() => onSelect(project.id)}>
             <ProjectAvatar project={project} status={status} />
-            {status !== 'stopped' && <span className="h1-status-dot" data-tone={status} aria-hidden="true" />}
+            {status !== 'stopped' && <StatusDot tone={status} aria-hidden="true" />}
           </button>;
         })}
       </div>)}

@@ -52,6 +52,7 @@ export const ProjectTerminal = forwardRef<ProjectTerminalControls, {
     if (terminal) onResize(activeSlot, { cols: terminal.cols, rows: terminal.rows });
     let timeout: ReturnType<typeof setTimeout> | undefined;
     const observer = new ResizeObserver(() => {
+      if (container.closest('[data-terminal-layout-motion]')) return;
       timeout ??= setTimeout(() => {
         timeout = undefined;
         fitTerminal(project.id, activeSlot);
