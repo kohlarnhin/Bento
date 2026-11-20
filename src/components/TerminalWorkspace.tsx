@@ -5,6 +5,7 @@ import { getTerminal, terminalKey, type TerminalStatus } from '../lib/terminalRe
 import { useProjectLogLines } from '../lib/useProjectLogs';
 import type { ProjectConfig, Service } from '../types';
 import { ProjectTerminal, type ProjectTerminalControls, type TerminalDimensions } from './ProjectTerminal';
+import { LogText } from './LogText';
 import { Select } from './ui/select';
 
 export interface TerminalWorkspaceControls extends ProjectTerminalControls {
@@ -49,7 +50,7 @@ function ServiceLogPane({ projectId, services, serviceId }: { projectId: string;
       follow.current = log.scrollHeight - log.scrollTop - log.clientHeight < 26;
     }}>
     {lines.map(line => <div key={line.id} className="terminal-log-line" data-severity={line.severity}>
-      <time>{logTime(line.timestamp)}</time><span>{serviceId === undefined && line.service && `${line.service.name} `}{line.text}</span>
+      <time>{logTime(line.timestamp)}</time><span>{serviceId === undefined && line.service && `${line.service.name} `}<LogText text={line.text} /></span>
     </div>)}
     {!lines.length && <p className="terminal-log-empty">暂无日志</p>}
   </div>;
@@ -155,11 +156,11 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
         </div>
       </>}
     </div>
-    {!focused && <footer className="terminal-status" data-terminal-status>
+    <footer className="terminal-status" data-terminal-status>
       <span data-terminal-status-shell>{shell}</span>
       <span className="truncate" title={cwd} data-terminal-status-cwd>{cwd}</span>
       <span className="shrink-0" data-terminal-status-size>{size ? `${size.cols}×${size.rows}` : '—'}</span>
-      <span className="terminal-status-shortcuts">⌘D 分屏 · ⌘⇧↩ 专注</span>
-    </footer>}
+      <span className="terminal-status-shortcuts">⌘D 分屏 · ⌘⇧↩ {focused ? '退出专注' : '专注'}</span>
+    </footer>
   </div>;
 });

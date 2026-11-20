@@ -85,13 +85,13 @@ export function ProjectWebMenu({ project, onOpenBrowser, onSetDefault, canOpen }
       <div className="px-2.5 pb-1 pt-1.5 text-[11px] text-muted-foreground">打开哪个端口</div>
       {services.map(service => <div key={service.id} className="project-web-option" data-default={service.openWeb || undefined}>
         <OpenServiceButton role="menuitem" port={service.port} listening={canOpen(service)} aria-current={service.openWeb || undefined} data-open-service={service.id}
-          wrapperClassName="min-w-0 flex-1" className="flex w-full min-w-0 items-center justify-between gap-2 rounded-md px-2.5 py-[7px] text-left outline-none hover:bg-accent/65 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50 disabled:opacity-50"
+          wrapperClassName="min-w-0 flex-1" className="choice-row flex w-full min-w-0 items-center justify-between gap-2 rounded-md px-2.5 py-[7px] text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/25 disabled:opacity-50"
           onOpen={port => { close(true); onOpenBrowser(port); }}>
           <span className="truncate" title={service.name}>{service.name}{service.kind && <span className="font-normal opacity-75"> · {service.kind}</span>}</span>
           <span className="flex shrink-0 items-center gap-1 font-mono">{service.port}{service.openWeb && <Check className="size-3" aria-label="默认" />}</span>
         </OpenServiceButton>
         {!service.openWeb && <button type="button" role="menuitem" aria-label={'设为默认：' + service.name} data-default-service={service.id}
-          className="shrink-0 rounded px-1.5 py-1 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-ring"
+          className="h1-tag shrink-0 !text-[10px]"
           onClick={() => { close(true); void onSetDefault(service.id); }}>设为默认</button>}
       </div>)}
       {services.length > 1 && <div className="mt-1 border-t border-card-border px-2.5 pb-1 pt-1.5 text-[11px] text-muted-foreground">设为默认会写入项目配置</div>}

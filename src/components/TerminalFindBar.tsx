@@ -7,8 +7,8 @@ import { Input } from './ui/input';
 
 let lastQuery = '';
 const decorations = {
-  matchBackground: '#444532', matchBorder: '#827443', matchOverviewRuler: '#827443',
-  activeMatchBackground: '#5C4422', activeMatchBorder: '#DDB56F', activeMatchColorOverviewRuler: '#DDB56F',
+  matchBackground: '#414143', matchBorder: '#747476', matchOverviewRuler: '#747476',
+  activeMatchBackground: '#565658', activeMatchBorder: '#d1d1d6', activeMatchColorOverviewRuler: '#d1d1d6',
 };
 
 export interface TerminalFindControls {

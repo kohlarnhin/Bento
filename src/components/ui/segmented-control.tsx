@@ -31,7 +31,7 @@ export function SegmentedControl<T extends string>({ options, value, onChange, l
     const measure = () => {
       const bounds = group.getBoundingClientRect();
       const segment = active.getBoundingClientRect();
-      thumb.style.transform = 'translateX(' + (segment.left - bounds.left + group.scrollLeft - group.clientLeft - 2) + 'px)';
+      thumb.style.transform = 'translateX(' + (segment.left - bounds.left + group.scrollLeft - group.clientLeft) + 'px)';
       thumb.style.width = segment.width + 'px';
     };
     measure();
@@ -59,7 +59,7 @@ export function SegmentedControl<T extends string>({ options, value, onChange, l
       const button = <button type="button" role="radio" aria-checked={value === option.value}
         tabIndex={value === option.value ? 0 : -1} disabled={disabled} onClick={() => onChange(option.value)}
         title={option.title} onContextMenu={option.onContextMenu}
-        className="segmented-option outline-none focus-visible:ring-2 focus-visible:ring-ring/50" {...option.attributes}>
+        className="segmented-option outline-none focus-visible:ring-2 focus-visible:ring-ring/25" {...option.attributes}>
         {option.label}
       </button>;
       return <Fragment key={option.value}>

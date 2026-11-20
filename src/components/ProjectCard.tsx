@@ -290,20 +290,20 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
       <div className="h1-toolbar-heading" data-tauri-drag-region>
         <h1 className="dash-truncate" title={name} data-tauri-drag-region>{name}</h1>
         <span className="dash-badge" data-status={status} title={statusText} data-tauri-drag-region>
-          <span className="h1-status-dot" data-tone={status} aria-hidden="true" /><span className="dash-truncate">{focused && running ? '运行中' : statusText}</span>
+          <span className="h1-status-dot" data-tone={status} aria-hidden="true" /><span className="dash-truncate">{statusText}</span>
         </span>
       </div>
       <ProjectTabs projectId={project.id} view={view} activeSlot={activeSlot} slots={slots} terminals={terminals}
         maxTerminals={maxTerminals} onSelectView={onSelectView} onSelectTerminal={onSelectTerminal}
         onNewTerminal={onNewTerminal} onTerminalClosed={onTerminalClosed} />
       <div className="dash-actions">
-        {!focused && (services.length > 1 ? <ProjectWebMenu project={project} canOpen={showWeb}
+        {services.length > 1 ? <ProjectWebMenu project={project} canOpen={showWeb}
           onOpenBrowser={onOpenBrowser} onSetDefault={onSetDefaultService} />
           : <OpenServiceButton className="h1-button" port={defaultService.port} listening={showWeb(defaultService)}
               onOpen={onOpenBrowser} data-project-action="open" title={defaultService.port == null ? undefined : 'localhost:' + defaultService.port}>
               打开网页 <ArrowUpRight size={13} aria-hidden="true" />
-            </OpenServiceButton>)}
-        {!focused && active && <button type="button" className="h1-button" disabled={pending || !running} onClick={() => act('restart')}
+            </OpenServiceButton>}
+        {active && <button type="button" className="h1-button" disabled={pending || !running} onClick={() => act('restart')}
           aria-keyshortcuts="Meta+R" title="重启 ⌘R" data-project-action="restart">重启</button>}
         {view === 'terminal' && <ActionTooltip label={focusLabel + ' ⌘⇧↩'}>
           <button type="button" className="h1-button terminal-focus-toggle" aria-label={focusLabel} aria-keyshortcuts="Meta+Shift+Enter"

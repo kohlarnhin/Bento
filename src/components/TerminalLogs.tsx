@@ -3,8 +3,10 @@ import { Trash2, Copy, Check, ArrowDown, Terminal } from 'lucide-react';
 import { toast } from 'sonner';
 import type { ProjectConfig } from '../types';
 import { TERMINAL_THEME } from '../lib/terminalAppearance';
+import { LogText } from './LogText';
 import { cleanTerminalText } from '../lib/dashboard';
 import { useProjectLogLines } from '../lib/useProjectLogs';
+import { cn } from '../lib/utils';
 import Button from './ui/button';
 import { Badge } from './ui/badge';
 import { ActionTooltip } from './ui/tooltip';
@@ -67,11 +69,12 @@ export function TerminalLogsModal({ project, onClose, onClear, focusEntry }: Ter
           if (!containerRef.current) return;
           const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
           setAutoScroll(scrollHeight - scrollTop - clientHeight < 40);
-        }} className="mx-4 mb-4 min-h-0 flex-1 overflow-y-auto rounded-[14px] bg-terminal p-4 font-mono text-xs leading-relaxed text-terminal-foreground select-text">
+        }} className="terminal-chrome mx-4 mb-4 min-h-0 flex-1 overflow-y-auto rounded-[16px] bg-terminal p-4 font-mono text-xs leading-relaxed text-terminal-foreground select-text">
           {logs.length === 0 ? <div className="flex h-full flex-col items-center justify-center gap-3 text-terminal-muted select-none"><Terminal className="size-7" /><span>暂无启动日志</span></div> : logs.map((log) => (
             <div key={log.id} data-focused-log={log.id === focusEntry || undefined} tabIndex={log.id === focusEntry ? -1 : undefined}
-              className="break-all data-[focused-log=true]:bg-destructive/20" style={{ color: log.stream === 'stderr' ? TERMINAL_THEME.red : log.stream === 'system' ? TERMINAL_THEME.brightBlack : undefined }}>
-              <span className="mr-3 text-terminal-muted select-none">{new Date(log.timestamp).toLocaleTimeString()}</span>{cleanTerminalText(log.text)}
+              className={cn('break-all rounded data-[focused-log=true]:ring-1 data-[focused-log=true]:ring-ring/25', log.stream === 'stderr' && 'font-semibold text-white')}
+              style={{ color: log.stream === 'system' ? TERMINAL_THEME.brightBlack : undefined }}>
+              <span className="mr-3 text-terminal-muted select-none">{new Date(log.timestamp).toLocaleTimeString()}</span><LogText text={cleanTerminalText(log.text)} />
             </div>
           ))}
         </div>

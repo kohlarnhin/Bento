@@ -76,13 +76,13 @@ export function QuickSwitcher({ projects, statuses, terminalActions, onClose, on
             const status = statuses[project.id] || 'stopped';
             const optionIndex = projectOffset + index;
             return <button key={project.id} role="option" tabIndex={-1} id={`quick-option-${optionIndex}`} aria-selected={activeIndex === optionIndex}
-              data-quick-project={project.id} className="flex w-full items-center gap-3 px-3 py-2 text-left outline-none"
+              data-quick-project={project.id} className="choice-row flex w-full items-center gap-3 px-3 py-2 text-left outline-none"
               onMouseDown={event => event.preventDefault()} onMouseMove={() => { if (activeIndex !== optionIndex) choose(optionIndex); }} onClick={() => onSelect(project)}>
               <ProjectAvatar project={project} status={status} className="size-7 rounded-[7px] text-xs" />
               <span className="min-w-0 flex-1">
                 <span className="flex items-center gap-2 text-[13px]"><span className="truncate"><Highlight text={project.displayName || project.name} indices={match.name} /></span>
                   {project.displayName && project.displayName !== project.name && <span className="max-w-[45%] truncate font-mono text-[11px] text-muted-foreground" data-quick-original-name><Highlight text={project.name} indices={match.original} /></span>}
-                  {project.archived && <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">已归档</span>}</span>
+                  {project.archived && <span className="shrink-0 text-[10px] text-muted-foreground">已归档</span>}</span>
                 <span className="mt-0.5 flex min-w-0 gap-1 font-mono text-[11px] text-muted-foreground/75" title={project.path}>
                   <span className="min-w-0 truncate"><Highlight text={project.path} indices={match.path} /></span>
                   {project.port != null && <span className="shrink-0">· <Highlight text={String(project.port)} indices={match.port} /></span>}
@@ -101,15 +101,15 @@ export function QuickSwitcher({ projects, statuses, terminalActions, onClose, on
             const index = actionOffset + i;
             return <button key={action.id} id={`quick-option-${index}`} role="option" aria-selected={activeIndex === index} tabIndex={-1}
               data-quick-action={action.id} onMouseDown={event => event.preventDefault()} onMouseMove={() => { if (activeIndex !== index) choose(index); }} onClick={action.run}
-              className="flex w-full items-center gap-3 px-3 py-2 text-left text-[13px] outline-none">
-              <span className="grid size-7 shrink-0 place-items-center rounded-[7px] bg-muted text-muted-foreground"><action.icon className="size-3.5" /></span>
+              className="choice-row flex w-full items-center gap-3 px-3 py-2 text-left text-[13px] outline-none">
+              <span className="grid size-7 shrink-0 place-items-center text-muted-foreground"><action.icon className="size-3.5" /></span>
               <span className="min-w-0 flex-1 truncate"><Highlight text={action.label} indices={action.indices} /></span>{action.key && <kbd className="rounded border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">{action.key}</kbd>}
             </button>;
           })}
           </div>
         </div>);
   return <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
-    <DialogContent hideClose overlayClassName="backdrop-blur-[2px]"
+    <DialogContent hideClose
       className="max-w-[600px] gap-0 overflow-hidden p-0" data-quick-switcher
       onEscapeKeyDown={event => { if (composing.current || event.isComposing || event.keyCode === 229) event.preventDefault(); }}
       onKeyDown={event => {
@@ -142,7 +142,7 @@ export function QuickSwitcher({ projects, statuses, terminalActions, onClose, on
           className="h-8 min-w-0 border-0 bg-transparent px-0 text-base shadow-none focus-visible:ring-0"
           onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }}
           onChange={event => { setQuery(event.target.value); setSelectedIndex(0); setTargetId(null); }} />
-        <button onClick={onClose} className="rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-accent" aria-label="关闭快速切换">esc</button>
+        <button onClick={onClose} className="button-neutral rounded-full px-2 py-0.5 text-[10px]" aria-label="关闭快速切换">esc</button>
       </div>
       <div ref={list} id="quick-switcher-results" role="listbox" aria-label="项目与操作" className="max-h-[min(58vh,460px)] overflow-y-auto px-3 pb-3">
         {creationFirst ? <>{actionResults}{projectResults}</> : <>{projectResults}{actionResults}</>}

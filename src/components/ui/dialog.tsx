@@ -28,11 +28,10 @@ export const DialogContent = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
     hideClose?: boolean;
     closeClassName?: string;
-    overlayClassName?: string;
   }
->(({ className, children, hideClose, closeClassName, overlayClassName, onEscapeKeyDown, ...props }, ref) => (
+>(({ className, children, hideClose, closeClassName, onEscapeKeyDown, ...props }, ref) => (
   <DialogPortal>
-    <DialogOverlay className={overlayClassName} />
+    <DialogOverlay />
     <DialogPrimitive.Content
       ref={ref}
       onEscapeKeyDown={event => {
@@ -49,7 +48,7 @@ export const DialogContent = React.forwardRef<
       {!hideClose && (
         <DialogPrimitive.Close
           className={cn(
-            'absolute right-4 top-4 grid size-7 place-items-center rounded-full bg-[var(--h1-track)] text-muted-foreground outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none',
+            'button-neutral absolute right-4 top-4 grid size-7 place-items-center rounded-full disabled:pointer-events-none',
             closeClassName
           )}
         >
