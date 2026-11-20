@@ -55,6 +55,12 @@ jobs:
             exit 1
           fi
 
+      - name: Set up pnpm
+        run: npm install --global pnpm@10.8.0
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Test release scripts
         run: node --test 'scripts/*.test.mjs'
 
