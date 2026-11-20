@@ -34,3 +34,8 @@ objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std
 objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std", "WKWebView", "WKSnapshotConfiguration", "block2", "objc2-app-kit"] }
 block2 = "=0.6.2"
 
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
