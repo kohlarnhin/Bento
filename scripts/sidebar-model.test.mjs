@@ -1,18 +1,18 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { focusRailSections, fuzzyMatch, matchesSidebarFilter, moveProjectOrder, projectInitial, searchCreationActions, searchProjects, sidebarDensity, sidebarNavigation, sidebarSections, substringMatch } from '../src/lib/sidebarModel.ts';
+import { focusRailSections, fuzzyMatch, matchesSidebarFilter, moveProjectOrder, projectInitial, searchCreationActions, searchProjects, sidebarNavigation, sidebarSections, substringMatch } from '../src/lib/sidebarModel.ts';
 
 const project = (id, extra = {}) => ({ id, name: id, path: '~/work/' + id, port: null, groupId: null, pinned: false, archived: false, ...extra });
 const groups = [{ id: 'work', name: '工作', sortOrder: 2, collapsed: false }, { id: 'personal', name: '个人', sortOrder: 1, collapsed: true }];
 
-test('Sidebar density counts only unarchived projects and changes after 10', () => {
-  const ten = Array.from({ length: 10 }, (_, index) => project(`p${index}`));
+test('Sidebar group counts include every project in a large group and keep archives separate', () => {
+  const active = Array.from({ length: 11 }, (_, index) => project(`p${index}`, { groupId: 'work' }));
   const archived = project('old', { archived: true });
-  assert.equal(sidebarDensity([]), 'comfortable');
-  assert.equal(sidebarDensity(ten), 'comfortable');
-  assert.equal(sidebarDensity([...ten, project('extra')]), 'compact');
-  assert.equal(sidebarDensity([...ten, archived]), 'comfortable');
-  assert.equal(sidebarDensity([archived]), 'comfortable');
+  const sections = sidebarSections([...active, archived], groups);
+  assert.deepEqual(sections.map(section => [section.id, section.projects.length]), [
+    ['personal', 0], ['work', 11], ['ungrouped', 0], ['archived', 1],
+  ]);
+  assert.deepEqual(sections.find(section => section.id === 'work').projects, active);
 });
 
 test('Sidebar partitions pins, ordered groups, ungrouped and archives without duplicates', () => {

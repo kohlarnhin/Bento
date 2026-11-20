@@ -26,8 +26,9 @@ export function OpenServiceButton({ port, listening, onOpen, wrapperClassName, .
   </ActionTooltip>;
 }
 
-export function ProjectWebMenu({ project, onOpenBrowser, onSetDefault, canOpen }: WebActions & {
+export function ProjectWebMenu({ project, onOpenBrowser, onSetDefault, canOpen, terminal }: WebActions & {
   canOpen: (service: Service) => boolean;
+  terminal: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const menuId = useId();
@@ -71,7 +72,8 @@ export function ProjectWebMenu({ project, onOpenBrowser, onSetDefault, canOpen }
         <ChevronDown className="size-2.5" />
       </button>
     </div>
-    {present && <div ref={attach} id={menuId} role="menu" aria-label="打开哪个端口" className="h1-popup project-web-menu" data-project-web-menu
+    {present && <div ref={attach} id={menuId} role="menu" aria-label="打开哪个端口" className={cn('h1-popup project-web-menu', terminal && 'terminal-chrome')} data-project-web-menu
+      data-tauri-drag-region="false"
       {...{ inert: open ? undefined : '' }}
       onKeyDown={event => {
         if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(true); return; }

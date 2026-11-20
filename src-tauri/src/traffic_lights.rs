@@ -228,7 +228,7 @@ mod macos {
 
             // Design centers in logical points from the top-left of the window.
             let (x, y, spacing) = match self.layout {
-                Layout::Sidebar => (34.0, 36.0, self.button_spacing),
+                Layout::Sidebar => (24.0, 27.0, self.button_spacing),
                 Layout::Focus => {
                     // Center the native buttons inside the 64-point panel.
                     let spacing = self.button_spacing.min(20.0);

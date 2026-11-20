@@ -19,7 +19,7 @@ function Highlight({ text, indices }: { text: string; indices: number[] }) {
     ? <mark key={run.start} className="bg-transparent font-semibold text-foreground">{run.text}</mark> : run.text)}</>;
 }
 
-export function QuickSwitcher({ projects, statuses, terminalActions, onClose, onCreate, onCreateGroup, onSelect, onToggle, onNewTerminal }: {
+export function QuickSwitcher({ projects, statuses, terminalActions, onClose, onCreate, onCreateGroup, onSelect, onToggle, onNewTerminal, onRunCommand }: {
   projects: ProjectConfig[];
   statuses: Record<string, ProjectStatus>;
   terminalActions?: { focused: boolean; onFocus: () => void; onSplit: () => void };
@@ -29,6 +29,7 @@ export function QuickSwitcher({ projects, statuses, terminalActions, onClose, on
   onSelect: (project: ProjectConfig) => void;
   onToggle: (project: ProjectConfig) => void;
   onNewTerminal: (project: ProjectConfig) => void;
+  onRunCommand: (project: ProjectConfig, command: string) => void;
 }) {
   const [query, setQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -50,6 +51,9 @@ export function QuickSwitcher({ projects, statuses, terminalActions, onClose, on
     ...(target && !creationFirst ? [
       { id: 'toggle', label: `${running ? '停止' : '启动'} ${name}`, icon: running ? Square : Play, key: '⌘↵', run: () => onToggle(target), indices: [] as number[] },
       { id: 'terminal', label: `在 ${name} 中新建终端`, icon: Terminal, key: '⌘T', run: () => onNewTerminal(target), indices: [] as number[] },
+      ...target.commands.map((entry, index) => ({
+        id: `command-${index}`, label: `运行 ${entry.name}`, icon: Terminal, key: '', run: () => onRunCommand(target, entry.command), indices: [],
+      })),
     ] : []),
     ...workspaceActions.map(action => ({ ...action, indices: [] as number[] })),
     ...creationActions.map(action => ({ ...action, icon: action.id === 'add-project' ? Plus : FolderPlus, key: action.id === 'add-project' ? '⌘N' : '', run: action.id === 'add-project' ? onCreate : onCreateGroup })),

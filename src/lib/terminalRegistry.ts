@@ -424,7 +424,7 @@ export function handleTerminalDragDrop(event: DragDropEvent) {
     const pane = entry.container.closest<HTMLElement>('[data-terminal-pane]');
     if (!pane) return;
     delete pane.dataset.fileDrag;
-    if (event.type === 'leave' || !visible(entry)) return;
+    if (event.type === 'leave' || pane.closest('[inert]') || !visible(entry)) return;
     const rect = pane.querySelector('[data-terminal-area]')!.getBoundingClientRect();
     const x = event.position.x / window.devicePixelRatio;
     const y = event.position.y / window.devicePixelRatio;
@@ -588,14 +588,37 @@ async function showTerminal(entry: Entry, shouldFocus: () => boolean) {
   if (!entry.sessionId && !entry.opening) void startHydrate(entry, false);
 }
 
-export function attachTerminal(projectId: string, slot: number, host: HTMLDivElement, autofocus = true) {
+export function attachTerminal(projectId: string, slot: number, host: HTMLDivElement, onReady?: () => void) {
   const entry = registry.entries.get(terminalKey(projectId, slot)) ?? createEntry(projectId, slot);
   host.appendChild(entry.container);
-  const shouldFocus = () => autofocus && entry.container.parentElement === host;
-  void showTerminal(entry, shouldFocus).catch((error) => registry.showError(`终端显示失败：${error}`));
-  const frame = requestAnimationFrame(() => fitTerminal(projectId, slot, shouldFocus()));
+  let detached = false;
+  const attached = () => !detached && !entry.disposed && entry.container.parentElement === host;
+  let readyFrame = 0;
+  const ready = () => {
+    if (attached() && onReady) onReady();
+  };
+  void showTerminal(entry, () => false).then(async () => {
+    if (!onReady) return;
+    await entry.opening;
+    if (!attached() || !entry.opened) return;
+    // Let xterm consume the restored writes and draw rows before revealing its layer.
+    entry.terminal.write('', () => {
+      if (!attached()) return;
+      entry.terminal.refresh(0, entry.terminal.rows - 1);
+      readyFrame = requestAnimationFrame(() => { readyFrame = requestAnimationFrame(ready); });
+    });
+  }).catch(error => {
+    if (!attached()) return;
+    const message = `终端显示失败：${error}`;
+    registry.showError(message);
+    publish({ ...registry.snapshot[terminalKey(projectId, slot)], projectId, slot, opening: false, error: message });
+    readyFrame = requestAnimationFrame(ready);
+  });
+  const frame = requestAnimationFrame(() => fitTerminal(projectId, slot));
   return () => {
+    detached = true;
     cancelAnimationFrame(frame);
+    cancelAnimationFrame(readyFrame);
     // Detached instances keep receiving output until the backend removes their slot.
     if (entry.container.parentElement === host) entry.container.remove();
   };

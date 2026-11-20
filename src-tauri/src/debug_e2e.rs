@@ -343,7 +343,7 @@ pub async fn e2e_menu(app: AppHandle, action: Option<String>) -> Result<Value, S
                 let title = item.title().to_string();
                 let command = item.keyEquivalentModifierMask().contains(NSEventModifierFlags::Command)
                     && !item.keyEquivalentModifierMask().contains(NSEventModifierFlags::Option);
-                let matched = match action { "hide" => command && key == "h", "close" => command && key == "w", "quit" => command && key == "q", "about" => title.starts_with("About "), "check-updates" => title == "检查更新…", "settings" => command && key == "," && title == "设置…", _ => false };
+                let matched = match action { "hide" => command && key == "h", "close" => command && key == "w", "quit" => command && key == "q", "about" => title.starts_with("About "), "check-updates" => title == "检查更新…", "settings" => title == "设置…", _ => false };
                 if matched { menu.performActionForItemAtIndex(index as _); return true; }
                 if item.submenu().is_some_and(|submenu| perform(&submenu, action)) { return true; }
             }

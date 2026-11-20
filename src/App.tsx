@@ -10,7 +10,7 @@ import { ProjectCard } from './components/ProjectCard';
 import { TerminalLogsModal } from './components/TerminalLogs';
 import { ProjectSidebar } from './components/ProjectSidebar';
 import { ProjectFocusRail } from './components/ProjectFocusRail';
-import { TerminalWorkspace, type TerminalWorkspaceControls } from './components/TerminalWorkspace';
+import type { TerminalWorkspaceControls } from './components/TerminalWorkspace';
 import { ProjectFormDialog } from './components/ProjectFormDialog';
 import { ProjectDeleteDialog } from './components/ProjectDeleteDialog';
 import { ExternalProcessDialog } from './components/ExternalProcessDialog';
@@ -19,7 +19,6 @@ import { UpdateDialog } from './components/UpdateDialog';
 import { useUpdater } from './hooks/useUpdater';
 import { useSettings } from './hooks/useSettings';
 import { useWindowMotion } from './hooks/useWindowMotion';
-import { useTerminalTabMotion } from './hooks/useTerminalTabMotion';
 import { useButtonPressMotion } from './hooks/useButtonPressMotion';
 import { SettingsDialog } from './components/SettingsDialog';
 import { QuickSwitcher } from './components/QuickSwitcher';
@@ -254,8 +253,9 @@ export function App() {
     [project.displayName, project.name, project.path, project.port?.toString()].some(value => value?.toLowerCase().includes(searchText)))), groups).flatMap(section => section.projects),
     [projects, groups, searchText, filter, projectStatuses, attentionProjects, changedProjects]);
   const shortcutProjects = useMemo(() => visibleProjects.filter(project => !project.archived), [visibleProjects]);
-  const navigation = useRef({ projects: shortcutProjects, view: selection?.view || 'overview', selection, activeSlots });
-  navigation.current = { projects: shortcutProjects, view: selection?.view || 'overview', selection, activeSlots };
+  const selectedProject = projects.find(project => project.id === selection?.projectId);
+  const navigation = useRef({ projects: shortcutProjects, project: selectedProject, view: selection?.view || 'overview', selection, activeSlots });
+  navigation.current = { projects: shortcutProjects, project: selectedProject, view: selection?.view || 'overview', selection, activeSlots };
   const [reordering, setReordering] = useState(false);
   const reorderPending = useRef(false);
   const [projectForm, setProjectForm] = useState<{ project?: ProjectConfig; inspection?: ProjectDirInspection; focusPort?: DashboardConflict } | null>(null);
@@ -278,6 +278,22 @@ export function App() {
     dialogOpen.current = true;
     setSettingsOpen(true);
   }, []);
+  const openProjectConfig = useCallback((project: ProjectConfig, focusPort?: DashboardConflict) => {
+    if (dialogOpen.current) return;
+    dialogOpen.current = true;
+    setProjectForm({ project, focusPort });
+  }, []);
+  const openProjectEditor = useCallback((id: string) => {
+    void invoke('dashboard_open_editor', { id }).catch(error => toast.error(String(error)));
+  }, []);
+  const handleRevealPath = useCallback((path: string) => {
+    void invoke('reveal_path', { path }).catch(error => toast.error(`定位路径失败 · ${error}`));
+  }, []);
+  const openProjectLogs = useCallback((project: ProjectConfig, entry?: string) => {
+    flushLogs();
+    setActiveLogTarget(entry);
+    setActiveLogProject(project);
+  }, [flushLogs]);
   const openCreate = useCallback((inspection?: ProjectDirInspection) => {
     if (dialogOpen.current) return;
     setFolderDropName(null);
@@ -332,8 +348,10 @@ export function App() {
         }
         return;
       }
-      if (!event.metaKey || event.ctrlKey || event.altKey || event.isComposing || event.keyCode === 229) return;
       const key = event.key.toLowerCase();
+      const reveal = event.altKey && !event.shiftKey && (event.code === 'KeyR' || key === 'r');
+      if (!event.metaKey || event.ctrlKey || (event.altKey && !reveal)) return;
+      const editor = !event.altKey && !event.shiftKey && (event.code === 'KeyO' || key === 'o');
       const focusShortcut = inTerminal && event.shiftKey && key === 'enter';
       const splitShortcut = inTerminal && !event.shiftKey && key === 'd';
       const cycle = event.shiftKey && ['BracketLeft', 'BracketRight'].includes(event.code) && inTerminal;
@@ -342,7 +360,7 @@ export function App() {
       const zoomReset = inTerminal && !event.shiftKey && (event.code === 'Digit0' || key === '0');
       const jump = event.shiftKey && (event.code === 'KeyU' || key === 'u');
       const findNext = finding && key === 'g';
-      if (!focusShortcut && !splitShortcut && !cycle && !zoomIn && !zoomOut && !zoomReset && !jump && !findNext
+      if (!reveal && !editor && !focusShortcut && !splitShortcut && !cycle && !zoomIn && !zoomOut && !zoomReset && !jump && !findNext
           && (event.shiftKey || (key !== 'p' && key !== 't' && key !== 'n' && key !== 'f' && key !== ',' && !/^[1-9]$/.test(key)))) return;
       event.preventDefault();
       event.stopPropagation();
@@ -351,7 +369,10 @@ export function App() {
       if (event.type !== 'keydown') return;
       captured.add(physicalKey);
       if (dialogOpen.current || document.querySelector('[role="dialog"][data-state="open"]')) return;
-      if (key === 'p' && !event.repeat) openQuickSwitcher();
+      const project = navigation.current.project;
+      if (reveal) { if (project && !event.repeat) handleRevealPath(project.path); }
+      else if (editor) { if (project && !event.repeat) openProjectEditor(project.id); }
+      else if (key === 'p' && !event.repeat) openQuickSwitcher();
       else if (focusShortcut) { if (!event.repeat) toggleFocusMode(); }
       else if (splitShortcut) { if (!event.repeat) toggleSplit(); }
       else if (zoomIn || zoomOut || zoomReset) {
@@ -374,7 +395,10 @@ export function App() {
       } else if (key === 't') {
         const projectId = navigation.current.selection?.projectId;
         if (projectId && !event.repeat) void openTerminal(projectId);
-      } else if (key === ',') openSettings();
+      } else if (key === ',') {
+        if (project && navigation.current.view === 'overview') openProjectConfig(project);
+        else openSettings();
+      }
       else if (key === 'n' && !event.repeat) openCreate();
       else if (key === 'f') {
         if (inTerminal) terminalControls.current?.openFind();
@@ -398,7 +422,8 @@ export function App() {
       sidebarDragPaths = [];
       void unlisten.then((stop) => stop());
     };
-  }, [openCreate, openSettings, openQuickSwitcher, openTerminal, selectProject, selectTerminalSlot, changeFontSize, toggleFocusMode, toggleSplit]);
+  }, [openCreate, openSettings, openProjectConfig, openProjectEditor, handleRevealPath, openQuickSwitcher, openTerminal,
+    selectProject, selectTerminalSlot, changeFontSize, toggleFocusMode, toggleSplit]);
 
   useEffect(() => {
     const unlisten = listen('bento-open-settings', openSettings);
@@ -602,20 +627,10 @@ export function App() {
     }
   };
 
-  const handleRevealPath = async (path: string) => {
-    try {
-      await invoke('reveal_path', { path });
-    } catch (err) {
-      console.error('定位路径失败:', err);
-      showToast(`定位路径失败: ${err}`);
-    }
-  };
-
   const handleClearLogs = (id: string) => {
     clearLogs(id);
   };
 
-  const selectedProject = projects.find((project) => project.id === selection?.projectId);
   const selectedConflicts = conflicts.filter(conflict => selectedProject && conflict.projectIds.includes(selectedProject.id));
   const setDefaultService = async (serviceId: string) => {
     if (!selectedProject) return;
@@ -641,11 +656,7 @@ export function App() {
   const inTerminal = !!selectedProject && selection?.view === 'terminal';
   const focusActive = inTerminal && focusMode;
   const windowSurface = useRef<HTMLDivElement>(null);
-  const mainPanel = useRef<HTMLElement>(null);
   const activeSlot = selectedProject ? activeSlots[selectedProject.id] ?? 1 : 1;
-  const activeTerminalId = selectedProject && terminalKey(selectedProject.id, activeSlot);
-  const focusTerminalInput = useCallback(() => terminalControls.current?.focusInput(), []);
-  const showTerminal = useTerminalTabMotion(mainPanel, activeTerminalId, inTerminal, focusTerminalInput);
   useWindowMotion(windowSurface, focusActive);
   useButtonPressMotion();
   useEffect(() => {
@@ -692,6 +703,8 @@ export function App() {
             projectsLoaded={projectsLoaded}
             onSelectProject={selectProject}
             onCreateTerminal={openTerminal}
+            onOpenProjectLogs={openProjectLogs}
+            onDeleteProject={setDeleteProject}
             onRefresh={loadProjects}
             onCreate={createProject}
             managedCount={managedProjects.length}
@@ -705,7 +718,7 @@ export function App() {
             selectedId={selectedProject?.id} onSelect={selectProject} onOpenSettings={openSettings} />
         </div>
 
-        <main ref={mainPanel} className="h1-main flex min-h-0 min-w-0 flex-col" data-terminal-layout={showTerminal || undefined}>
+        <main className="h1-main flex min-h-0 min-w-0 flex-col">
           {!selectedProject && <div data-tauri-drag-region className="h-10 shrink-0" aria-hidden="true" />}
           {projects.length === 0 ? (
             <Empty className="h1-group flex-1">
@@ -721,7 +734,6 @@ export function App() {
                   key={selectedProject.id}
                   project={selectedProject}
                   view={selection?.view ?? 'overview'}
-                  showTerminal={showTerminal}
                   slots={slots}
                   activeSlot={activeSlot}
                   terminals={terminals}
@@ -730,8 +742,8 @@ export function App() {
                   onToggleFocus={toggleFocusMode}
                   onNewTerminal={() => openTerminal(selectedProject.id)}
                   onTerminalClosed={slot => onTerminalClosed(selectedProject.id, slot)}
-                  terminalPane={<TerminalWorkspace ref={terminalControls} project={selectedProject} activeSlot={activeSlot}
-                    slots={slots} terminals={terminals} focused={focusActive} onFocusedSlot={onFocusedTerminal} />}
+                  terminalControls={terminalControls}
+                  onFocusedTerminal={onFocusedTerminal}
                   onSelectView={view => selectView({ projectId: selectedProject.id, view })}
                   onSelectTerminal={slot => selectSidebarTerminal(selectedProject.id, slot)}
                   status={projectStatuses[selectedProject.id] || 'stopped'}
@@ -743,15 +755,14 @@ export function App() {
                   onOpenBrowser={handleOpenBrowser}
                   onSetDefaultService={setDefaultService}
                   onRevealPath={handleRevealPath}
+                  onOpenEditor={() => openProjectEditor(selectedProject.id)}
                   onOpenTerminal={() => selectTerminalSlot(selectedProject.id, activeSlots[selectedProject.id] ?? 1)}
-                  onOpenLogs={id => { flushLogs(); setActiveLogTarget(id); setActiveLogProject(selectedProject); }}
+                  onOpenLogs={id => openProjectLogs(selectedProject, id)}
                   onClearLogs={() => handleClearLogs(selectedProject.id)}
-                  onEdit={focusPort => setProjectForm({ project: selectedProject, focusPort })}
+                  onEdit={focusPort => openProjectConfig(selectedProject, focusPort)}
                   onDelete={() => setDeleteProject(selectedProject)}
-                  onRunCommand={command => { void handleRunCommand(selectedProject.id, command); }}
                 />
           ) : null}
-          <div className="terminal-backdrop" aria-hidden="true" />
         </main>
 
         <UpdateDialog updater={updater} projects={managedProjects} terminalCount={terminalCount} />
@@ -766,7 +777,8 @@ export function App() {
           onCreateGroup={() => { closeQuickSwitcher(); dialogOpen.current = true; setGroupForm({ action: 'create' }); }}
           onSelect={project => { closeQuickSwitcher(); setSearchQuery(''); setFilter('all'); selectProject(project.id); }}
           onToggle={project => { closeQuickSwitcher(); void (['running', 'starting'].includes(projectStatuses[project.id]) ? handleStop(project.id) : handleStart(project.id)); }}
-          onNewTerminal={project => { closeQuickSwitcher(); setSearchQuery(''); setFilter('all'); void openTerminal(project.id); }} />}</MotionPresence>
+          onNewTerminal={project => { closeQuickSwitcher(); setSearchQuery(''); setFilter('all'); void openTerminal(project.id); }}
+          onRunCommand={(project, command) => { closeQuickSwitcher(); void handleRunCommand(project.id, command); }} />}</MotionPresence>
         <MotionPresence>{groupForm && <GroupDialog group={groupForm.group} deleting={groupForm.action === 'delete'} onClose={() => setGroupForm(null)}
           onSave={async name => {
             if (groupForm.action === 'create') await addGroup(name);

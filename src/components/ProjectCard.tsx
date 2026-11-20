@@ -1,34 +1,35 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import gsap from 'gsap';
 import { invoke } from '@tauri-apps/api/core';
-import { ArrowUpRight, CodeXml, Ellipsis, Globe2, Maximize2, Minimize2, Play, Square } from 'lucide-react';
-import { toast } from 'sonner';
+import { ArrowUpRight, CodeXml, Ellipsis, Folder, GitBranch, Globe2, Maximize2, Minimize2, Pencil, Play, Square, SquareTerminal } from 'lucide-react';
 import type {
-  DashboardConflict, DashboardCpuPoint, DashboardHealth, DashboardRun, DashboardServiceSample, DashboardUsage,
+  DashboardConflict, DashboardCpuPoint, DashboardGit, DashboardHealth, DashboardRun, DashboardServiceSample, DashboardUsage,
   PortConflict, ProjectConfig, ProjectRuntimeStatus, ProjectStatus, ProjectView, Service,
 } from '../types';
 import { cpuChart, dashboardPortListening, dashboardServices, dashboardStatus, durationText, relativeTime, runInterval } from '../lib/dashboard';
 import { useDashboard } from '../lib/useDashboard';
 import { useProjectLaunch } from '../lib/useProjectLaunch';
+import { usePortStandard } from '../lib/usePortStandard';
 import { useReducedMotion } from '../lib/motion';
-import { dashboardEntranceLimit } from '../lib/motionMath';
-import type { TerminalStatus } from '../lib/terminalRegistry';
-import { DashboardGitCard, DashboardOutput, DashboardStandard } from './DashboardPanels';
+import { dashboardEntranceLimit, readyProjectView } from '../lib/motionMath';
+import { terminalKey, type TerminalStatus } from '../lib/terminalRegistry';
+import { useProjectViewMotion } from '../hooks/useProjectViewMotion';
+import { DashboardGitCard, DashboardOutput } from './DashboardPanels';
+import { ProjectActionsMenu } from './ProjectActionsMenu';
 import { OpenServiceButton, ProjectWebMenu } from './ProjectServices';
 import { ProjectTabs } from './ProjectTabs';
-import { ProjectStandardDialog } from './ProjectStandardDialog';
+import { TerminalWorkspace, type TerminalWorkspaceControls } from './TerminalWorkspace';
 import { StatusDot } from './StatusDot';
 import Button from './ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
 import { Empty, EmptyDescription, EmptyTitle } from './ui/empty';
 import { ActionTooltip } from './ui/tooltip';
-import { MotionPresence, usePopupMotion } from './ui/motion-presence';
+import { MotionPresence } from './ui/motion-presence';
 import './dashboard.css';
 
 interface ProjectCardProps {
   project: ProjectConfig;
   view: ProjectView;
-  showTerminal: boolean;
   slots: number[];
   activeSlot: number;
   terminals: Record<string, TerminalStatus>;
@@ -37,7 +38,8 @@ interface ProjectCardProps {
   onToggleFocus: () => void;
   onNewTerminal: () => Promise<void>;
   onTerminalClosed: (slot: number) => void;
-  terminalPane: ReactNode;
+  terminalControls: RefObject<TerminalWorkspaceControls>;
+  onFocusedTerminal: (projectId: string, slot: number) => void;
   onSelectView: (view: 'overview' | 'git') => void;
   onSelectTerminal: (slot: number) => void;
   status: ProjectStatus;
@@ -49,12 +51,12 @@ interface ProjectCardProps {
   onOpenBrowser: (port: number) => void;
   onSetDefaultService: (serviceId: string) => Promise<void>;
   onRevealPath: (path: string) => void;
+  onOpenEditor: () => void;
   onOpenTerminal: () => void;
   onOpenLogs: (id?: string) => void;
   onClearLogs: () => void;
   onEdit: (conflict?: DashboardConflict) => void;
   onDelete: () => void;
-  onRunCommand: (command: string) => void;
 }
 
 const listenerLabels = { listening: '监听中', idle: '未监听', occupied: '端口被占用' };
@@ -103,12 +105,12 @@ function ServiceRow({ service, sample, health, last, history, active, framework,
       <details className="dash-inspect">
         <summary aria-label={service.name + '服务详情'} title={statusLabel}>
           <span className="dash-service-icon"><Icon size={14} aria-hidden="true" /></span>
-          <span className="min-w-0">
+          <span className="dash-service-label">
             <strong className="dash-truncate" title={service.name}>{service.name}</strong>
             <small className="dash-truncate">{framework ?? process ?? folder}</small>
           </span>
         </summary>
-        <div className="h1-popup dash-inspect-panel">
+        <div className="dash-service-details">
           <div className="dash-detail-line"><code data-key={service.key}>{service.key}</code><code>{folder}</code></div>
           <p className={check && (check.code == null || check.code < 200 || check.code >= 300) ? 'dash-error' : 'text-muted-foreground'}
             data-health={check ? check.code ?? 'no-response' : undefined}>{statusLabel}</p>
@@ -124,7 +126,7 @@ function ServiceRow({ service, sample, health, last, history, active, framework,
         <span className="h1-status-dot" data-tone={state === 'listening' ? 'running' : state === 'occupied' ? 'warning' : undefined}
           aria-label={statusLabel} title={statusLabel} />
         {service.port != null && <OpenServiceButton port={service.port} listening={state !== 'idle'} onOpen={onOpen}
-          className="h1-tag" data-service-open={service.id}>打开 <ArrowUpRight size={13} aria-hidden="true" /></OpenServiceButton>}
+          className="h1-tag" aria-label={`打开 ${service.name}`} data-service-open={service.id}><ArrowUpRight size={14} aria-hidden="true" /></OpenServiceButton>}
       </div>
     </div>
     {active && unexpected.length > 0 && <div className="dash-port-warning" role="status" data-port-injection-warning>
@@ -135,17 +137,61 @@ function ServiceRow({ service, sample, health, last, history, active, framework,
   </section>;
 }
 
-function ResourceSummary({ usage, history, external }: { usage?: DashboardUsage | null; history?: DashboardCpuPoint[]; external: boolean }) {
+function ResourceSummary({ active, uptime, usage, history, external }: {
+  active: boolean; uptime: string; usage?: DashboardUsage | null; history?: DashboardCpuPoint[]; external: boolean;
+}) {
+  const values = <span className="dash-resource-values">
+    <span>CPU <b>{usage ? usage.cpu.toFixed(1) + '%' : '—'}</b></span>
+    <span>内存 <b>{usage ? mb(usage.rssKib) + ' MB' : '—'}</b></span>
+    <span className="dash-resource-uptime">运行 <b title={uptime}>{uptime}</b></span>
+  </span>;
+  if (!active) return values;
   return <details className="dash-resource dash-inspect" data-dashboard-resource>
-    <summary className="dash-resource-values" aria-label="查看资源曲线" title="查看资源曲线">
-      <span>CPU <b>{usage ? usage.cpu.toFixed(1) + '%' : '—'}</b></span>
-      <span>内存 <b>{usage ? mb(usage.rssKib) + ' MB' : '—'}</b></span>
+    <summary aria-label="查看资源曲线" title="查看资源曲线">
+      {values}
     </summary>
     <div className="h1-popup dash-inspect-panel">
       <p className="text-meta text-muted-foreground">{external ? '外部进程' : '整个进程树'} · 最近 10 分钟</p>
       <Sparkline points={history} tone="total" />
     </div>
   </details>;
+}
+
+function ProjectQuickActions({ git, unconfigured, terminalLimit, onEditor, onTerminal, onGit, onReveal, onEdit }: {
+  git: DashboardGit | null | undefined;
+  unconfigured: boolean;
+  terminalLimit: boolean;
+  onEditor: () => void;
+  onTerminal: () => void;
+  onGit: () => void;
+  onReveal: () => void;
+  onEdit: () => void;
+}) {
+  const gitSummary = git ? (git.branch ?? git.head ?? '未建立分支') + ` · ${git.changes} 处改动` : '';
+  return <section className="h1-group dash-card" aria-label="快捷操作" data-dashboard-quick-actions>
+    <header className="dash-card-heading" data-workspace-content>
+      <h2>快捷操作</h2>
+      {unconfigured && <button type="button" className="dash-launch-notice" onClick={onEdit} data-dashboard-unconfigured>未配置启动</button>}
+    </header>
+    <div className="dash-quick-list" data-workspace-content>
+      <button type="button" aria-keyshortcuts="Meta+O" onClick={onEditor} data-dashboard-quick="editor">
+        <CodeXml size={16} aria-hidden="true" />在编辑器打开<kbd aria-hidden="true">⌘O</kbd>
+      </button>
+      <button type="button" aria-keyshortcuts="Meta+T" disabled={terminalLimit} onClick={onTerminal} data-dashboard-quick="terminal">
+        <SquareTerminal size={16} aria-hidden="true" />新终端<kbd aria-hidden="true">⌘T</kbd>
+      </button>
+      <button type="button" onClick={onGit} data-dashboard-quick="git">
+        <GitBranch size={16} aria-hidden="true" />查看改动
+        {gitSummary && <small className="dash-truncate" title={gitSummary}>{gitSummary}</small>}
+      </button>
+      <button type="button" aria-keyshortcuts="Alt+Meta+R" onClick={onReveal} data-reveal-path>
+        <Folder size={16} aria-hidden="true" />在 Finder 中显示<kbd aria-hidden="true">⌥⌘R</kbd>
+      </button>
+      <button type="button" aria-keyshortcuts="Meta+," onClick={onEdit} data-edit-project>
+        <Pencil size={16} aria-hidden="true" />编辑配置<kbd aria-hidden="true">⌘,</kbd>
+      </button>
+    </div>
+  </section>;
 }
 
 function LastRunSummary({ run, now }: { run?: DashboardRun | null; now: number }) {
@@ -197,12 +243,16 @@ function ConflictDialog({ conflict, onClose, onConfirm }: {
   </Dialog>;
 }
 
-export function ProjectCard({ project, view, showTerminal, slots, activeSlot, terminals, terminalPane, onSelectView, onSelectTerminal,
+export function ProjectCard({ project, view, slots, activeSlot, terminals, terminalControls, onFocusedTerminal, onSelectView, onSelectTerminal,
   focused, maxTerminals, onToggleFocus, onNewTerminal, onTerminalClosed,
   status: runtimeStatus, runtime, conflicts, onStart, onStop, onRestart, onOpenBrowser,
-  onSetDefaultService, onRevealPath, onOpenTerminal, onOpenLogs, onClearLogs, onEdit, onDelete, onRunCommand }: ProjectCardProps) {
+  onSetDefaultService, onRevealPath, onOpenEditor, onOpenTerminal, onOpenLogs, onClearLogs, onEdit, onDelete }: ProjectCardProps) {
   const { snapshot, snapshotError, git, health, now, refresh } = useDashboard(project, runtime, view);
   const launch = useProjectLaunch(project);
+  const auditLaunch = launch?.data?.mode === 'shared' && project.injectPorts && project.services.some(service => service.port != null);
+  const standard = usePortStandard(project.path, project.startCommand, project.services, auditLaunch);
+  const unconfigured = (!project.startCommand.trim() && !project.services.some(service => service.startCommand?.trim())) ||
+    !!launch?.error || !!standard?.data?.services.some(service => !service.references.length);
   const status = dashboardStatus(runtimeStatus, runtime, snapshot);
   const active = status === 'running' || status === 'starting';
   const running = status === 'running';
@@ -213,31 +263,43 @@ export function ProjectCard({ project, view, showTerminal, slots, activeSlot, te
   const busy = useRef(false);
   const defaultService = services.find(service => service.openWeb) ?? services[0];
   const startedAt = runtime?.startedAt ?? snapshot?.startedAt;
+  const uptime = active && startedAt != null ? durationText(now - startedAt) : '—';
   const last = snapshot?.lastRun;
   const statusText = running ? '运行中' + (startedAt == null ? '' : ' · ' + durationText(now - startedAt))
     : status === 'starting' ? '启动中' : status === 'error' ? '运行异常' : '已停止' + (last ? ' · ' + relativeTime(last.endedAt, now) : '');
-  const branch = git?.branch ?? git?.head;
-  const envCount = new Set([...project.env, ...(launch?.data?.steps.flatMap(step => step.portEnv) ?? [])]
-    .map(variable => variable.key)).size;
+  const listeningCount = snapshot?.services.filter(service => service.state === 'listening').length ?? 0;
   const reduced = useReducedMotion();
-  const content = useRef<HTMLDivElement>(null);
+  const workspace = useRef<HTMLDivElement>(null);
+  const overviewContent = useRef<HTMLDivElement>(null);
+  const [visitedTerminal, setVisitedTerminal] = useState(false);
+  const [readySlot, setReadySlot] = useState<number>();
+  const [lastReadyView, setLastReadyView] = useState<ProjectView>('overview');
+  const terminalView = view === 'terminal';
+  const terminalLimit = slots.filter(slot => terminals[terminalKey(project.id, slot)]?.sessionId).length >= maxTerminals;
+  const mountTerminal = terminalView || (visitedTerminal && !!terminals[terminalKey(project.id, activeSlot)]);
+  const terminalReady = readySlot === activeSlot;
+  const shown = readyProjectView(view, lastReadyView, terminalReady, git !== undefined);
+  const terminalInteractive = terminalView && shown === 'terminal';
+  useLayoutEffect(() => {
+    if (terminalView) setVisitedTerminal(true);
+    if (!mountTerminal) setReadySlot(undefined);
+  }, [terminalView, mountTerminal]);
+  useLayoutEffect(() => { setLastReadyView(shown); }, [shown]);
+  useProjectViewMotion(workspace, shown, reduced);
+
   const launchLabel = useRef<HTMLSpanElement>(null);
   const lastLaunchState = useRef(active);
   useLayoutEffect(() => {
-    const area = content.current;
+    const area = overviewContent.current;
     if (reduced || !area) return;
     const scope = gsap.context(() => {
-      gsap.fromTo(area, { opacity: 0, y: 6 },
-        { opacity: 1, y: 0, duration: .2, ease: 'power3.out', clearProps: 'opacity,transform' });
-      if (view === 'overview') {
-        const blocks = gsap.utils.toArray('.dash-service, .dash-facts').slice(0, dashboardEntranceLimit);
-        gsap.fromTo(blocks, { opacity: 0, y: 8 }, {
-          opacity: 1, y: 0, stagger: .03, duration: .2, ease: 'power3.out', clearProps: 'opacity,transform',
-        });
-      }
+      const blocks = gsap.utils.toArray('.dash-service, .dash-facts').slice(0, dashboardEntranceLimit);
+      gsap.fromTo(blocks, { opacity: 0, y: 8 }, {
+        opacity: 1, y: 0, stagger: .03, duration: .2, ease: 'power3.out', clearProps: 'opacity,transform',
+      });
     }, area);
     return () => scope.revert();
-  }, [view, showTerminal, project.id, reduced]);
+  }, [project.id, reduced]);
   useLayoutEffect(() => {
     const previous = lastLaunchState.current;
     lastLaunchState.current = active;
@@ -285,9 +347,6 @@ export function ProjectCard({ project, view, showTerminal, slots, activeSlot, te
     return () => window.removeEventListener('keydown', onKey, true);
   }, [active, running, view]);
 
-  const seeEditor = () => {
-    void invoke('dashboard_open_editor', { id: project.id }).catch(error => toast.error(String(error)));
-  };
   const verifyRelease = async () => {
     if (!occupied?.owner || !occupied.identity) return;
     await invoke('dashboard_release_port', { id: project.id, port: occupied.port, pid: occupied.owner.pid, identity: occupied.identity });
@@ -298,43 +357,20 @@ export function ProjectCard({ project, view, showTerminal, slots, activeSlot, te
   const name = project.displayName || project.name;
   const focusLabel = focused ? '退出专注' : '专注';
   const FocusIcon = focused ? Minimize2 : Maximize2;
-  const [configOpen, setConfigOpen] = useState(false);
-  const [showTemplate, setShowTemplate] = useState(false);
-  const configMotion = usePopupMotion(configOpen && view === 'overview');
-  useEffect(() => { if (view !== 'overview') setConfigOpen(false); }, [view]);
-  const config = <details className="dash-config" data-dashboard-config open={configMotion.present || undefined}>
-    <summary className="h1-tag" aria-label="启动配置与更多项目操作" onClick={event => {
-      event.preventDefault();
-      setConfigOpen(previous => !previous);
-    }}><Ellipsis size={16} aria-hidden="true" /></summary>
-    {configMotion.present && <div ref={configMotion.attach} className="h1-popup dash-config-panel" {...{ inert: configOpen ? undefined : '' }}>
-      <div className="dash-config-info">
-        <h3 className="h1-group-title">启动配置</h3>
-        <code className="dash-truncate" title={project.path}>{project.path}</code>
-        <code className="dash-truncate" title={project.startCommand}>{project.startCommand}</code>
-        <p>{services.length} 个服务 · {envCount} 个环境变量</p>
-      </div>
-      <div className="h1-menu-list" onClick={event => {
-        if ((event.target as HTMLElement).closest('button')) setConfigOpen(false);
-      }}>
-        <button type="button" onClick={() => onEdit()} data-edit-project>编辑配置</button>
-        <button type="button" onClick={() => onRevealPath(project.path)} data-reveal-path>在 Finder 中定位</button>
-        <button type="button" onClick={() => {
-          void navigator.clipboard.writeText(project.path).then(() => toast.success('项目路径已复制')).catch(error => toast.error(String(error)));
-        }}>复制路径</button>
-        <button type="button" onClick={() => onOpenLogs()} data-open-logs>查看启动日志</button>
-        {project.commands.map(entry => <button type="button" key={entry.name} onClick={() => onRunCommand(entry.command)} data-run-command={entry.name}>运行 {entry.name}</button>)}
-        <button type="button" className="dash-error" onClick={onDelete} data-delete-project>删除项目</button>
-      </div>
-      <DashboardStandard project={project} plan={launch?.data} planError={launch?.error} onViewTemplate={() => setShowTemplate(true)} />
-    </div>}
-  </details>;
+  const [configMenu, setConfigMenu] = useState<{ x: number; y: number }>();
+  const closeConfigMenu = useCallback(() => setConfigMenu(undefined), []);
+  useEffect(() => { if (view !== 'overview') closeConfigMenu(); }, [view, closeConfigMenu]);
+  const config = <button type="button" className="h1-tag dash-menu-trigger" aria-label="更多项目操作"
+    aria-haspopup="menu" aria-expanded={!!configMenu} data-dashboard-config onClick={event => {
+      const { right, bottom } = event.currentTarget.getBoundingClientRect();
+      setConfigMenu({ x: right - 180, y: bottom + 5 });
+    }}><Ellipsis size={16} aria-hidden="true" /></button>;
 
-  return <div className="h1-workspace" data-project-details={project.id} data-project-runtime={status}>
-    <header className="h1-toolbar" data-tauri-drag-region>
-      <div className="h1-toolbar-heading" data-tauri-drag-region>
-        <h1 className="dash-truncate" title={name} data-tauri-drag-region>{name}</h1>
-        <span className="dash-badge" data-status={status} title={statusText} data-tauri-drag-region>
+  return <div ref={workspace} className="h1-workspace" data-project-details={project.id} data-project-runtime={status}>
+    <header className="h1-toolbar" data-tauri-drag-region="deep">
+      <div className="h1-toolbar-heading">
+        <h1 className="dash-truncate" title={name}>{name}</h1>
+        <span className="dash-badge" data-status={status} title={statusText}>
           <StatusDot tone={status} aria-hidden="true" /><span className="dash-truncate">{statusText}</span>
         </span>
       </div>
@@ -342,7 +378,7 @@ export function ProjectCard({ project, view, showTerminal, slots, activeSlot, te
         maxTerminals={maxTerminals} onSelectView={onSelectView} onSelectTerminal={onSelectTerminal}
         onNewTerminal={onNewTerminal} onTerminalClosed={onTerminalClosed} />
       <div className="dash-actions">
-        {services.length > 1 ? <ProjectWebMenu project={project} canOpen={showWeb}
+        {services.length > 1 ? <ProjectWebMenu project={project} canOpen={showWeb} terminal={terminalView}
           onOpenBrowser={onOpenBrowser} onSetDefault={onSetDefaultService} />
           : <OpenServiceButton className="h1-button" port={defaultService.port} listening={showWeb(defaultService)}
               onOpen={onOpenBrowser} data-project-action="open" title={defaultService.port == null ? undefined : 'localhost:' + defaultService.port}>
@@ -350,12 +386,13 @@ export function ProjectCard({ project, view, showTerminal, slots, activeSlot, te
             </OpenServiceButton>}
         {active && <button type="button" className="h1-button" disabled={pending || !running} onClick={() => act('restart')}
           aria-keyshortcuts="Meta+R" title="重启 ⌘R" data-project-action="restart">重启</button>}
-        {view === 'terminal' && <ActionTooltip label={focusLabel + ' ⌘⇧↩'}>
+        <ActionTooltip label={focusLabel + ' ⌘⇧↩'}>
           <button type="button" className="h1-button terminal-focus-toggle" aria-label={focusLabel} aria-keyshortcuts="Meta+Shift+Enter"
+            data-view-control aria-hidden={!terminalView || undefined} disabled={!terminalView}
             aria-pressed={focused} data-terminal-focus-toggle onClick={onToggleFocus}>
             <FocusIcon size={14} aria-hidden="true" />
           </button>
-        </ActionTooltip>}
+        </ActionTooltip>
         <button type="button" className="h1-button h1-button-primary" disabled={pending || (!active && blocked)}
           onClick={() => act(active ? 'stop' : 'start')} aria-label={active ? '停止' : '启动'}
           aria-keyshortcuts={active ? 'Meta+.' : 'Meta+R'} title={active ? '停止 ⌘.' : blocked ? '请先处理端口冲突' : '启动 ⌘R'}
@@ -367,52 +404,66 @@ export function ProjectCard({ project, view, showTerminal, slots, activeSlot, te
       </div>
     </header>
 
-    {showTerminal ? terminalPane : view === 'git' ? (
-      <div ref={content} className="h1-project-scroll" data-project-git={project.id}>
-        {git ? <DashboardGitCard git={git} now={now} onEditor={seeEditor} /> :
-          <Empty className="h1-group"><EmptyTitle>暂无 Git 信息</EmptyTitle>
-            <EmptyDescription>此项目的分支与文件改动会显示在这里。</EmptyDescription></Empty>}
-      </div>
-    ) : <div ref={content} className="h1-project-scroll" data-project-overview={project.id}>
-      <div className="dash-main">
-        <div className="h1-group dash-summary" aria-label="服务与资源">
-          {services.map(service => {
-            const step = launch?.data?.steps.find(item => item.serviceId === service.id || (services.length === 1 && item.serviceId == null));
-            const framework = step?.description.match(/^已识别 ([^，]+)，/u)?.[1];
-            return <ServiceRow key={service.id} service={service} active={active} framework={framework}
-              sample={snapshot?.services.find(sample => sample.id === service.id)} health={health[service.id]}
-              last={last?.services[service.id]} history={snapshot?.history[service.id]} onOpen={onOpenBrowser} />;
-          })}
-          {!active && (snapshot?.conflicts ?? []).map(conflict => <section key={conflict.port} className="dash-alert" role="alert" data-dashboard-conflict={conflict.port}>
-            <span className="h1-status-dot" data-tone="warning" aria-hidden="true" />
-            <p title={conflict.owner?.command}><strong>端口 {conflict.port} 已被占用</strong> <small>{processLabel(conflict)} 正在监听，启动会失败</small></p>
-            <div className="dash-alert-actions">
-              <button type="button" className="h1-tag" disabled={!conflict.owner || !conflict.identity}
-                onClick={() => setOccupied(conflict)} data-dashboard-release>结束该进程</button>
-              <button type="button" className="h1-tag" onClick={() => onEdit(conflict)} data-dashboard-change-port>换一个端口</button>
-            </div>
-          </section>)}
-          {!active && conflicts.map(conflict => <section key={'configs-' + conflict.port} className="dash-alert" role="alert">
-            <span className="h1-status-dot" data-tone="warning" aria-hidden="true" />
-            <p><strong>端口 {conflict.port} 配置重复</strong> <small>{conflict.projectNames.join('、')}</small></p>
-            <button type="button" className="h1-tag dash-right" onClick={() => onEdit()}>编辑配置</button>
-          </section>)}
-          {snapshotError && <p className="dash-alert" role="status">无法读取仪表盘 · {snapshotError}</p>}
-          <div className="dash-facts">
-            {active && <ResourceSummary usage={snapshot?.total} external={snapshot?.external ?? runtime?.external ?? false}
-              history={snapshot?.history.project} />}
-            {branch && <span className="dash-fact-branch">分支 <b className="dash-truncate font-mono" title={branch}>{branch}</b></span>}
-            {git && <><span>改动 <b>{git.changes}</b></span><button type="button" className="h1-tag dash-right" onClick={() => onSelectView('git')}>查看改动</button></>}
-            {!active && !git && <span>资源 <b>—</b></span>}
+    <div className="workspace-views">
+      <div className="workspace-view" data-workspace-view="overview" {...{ inert: shown !== 'overview' || view !== 'overview' ? '' : undefined }}>
+        <div ref={overviewContent} className="dash-main" data-project-overview={project.id}>
+          <div className="dash-top">
+            <section className="h1-group dash-card dash-summary" aria-label="服务与资源">
+              <header className="dash-card-heading" data-workspace-content><h2>服务</h2>
+                <span>{active ? `${listeningCount} 个运行中` : `${services.length} 个服务`}</span>
+              </header>
+              <div className="dash-service-list" role="region" aria-label="服务列表" tabIndex={0} data-workspace-content>
+                {services.map(service => {
+                  const step = launch?.data?.steps.find(item => item.serviceId === service.id || (services.length === 1 && item.serviceId == null));
+                  const framework = step?.description.match(/^已识别 ([^，]+)，/u)?.[1];
+                  return <ServiceRow key={service.id} service={service} active={active} framework={framework}
+                    sample={snapshot?.services.find(sample => sample.id === service.id)} health={health[service.id]}
+                    last={last?.services[service.id]} history={snapshot?.history[service.id]} onOpen={onOpenBrowser} />;
+                })}
+                {!active && (snapshot?.conflicts ?? []).map(conflict => <section key={conflict.port} className="dash-alert" role="alert" data-dashboard-conflict={conflict.port}>
+                  <span className="h1-status-dot" data-tone="warning" aria-hidden="true" />
+                  <p title={conflict.owner?.command}><strong>端口 {conflict.port} 已被占用</strong> <small>{processLabel(conflict)} 正在监听，启动会失败</small></p>
+                  <div className="dash-alert-actions">
+                    <button type="button" className="h1-tag" disabled={!conflict.owner || !conflict.identity}
+                      onClick={() => setOccupied(conflict)} data-dashboard-release>结束该进程</button>
+                    <button type="button" className="h1-tag" onClick={() => onEdit(conflict)} data-dashboard-change-port>换一个端口</button>
+                  </div>
+                </section>)}
+                {!active && conflicts.map(conflict => <section key={'configs-' + conflict.port} className="dash-alert" role="alert">
+                  <span className="h1-status-dot" data-tone="warning" aria-hidden="true" />
+                  <p><strong>端口 {conflict.port} 配置重复</strong> <small>{conflict.projectNames.join('、')}</small></p>
+                  <button type="button" className="h1-tag dash-right" onClick={() => onEdit()}>编辑配置</button>
+                </section>)}
+                {snapshotError && <p className="dash-alert" role="status">无法读取仪表盘 · {snapshotError}</p>}
+                {!active && <LastRunSummary run={last} now={now} />}
+              </div>
+              <div className="dash-facts"><div data-workspace-content>
+                <ResourceSummary active={active} uptime={uptime} usage={snapshot?.total}
+                  external={snapshot?.external ?? runtime?.external ?? false} history={snapshot?.history.project} />
+              </div></div>
+            </section>
+            <ProjectQuickActions git={git} unconfigured={unconfigured} terminalLimit={terminalLimit}
+              onEditor={onOpenEditor} onTerminal={() => { void onNewTerminal(); }} onGit={() => onSelectView('git')}
+              onReveal={() => onRevealPath(project.path)} onEdit={() => onEdit()} />
           </div>
-          {!active && <LastRunSummary run={last} now={now} />}
+          <DashboardOutput project={project} services={services} active={active} last={last} now={now} config={config}
+            onTerminal={onOpenTerminal} onJump={onOpenLogs} onClear={onClearLogs} />
         </div>
-        <DashboardOutput project={project} services={services} active={active} last={last} now={now} config={config}
-          onTerminal={onOpenTerminal} onJump={onOpenLogs} onClear={onClearLogs} />
       </div>
-    </div>}
+      <div className="workspace-view" data-workspace-view="git" {...{ inert: shown !== 'git' || view !== 'git' ? '' : undefined }}>
+        <div className="h1-project-scroll" data-project-git={project.id} data-workspace-content>
+          {git ? <DashboardGitCard git={git} now={now} onEditor={onOpenEditor} /> :
+            <Empty className="h1-group"><EmptyTitle>暂无 Git 信息</EmptyTitle>
+              <EmptyDescription>此项目的分支与文件改动会显示在这里。</EmptyDescription></Empty>}
+        </div>
+      </div>
+      <div className="workspace-view terminal-chrome" data-workspace-view="terminal" {...{ inert: !terminalInteractive ? '' : undefined }}>
+        {mountTerminal && <TerminalWorkspace ref={terminalControls} project={project} activeSlot={activeSlot} slots={slots} terminals={terminals}
+          focused={focused} interactive={terminalInteractive} ready={terminalReady} onReady={setReadySlot} onFocusedSlot={onFocusedTerminal} />}
+      </div>
+    </div>
     <MotionPresence>{occupied && <ConflictDialog conflict={occupied} onClose={() => setOccupied(undefined)} onConfirm={verifyRelease} />}</MotionPresence>
-    <MotionPresence>{showTemplate && <ProjectStandardDialog request={{ mode: 'view', path: project.path, services: project.services }}
-      onClose={() => setShowTemplate(false)} />}</MotionPresence>
+    <MotionPresence>{view === 'overview' && configMenu && <ProjectActionsMenu {...configMenu} project={project} onClose={closeConfigMenu}
+      onOpenLogs={() => onOpenLogs()} onDelete={onDelete} />}</MotionPresence>
   </div>;
 }

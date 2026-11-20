@@ -3,7 +3,7 @@ import type { PointerEvent as ReactPointerEvent, RefObject } from 'react';
 import { Archive, ArchiveRestore, ArrowDownToLine, Check, ChevronRight, FolderOpen, FolderPlus, GripVertical, ListFilter, MoreHorizontal, Pencil, Pin, PinOff, Plus, RefreshCw, Search, Settings, Square, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import type { PortConflict, ProjectConfig, ProjectGroup, ProjectSelection, ProjectStatus } from '../types';
-import { matchesSidebarFilter, moveProjectOrder, sidebarDensity, sidebarSections, type SidebarFilter, type SidebarSection } from '../lib/sidebarModel';
+import { matchesSidebarFilter, moveProjectOrder, sidebarSections, type SidebarFilter, type SidebarSection } from '../lib/sidebarModel';
 import { getProjectTerminalSlots, getTerminalSnapshot, subscribeTerminals } from '../lib/terminalRegistry';
 import { cn } from '../lib/utils';
 import { recordRender } from '../lib/renderMetrics';
@@ -15,6 +15,7 @@ import { Input } from './ui/input';
 import { ProjectAvatar } from './ProjectAvatar';
 import { StatusDot } from './StatusDot';
 import { SidebarMenu, type SidebarMenuItem } from './SidebarMenu';
+import { ProjectActionsMenu } from './ProjectActionsMenu';
 import { MotionPresence } from './ui/motion-presence';
 
 interface Props {
@@ -45,6 +46,8 @@ interface Props {
   projectsLoaded: boolean;
   onSelectProject: (projectId: string) => void;
   onCreateTerminal: (projectId: string) => Promise<void>;
+  onOpenProjectLogs: (project: ProjectConfig) => void;
+  onDeleteProject: (project: ProjectConfig) => void;
   onRefresh: () => void;
   onCreate: () => void;
   managedCount: number;
@@ -84,9 +87,9 @@ function readRunningCollapsed(): boolean {
   catch { return false; }
 }
 
-function GroupHeadingMarker({ expanded }: { expanded?: boolean }) {
-  return expanded === undefined ? null : <ChevronRight aria-hidden="true"
-    className={cn('sidebar-heading-disclosure absolute left-0 size-2.5 motion-safe:transition-transform', expanded && 'rotate-90')} />;
+function GroupHeadingMarker({ expanded }: { expanded: boolean }) {
+  return <ChevronRight aria-hidden="true"
+    className={cn('sidebar-heading-disclosure ml-auto size-2.5 shrink-0 motion-safe:transition-transform', expanded && 'rotate-90')} />;
 }
 
 function NewTerminalButton({ projectId, atLimit, maxPerProject, onCreate }: {
@@ -116,7 +119,7 @@ function ProjectRowStatus({ projectId, status, conflict, attention, hideOnHover 
     tone={conflict ? 'error' : status} />;
 }
 
-export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive, folderDropName, groups: projectGroups, filter, onFilterChange, attentionProjects, changedProjects, onQuickSwitch, onUpdateGroup, onReorderGroups, onGroupAction, onProjectFlags, visibleProjects, searchQuery, searchInputRef, onSearchChange, onReorder, reordering, statuses, conflicts, selection, maxPerProject, loading, projectsLoaded, onSelectProject, onCreateTerminal, onRefresh, onCreate, managedCount, onStopAll, currentVersion, availableVersion, onCheckUpdates, onOpenSettings }: Props) {
+export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive, folderDropName, groups: projectGroups, filter, onFilterChange, attentionProjects, changedProjects, onQuickSwitch, onUpdateGroup, onReorderGroups, onGroupAction, onProjectFlags, visibleProjects, searchQuery, searchInputRef, onSearchChange, onReorder, reordering, statuses, conflicts, selection, maxPerProject, loading, projectsLoaded, onSelectProject, onCreateTerminal, onOpenProjectLogs, onDeleteProject, onRefresh, onCreate, managedCount, onStopAll, currentVersion, availableVersion, onCheckUpdates, onOpenSettings }: Props) {
   recordRender('projectSidebar');
   const [runningCollapsed, setRunningCollapsed] = useState(readRunningCollapsed);
   const [archivedCollapsed, setArchivedCollapsed] = useState(() => {
@@ -128,6 +131,8 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: SidebarMenuItem[] } | null>(null);
   const closeMenu = useCallback(() => setMenu(null), []);
+  const [rowMenu, setRowMenu] = useState<{ x: number; y: number; project: ProjectConfig }>();
+  const closeRowMenu = useCallback(() => setRowMenu(undefined), []);
   const rows = useRef(new Map<string, HTMLDivElement>());
   const buckets = useRef(new Map<string, HTMLDivElement>());
   const scrollArea = useRef<HTMLDivElement>(null);
@@ -145,7 +150,6 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
   const terminals = useSyncExternalStore(subscribeTerminals, getTerminalSnapshot);
   const visibleIds = useMemo(() => new Set(visibleProjects.map(project => project.id)), [visibleProjects]);
   const sections = useMemo(() => sidebarSections(projects, projectGroups), [projects, projectGroups]);
-  const density = sidebarDensity(projects);
   const orderedGroups = [...projectGroups].sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
   const runningProjects = projects.filter(project => matchesSidebarFilter(project, 'running', statuses, attentionProjects, changedProjects));
   const runningIds = new Set(runningProjects.map(project => project.id));
@@ -295,7 +299,6 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
         for (const attribute of [...node.attributes]) if (attribute.name.startsWith('data-')) node.removeAttribute(attribute.name);
         if (node instanceof HTMLButtonElement) node.tabIndex = -1;
       }
-      ghost.dataset.density = density;
       ghost.classList.add('sidebar-drag-preview', 'h1-popup', 'pointer-events-none');
       Object.assign(ghost.style, { position: 'fixed', left: '0', top: '0', width: `${rect.width}px`, zIndex: '60' });
       document.body.appendChild(ghost);
@@ -348,7 +351,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
       <div className="sidebar-project-item sidebar-project-surface group/project relative flex items-center"
         data-selected={selected || undefined} data-highlighted={searchFocused && highlighted === project.id || undefined}
         onContextMenu={event => { event.preventDefault(); projectMenu(project, event.clientX, event.clientY); }}>
-        <button className={cn('sidebar-project-row flex min-w-0 flex-1 items-center gap-2.5 rounded-[inherit] px-2.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/25 group-hover/project:pr-16 group-focus-within/project:pr-16', canReorder && 'touch-none cursor-grab active:cursor-grabbing')}
+        <button className={cn('sidebar-project-row flex min-w-0 flex-1 items-center rounded-[inherit] text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/25 group-hover/project:pr-16 group-focus-within/project:pr-16', canReorder && 'touch-none cursor-grab active:cursor-grabbing')}
           onPointerDown={event => startPointer(event, project.id)} onPointerMove={movePointer} onPointerUp={finishPointer} onPointerCancel={clearDrag}
           onLostPointerCapture={event => { if (drag.current?.pointerId === event.pointerId) clearDrag(); }}
           onKeyDown={event => {
@@ -378,7 +381,11 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
         <div className="pointer-events-none absolute right-1 flex shrink-0 items-center rounded-control opacity-0 group-hover/project:pointer-events-auto group-hover/project:opacity-100 group-focus-within/project:pointer-events-auto group-focus-within/project:opacity-100">
           <NewTerminalButton projectId={project.id} atLimit={slots.length >= maxPerProject} maxPerProject={maxPerProject} onCreate={() => onCreateTerminal(project.id)} />
           <Button size="icon-sm" variant="ghost" className="size-6 opacity-0 group-hover/project:opacity-100 group-focus-within/project:opacity-100" aria-label={`${name} 的更多操作`}
-            onClick={event => { const rect = event.currentTarget.getBoundingClientRect(); projectMenu(project, rect.left, rect.bottom); }}><MoreHorizontal className="size-3.5" /></Button>
+            aria-haspopup="menu" aria-expanded={rowMenu?.project.id === project.id} data-project-more={project.id}
+            onClick={event => {
+              const { left, bottom } = event.currentTarget.getBoundingClientRect();
+              setRowMenu({ x: left, y: bottom + 4, project });
+            }}><MoreHorizontal className="size-3.5" /></Button>
         </div>
       </div>
     </div>;
@@ -391,21 +398,22 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
     const open = filtering ? !temporaryCollapsed.has(section.id) : section.id === 'archived' ? !archivedCollapsed : !section.group?.collapsed;
     const collapsible = !!section.group || section.id === 'archived';
     return <div key={section.id} ref={node => { if (node) buckets.current.set(section.id, node); else buckets.current.delete(section.id); }}
-      data-sidebar-bucket={section.id} className={cn('min-w-0', draggingId === section.id && 'opacity-40')}>
+      data-sidebar-bucket={section.id} className={cn('sidebar-group min-w-0', draggingId === section.id && 'opacity-40')}>
       <div data-group-heading className="sidebar-group-heading flex min-w-0 items-center"
         onContextMenu={event => { if (section.group) { event.preventDefault(); groupMenu(section.group, event.clientX, event.clientY); } }}>
-        <button className="flex min-w-0 flex-1 items-center gap-[7px] rounded text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/25" disabled={!collapsible}
+        <button className="sidebar-group-toggle flex min-w-0 flex-1 items-center gap-1.5 rounded text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/25" disabled={!collapsible}
           data-group-toggle={section.id} aria-expanded={collapsible ? open : undefined} aria-controls={collapsible ? `sidebar-section-${section.id}` : undefined}
           onClick={() => {
             if (filtering) setTemporaryCollapsed(previous => { const next = new Set(previous); if (open) next.add(section.id); else next.delete(section.id); return next; });
             else if (section.id === 'archived') setArchivedCollapsed(previous => !previous);
             else if (section.group) void onUpdateGroup(section.id, { collapsed: open }).catch(error => toast.error(`保存折叠状态失败：${error}`));
           }}>
-          {section.id === 'pinned' ? <Pin aria-hidden="true" className="size-3 shrink-0" />
-            : (collapsible || projectGroups.length > 0) && <GroupHeadingMarker expanded={collapsible ? open : undefined} />}
+          {section.id === 'pinned' && <Pin aria-hidden="true" className="size-3 shrink-0" />}
           <span className="truncate" title={section.name}>{section.name}</span>
+          <span className="sidebar-group-count">{visible.length}</span>
+          {collapsible && <GroupHeadingMarker expanded={open} />}
         </button>
-        <div className="flex h-0 shrink-0 items-center">
+        <div className="sidebar-group-actions flex items-center" data-disclosure={collapsible || undefined}>
           {section.group && <>
             <Button size="icon-sm" variant="ghost" className={cn('sidebar-heading-action size-[18px]', canReorder && 'touch-none cursor-grab')} aria-label={`拖动分组 ${section.name}`} disabled={!canReorder} data-group-drag={section.id}
               onPointerDown={event => startPointer(event, section.id, 'group')} onPointerMove={movePointer} onPointerUp={finishPointer} onPointerCancel={clearDrag}
@@ -428,10 +436,11 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
       </div>}
     </div>;
   };
-  const renderRunning = () => !filtering && runningProjects.length > 0 && <section ref={runningSection} aria-labelledby="sidebar-running-heading" data-running-section>
-    <button className="sidebar-group-heading flex w-full items-center gap-[7px] text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/25"
+  const renderRunning = () => !filtering && runningProjects.length > 0 && <section ref={runningSection} className="sidebar-group" aria-labelledby="sidebar-running-heading" data-running-section>
+    <button className="sidebar-group-heading flex w-full items-center gap-1.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/25"
       aria-label={runningCollapsed ? '展开运行中项目' : '收起运行中项目'} aria-expanded={!runningCollapsed} aria-controls="sidebar-running-projects" data-running-toggle onClick={() => setRunningCollapsed(previous => !previous)}>
-      <GroupHeadingMarker expanded={!runningCollapsed} /><span id="sidebar-running-heading">运行中</span>
+      <span id="sidebar-running-heading">运行中</span><span className="sidebar-group-count">{runningProjects.length}</span>
+      <GroupHeadingMarker expanded={!runningCollapsed} />
     </button>
     {!runningCollapsed && <ScrollArea className="[&>[data-radix-scroll-area-viewport]]:max-h-[28vh]">
       <nav id="sidebar-running-projects" aria-label="运行中的项目" className="sidebar-project-list">
@@ -439,7 +448,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
           if (runningUngroupedIds.has(project.id)) return renderProject(project, runningUngrouped, true);
           const selected = selection?.projectId === project.id;
           return <button key={project.id} data-running-project={project.id} data-selected={selected || undefined} aria-current={selected ? 'page' : undefined}
-            className="sidebar-project-item sidebar-project-row sidebar-project-surface flex w-full shrink-0 items-center gap-2.5 px-2.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/25"
+            className="sidebar-project-item sidebar-project-row sidebar-project-surface flex w-full shrink-0 items-center text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/25"
             onClick={() => onSelectProject(project.id)} onContextMenu={event => { event.preventDefault(); projectMenu(project, event.clientX, event.clientY); }}>
             <ProjectAvatar project={project} status={statuses[project.id]} />
             <span className="min-w-0 flex-1 truncate">{project.displayName || project.name}</span>
@@ -468,19 +477,21 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
     ] });
   };
 
-  return <aside className="app-sidebar flex flex-col" aria-label="项目侧边栏" data-density={density} data-folder-drag={folderDropName ? 'true' : undefined}
+  return <aside className="app-sidebar flex flex-col" aria-label="项目侧边栏" data-folder-drag={folderDropName ? 'true' : undefined}
     {...{ inert: inactive ? '' : undefined }}
     onKeyDownCapture={event => { if (event.key === 'Escape' && drag.current?.active) { event.preventDefault(); event.stopPropagation(); clearDrag(); } }}>
-    <header data-tauri-drag-region className="sidebar-chrome">
-      <ActionTooltip label="项目筛选与操作" side="bottom">
-        <Button size="icon-sm" variant="ghost" aria-label="项目筛选与操作" aria-haspopup="menu" data-sidebar-tools
-          data-filter-active={filter !== 'all' || undefined} onClick={event => sidebarActions(event.currentTarget)}>
-          {filter !== 'all' ? <ListFilter /> : <MoreHorizontal />}
-        </Button>
-      </ActionTooltip>
+    <header data-tauri-drag-region="deep" className="sidebar-titlebar">
+      <div className="sidebar-chrome">
+        <ActionTooltip label="项目筛选与操作" side="bottom">
+          <Button size="icon-sm" variant="ghost" className="size-[26px] rounded-full" aria-label="项目筛选与操作" aria-haspopup="menu" data-sidebar-tools
+            data-filter-active={filter !== 'all' || undefined} onClick={event => sidebarActions(event.currentTarget)}>
+            {filter !== 'all' ? <ListFilter /> : <MoreHorizontal />}
+          </Button>
+        </ActionTooltip>
+      </div>
     </header>
     <div className="sidebar-search-wrap relative shrink-0">
-      <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />
+      <Search className="pointer-events-none absolute left-3 top-1/2 size-3 -translate-y-1/2 text-[var(--h1-label)]" />
       <Input ref={searchInputRef} type="search" placeholder="搜索项目" aria-label="搜索项目" aria-controls="project-list" data-project-search
         className="sidebar-search [&::-webkit-search-cancel-button]:hidden" value={searchQuery}
         onFocus={() => setSearchFocused(true)} onBlur={() => setSearchFocused(false)} onChange={event => { onSearchChange(event.target.value); setHighlightedId(null); }}
@@ -495,7 +506,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
           else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); if (searchQuery) { onSearchChange(''); setHighlightedId(null); } else event.currentTarget.blur(); }
         }} />
       {searchQuery ? <Button variant="ghost" size="icon-sm" className="absolute right-1 top-1/2 -translate-y-1/2" aria-label="清除搜索" onClick={() => { onSearchChange(''); setHighlightedId(null); searchInputRef.current?.focus(); }}><X className="size-3.5" /></Button>
-        : <button aria-label="快速切换项目 (⌘P)" aria-keyshortcuts="Meta+p" title="快速切换项目 (⌘P)" className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded px-[5px] py-px text-keycap leading-[15px] text-[var(--h1-label)] hover:bg-[var(--h1-hover)]" onClick={onQuickSwitch}>⌘P</button>}
+        : <button aria-label="快速切换项目 (⌘P)" aria-keyshortcuts="Meta+p" title="快速切换项目 (⌘P)" className="absolute right-3 top-1/2 -translate-y-1/2 rounded py-1 text-[11px] leading-[15px] text-[var(--h1-label)] hover:bg-[var(--h1-hover)]" onClick={onQuickSwitch}>⌘P</button>}
     </div>
     <ScrollArea ref={scrollArea} className="sidebar-scroll min-h-0 flex-1">
       <nav ref={projectList} id="project-list" aria-label="项目列表" className="relative flex min-h-full flex-col">
@@ -515,11 +526,11 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
       </nav>
     </ScrollArea>
     <footer className="sidebar-footer" data-update-footer data-managed-footer={managedCount > 0 || undefined}>
-      <Button variant="outline" className="flex-1" aria-label="添加项目" aria-keyshortcuts="Meta+n" onClick={onCreate} data-create-project>
+      <Button variant="outline" className="min-w-0 flex-1 rounded-full" aria-label="添加项目" aria-keyshortcuts="Meta+n" onClick={onCreate} data-create-project>
         <Plus data-icon="inline-start" />添加项目
       </Button>
       <ActionTooltip label="设置" side="right">
-        <Button variant="outline" className="sidebar-settings" aria-label="设置" onClick={onOpenSettings} data-open-settings><Settings /></Button>
+        <Button variant="outline" className="sidebar-settings rounded-full" aria-label="设置" onClick={onOpenSettings} data-open-settings><Settings /></Button>
       </ActionTooltip>
     </footer>
     {folderDropName && <div className="pointer-events-none absolute inset-2 z-40 flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed border-border bg-popover px-4 text-center text-foreground" role="status" aria-live="polite" data-folder-drop-overlay>
@@ -529,5 +540,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
     </div>}
     <div ref={indicator} hidden={!draggingId} aria-hidden="true" data-reorder-indicator className="pointer-events-none fixed z-[70] h-0.5 rounded-full bg-foreground/60" />
     <MotionPresence>{!inactive && menu && <SidebarMenu {...menu} onClose={closeMenu} />}</MotionPresence>
+    <MotionPresence>{!inactive && rowMenu && <ProjectActionsMenu {...rowMenu} onClose={closeRowMenu}
+      onOpenLogs={() => onOpenProjectLogs(rowMenu.project)} onDelete={() => onDeleteProject(rowMenu.project)} />}</MotionPresence>
   </aside>;
 });

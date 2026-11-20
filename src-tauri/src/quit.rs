@@ -30,7 +30,8 @@ pub fn install_menu(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         about_index + 1,
     )?;
     app_menu.insert(
-        &MenuItem::with_id(app, "apphub-settings", "设置…", true, Some("CmdOrCtrl+,"))?,
+        // The webview routes ⌘, to project configuration on Overview and to Settings elsewhere.
+        &MenuItem::with_id(app, "apphub-settings", "设置…", true, None::<&str>)?,
         about_index + 2,
     )?;
     let index = app_menu

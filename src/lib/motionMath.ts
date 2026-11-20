@@ -1,3 +1,5 @@
+import type { ProjectView } from '../types.ts';
+
 export const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 
 export function motionSeconds(seconds: number, reduced: boolean) {
@@ -15,19 +17,41 @@ export function invertMotionBox(previous: MotionBox, next: MotionBox) {
 
 export const dashboardEntranceLimit = 8;
 
-export interface TerminalTabPaint { backdrop: number; content: number; y: number }
+export const projectViewOrder = ['overview', 'git', 'terminal'] as const;
+export const projectViewBlendSeconds = .2;
+export const projectViewContentTiming = { enter: .06, exit: .09 } as const;
+export type ProjectViewMix = Record<ProjectView, number>;
 
-export function settledTerminalTab(terminal: boolean): TerminalTabPaint {
-  return terminal ? { backdrop: 1, content: 1, y: 0 } : { backdrop: 0, content: 0, y: 4 };
+export function advanceProjectViewTime(elapsed: number, frameSeconds: number) {
+  // A slow frame should extend the blend instead of skipping a large brightness step.
+  return Math.min(projectViewBlendSeconds, elapsed + Math.min(frameSeconds, .024));
 }
 
-export function animateTerminalTab(timeline: gsap.core.Timeline, paint: TerminalTabPaint, terminal: boolean) {
-  if (terminal) {
-    if (paint.content === 0) paint.y = 4;
-    if (paint.backdrop < 1) timeline.to(paint, { backdrop: 1, duration: .12 * (1 - paint.backdrop), ease: 'power2.out' });
-    if (paint.content < 1) timeline.to(paint, { content: 1, y: 0, duration: .16 * (1 - paint.content), ease: 'power3.out' });
-  } else {
-    if (paint.content > 0) timeline.to(paint, { content: 0, duration: .1 * paint.content, ease: 'power2.out' });
-    if (paint.backdrop > 0) timeline.to(paint, { backdrop: 0, duration: .12 * paint.backdrop, ease: 'power2.out' });
-  }
+export function readyProjectView(request: ProjectView, shown: ProjectView, terminalReady: boolean, gitReady: boolean) {
+  if ((request === 'terminal' && !terminalReady) || (request === 'git' && !gitReady)) return shown;
+  return request;
+}
+
+export function blendProjectViews(from: ProjectViewMix, to: ProjectView, progress: number): ProjectViewMix {
+  return {
+    overview: from.overview * (1 - progress) + (to === 'overview' ? progress : 0),
+    git: from.git * (1 - progress) + (to === 'git' ? progress : 0),
+    terminal: from.terminal * (1 - progress) + (to === 'terminal' ? progress : 0),
+  };
+}
+
+/** Convert visual shares to source-over opacity, from the bottom view to the top. */
+export function projectViewOpacities(mix: ProjectViewMix): ProjectViewMix {
+  const lower = mix.overview + mix.git;
+  return { overview: Number(mix.overview > 0), git: lower ? mix.git / lower : 0, terminal: mix.terminal };
+}
+
+/** Fade foregrounds on their own schedule while the opaque surfaces keep blending. */
+export function projectViewContentOpacities(from: ProjectViewMix, to: ProjectView, seconds: number): ProjectViewMix {
+  const { enter, exit } = projectViewContentTiming;
+  const ease = (progress: number) => Math.sin(Math.max(0, Math.min(1, progress)) * Math.PI / 2);
+  const leaving = 1 - ease(seconds / exit);
+  const entering = ease((seconds - enter) / (projectViewBlendSeconds - enter));
+  const opacity = (view: ProjectView) => view === to ? from[view] + (1 - from[view]) * entering : from[view] * leaving;
+  return { overview: opacity('overview'), git: opacity('git'), terminal: opacity('terminal') };
 }

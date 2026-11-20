@@ -1,9 +1,8 @@
 import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ArrowRight, CircleCheck, TriangleAlert } from 'lucide-react';
+import { ArrowRight } from 'lucide-react';
 import { dashboardLog, logTime, recentLogCounts, relativeTime } from '../lib/dashboard';
-import { usePortStandard } from '../lib/usePortStandard';
 import { useProjectLogLines } from '../lib/useProjectLogs';
-import type { DashboardGit, DashboardRun, ProjectConfig, ProjectLaunchPlan, Service } from '../types';
+import type { DashboardGit, DashboardRun, ProjectConfig, Service } from '../types';
 import { LogText } from './LogText';
 import { SegmentedControl } from './ui/segmented-control';
 
@@ -47,14 +46,14 @@ export function DashboardOutput({ project, services, active, last, now, config, 
   const exit = last?.exitCode ?? (last?.signal != null ? '信号 ' + last.signal : '未知');
 
   return <section className="dash-output" aria-labelledby="dash-output-heading">
-    <header className="dash-output-heading">
+    <header className="dash-output-heading" data-workspace-content>
       <h2 className="h1-group-title" id="dash-output-heading">{active ? '输出' : '上次输出'}</h2>
       {!active && logs.length > 0 && <span className="dash-faint">· 停止前最后 {logs.length} 行</span>}
       <button type="button" className="h1-tag dash-right" onClick={onTerminal}>打开终端 <ArrowRight size={13} aria-hidden="true" /></button>
       {config}
     </header>
     <div className="dash-output-panel terminal-chrome">
-      <div className="dash-log-toolbar">
+      <div className="dash-log-toolbar" data-workspace-content>
         <SegmentedControl className="dash-log-filters" label="过滤启动输出" options={options} value={value}
           onChange={filter => { follow.current = true; setSelected(filter); }} />
         <div className="dash-log-actions" title="最近 15 分钟">
@@ -65,7 +64,7 @@ export function DashboardOutput({ project, services, active, last, now, config, 
           </> : <button type="button" className="h1-button" disabled={!logs.length} onClick={onClear} data-dashboard-clear>清空</button>}
         </div>
       </div>
-      <div className="dash-log" ref={log} tabIndex={0} aria-label={active ? '最近输出' : '上次输出'} data-dashboard-log
+      <div className="dash-log" ref={log} tabIndex={0} aria-label={active ? '最近输出' : '上次输出'} data-dashboard-log data-workspace-content
         data-dim={!active || undefined} onScroll={event => {
           const area = event.currentTarget;
           follow.current = area.scrollHeight - area.scrollTop - area.clientHeight < 30;
@@ -84,7 +83,6 @@ export function DashboardOutput({ project, services, active, last, now, config, 
     </div>
   </section>;
 }
-
 export function DashboardGitCard({ git, now, onEditor }: { git: DashboardGit; now: number; onEditor: () => void }) {
   const branch = git.branch ?? (git.head ? '分离 · ' + git.head : '未建立分支');
   return <section className="dash-git" aria-labelledby="dash-git-heading" data-dashboard-git>
@@ -108,43 +106,6 @@ export function DashboardGitCard({ git, now, onEditor }: { git: DashboardGit; no
       </div>
       {git.latest && <div className="dash-kv"><span>最近提交</span><b className="dash-truncate" title={git.latest.subject}>{git.latest.subject}</b>
         <span className="dash-faint dash-right">{relativeTime(git.latest.timestamp, now)}</span></div>}
-    </div>
-  </section>;
-}
-
-export function DashboardStandard({ project, plan, planError, onViewTemplate }: {
-  project: ProjectConfig; plan?: ProjectLaunchPlan; planError?: string; onViewTemplate: () => void;
-}) {
-  const shared = plan?.mode === 'shared' && project.injectPorts && project.services.some(service => service.port != null);
-  const standard = usePortStandard(project.path, project.startCommand, project.services, shared);
-  const checks = standard?.data?.services ?? [];
-  const missing = checks.filter(service => !service.references.length);
-  return <section className="dash-standard" aria-labelledby="dash-standard-heading" data-dashboard-standard>
-    <header className="dash-ch">
-      <h2 className="h1-group-title" id="dash-standard-heading">启动标准</h2>
-      {shared && <button type="button" className="h1-tag dash-right" onClick={onViewTemplate} data-view-standard-template>查看模板</button>}
-    </header>
-    <div className="dash-standard-body">
-      {planError && <p className="dash-warn">无法预览启动方式 · {planError}</p>}
-      {!plan && !planError && <p className="dash-standard-note">正在识别启动方式…</p>}
-      {shared && (standard?.error ? <p className="dash-warn">无法检查启动标准 · {standard.error}</p> : missing.length ? <>
-        <p className="dash-standard-result dash-warn"><TriangleAlert size={15} aria-hidden="true" />脚本缺少端口变量引用</p>
-        <p className="dash-standard-note">脚本未读取 {missing.map(service => service.variable).join('、')}，Bento 分配的端口不会生效。</p>
-      </> : checks.length ? <>
-        <p className="dash-standard-result dash-positive"><CircleCheck size={15} aria-hidden="true" />符合 Bento 标准</p>
-        <p className="dash-standard-note">已为 {checks.length} 个服务找到端口变量或占位符。</p>
-      </> : <p className="dash-standard-note">{standard?.data ? '当前服务未配置端口' : '正在检查端口变量…'}</p>)}
-      {plan?.steps.map(step => {
-        const service = project.services.find(service => service.id === step.serviceId);
-        const vars = step.portEnv.filter(variable => shared || !variable.key.startsWith('BENTO_PORT'));
-        return <div key={step.serviceId ?? 'root'} className="space-y-1.5" data-port-launch-method>
-          {!shared && <p className="dash-standard-note">{service && <b>{service.name} · </b>}{step.description}</p>}
-          {step.placeholderHint && <p className="dash-standard-note">在启动命令的端口位置可使用 <code>{'{port}'}</code>。</p>}
-          {!!vars.length && <div className="dash-chips" data-port-injection-summary>
-            {vars.map(variable => <code key={variable.key}>{variable.key}={variable.value}</code>)}
-          </div>}
-        </div>;
-      })}
     </div>
   </section>;
 }
