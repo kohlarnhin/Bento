@@ -46,7 +46,7 @@ export function UpdateDialog({ updater, projects, terminalCount }: {
       {status === 'checking' && <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground" role="status"><Loader2 className="size-4 animate-spin" />正在检查…</div>}
       {isBusy && <div className="flex flex-col gap-3 py-2" role="status" aria-live="polite">
         <div className="flex justify-between gap-3 text-sm"><span>{progressText}</span><span className="tabular-nums">{updater.downloadProgress === null ? '' : `${updater.downloadProgress} %`}</span></div>
-        <progress aria-label="更新下载进度" max={100} value={updater.downloadProgress ?? undefined} className="h-1.5 w-full overflow-hidden rounded-full appearance-none [&::-webkit-progress-bar]:bg-secondary [&::-webkit-progress-value]:bg-primary" />
+        <progress aria-label="更新下载进度" max={100} value={updater.downloadProgress ?? undefined} className="h-1.5 w-full appearance-none overflow-hidden rounded-full border border-card-border [&::-webkit-progress-bar]:bg-background [&::-webkit-progress-value]:bg-primary" />
       </div>}
       {status === 'error' && <Alert variant="destructive"><AlertDescription className="break-words select-text" data-update-error>{updater.error}</AlertDescription></Alert>}
 

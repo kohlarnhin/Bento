@@ -84,7 +84,7 @@ export function ProjectStandardDialog({ request, onClose, onGenerated }: {
           </p>}
         </div>
         <textarea ref={code} readOnly spellCheck={false} wrap="off" aria-label="启动脚本预览" data-standard-script-preview
-          value={preview.script} className="h1-group min-h-[180px] w-full flex-1 resize-none p-3 font-mono text-xs leading-5 select-text outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          value={preview.script} className="h1-group min-h-[180px] w-full flex-1 resize-none p-3 font-mono text-xs leading-5 select-text outline-none focus-visible:ring-2 focus-visible:ring-ring/25"
           rows={18} />
         {!!preview.notes.length && <ul className="max-h-24 shrink-0 space-y-1 overflow-y-auto text-xs text-warning-foreground">
           {preview.notes.map(note => <li key={note}>{note}</li>)}

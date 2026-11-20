@@ -4,24 +4,21 @@ import { cva, type VariantProps } from 'class-variance-authority';
 import { cn } from '../../lib/utils';
 
 export const buttonVariants = cva(
-  'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-full text-[length:var(--text-control)] font-medium outline-none transition-[color,background-color,border-color,box-shadow] focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 select-none cursor-pointer [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0',
+  'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-full text-[length:var(--text-control)] font-medium outline-none transition-[color,background-color,box-shadow] focus-visible:ring-2 focus-visible:ring-ring/25 disabled:pointer-events-none disabled:opacity-50 select-none cursor-pointer [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0',
   {
     variants: {
       variant: {
         default:
-          'bg-primary text-primary-foreground hover:bg-primary/90',
+          'bg-primary text-primary-foreground hover:bg-[var(--primary-hover)]',
         destructive:
-          'bg-primary text-primary-foreground hover:bg-primary/90',
-        outline:
-          'border-[0.5px] border-[var(--h1-pill-line)] bg-[var(--h1-pill)] hover:bg-accent hover:text-accent-foreground',
-        secondary:
-          'bg-secondary text-secondary-foreground hover:bg-secondary/80',
-        ghost:
-          'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+          'bg-primary text-primary-foreground hover:bg-[var(--primary-hover)]',
+        outline: 'button-neutral',
+        secondary: 'button-neutral',
+        ghost: 'button-neutral',
         link:
           'text-primary underline-offset-4 hover:underline',
-        'ghost-destructive': 'text-destructive hover:bg-destructive/10 hover:text-destructive',
-        terminal: 'border border-terminal-border bg-terminal text-terminal-foreground hover:bg-terminal-border',
+        'ghost-destructive': 'button-neutral',
+        terminal: 'button-neutral',
       },
       size: {
         default: 'h-9 px-4 py-2',

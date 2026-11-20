@@ -62,23 +62,23 @@ export function ProjectRescanCard({ rows, sourceFiles = [], serviceChanges = [],
           </li>)}</ul>
           : <p className="flex items-center gap-2 text-success-foreground"><Check aria-hidden="true" className="size-3.5" />
             {standard.services.length ? '已找到各服务读取 Bento 标准端口变量的代码' : '当前服务没有配置监听端口'}</p>}
-      {onViewTemplate && <button type="button" className="rounded text-foreground hover:underline focus-visible:outline-ring"
+      {onViewTemplate && <button type="button" className="rounded text-foreground hover:underline"
         onClick={onViewTemplate} data-view-standard-template>查看标准模板</button>}
     </div>}
     {!applied && serviceChanges.length > 0 && <label data-rescan-field="services" className="flex items-center gap-2 border-t border-card-border px-4 py-2">
-      <input type="checkbox" className="size-3.5 accent-primary" checked={selected.has('services')} disabled={disabled} onChange={() => onToggle('services')} />
+      <input type="checkbox" className="size-3.5" checked={selected.has('services')} disabled={disabled} onChange={() => onToggle('services')} />
       应用服务与端口
     </label>}
     {!applied && changeCount > 0 && rows?.filter(row => !discovery || row.changed).map(row => <div key={row.field} data-rescan-field={row.field}
       className={cn('grid grid-cols-[1rem_3.5rem_minmax(0,1fr)_0.75rem_minmax(0,1fr)] items-center gap-x-2 gap-y-1 border-t border-card-border px-4 py-2 sm:grid-cols-[1rem_4rem_minmax(0,1fr)_0.75rem_minmax(0,1fr)_4.5rem]',
         !row.changed && 'text-muted-foreground')}>
       <input type="checkbox" aria-label={`应用${labels[row.field]}`} checked={row.changed && selected.has(row.field)}
-        disabled={disabled || !row.changed} onChange={() => onToggle(row.field)} className="size-3.5 accent-primary disabled:opacity-50" />
+        disabled={disabled || !row.changed} onChange={() => onToggle(row.field)} className="size-3.5 disabled:opacity-50" />
       <span>{labels[row.field]}</span>
       <span className={cn('min-w-0 break-all font-mono text-[11px] text-muted-foreground', row.changed && 'line-through')}>{displayValue(row.field, row.before)}</span>
       {row.changed ? <ArrowRight aria-hidden="true" className="size-3 text-muted-foreground" /> : <span />}
-      {row.changed ? <span className="min-w-0 max-w-full justify-self-start break-all rounded bg-success-muted px-1.5 py-0.5 font-mono text-[11px] text-success-foreground">{displayValue(row.field, row.after)}</span> : <span className="text-[11px]">无变化</span>}
-      {row.changed && row.source && <span className="col-start-3 col-end-6 min-w-0 max-w-full truncate justify-self-start rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground sm:col-auto sm:justify-self-end"
+      {row.changed ? <span className="min-w-0 break-all font-mono text-[11px] font-semibold text-foreground">{displayValue(row.field, row.after)}</span> : <span className="text-[11px]">无变化</span>}
+      {row.changed && row.source && <span className="col-start-3 col-end-6 min-w-0 max-w-full truncate justify-self-start text-[10px] text-muted-foreground sm:col-auto sm:justify-self-end"
         title={`${row.source}${row.confidence ? ` · ${confidenceLabels[row.confidence]}` : ''}`}>{row.source}</span>}
     </div>)}
     {!applied && <div className="flex flex-wrap items-center justify-between gap-2 border-t border-card-border px-4 py-2.5">

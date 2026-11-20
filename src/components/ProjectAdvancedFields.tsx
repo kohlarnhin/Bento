@@ -30,7 +30,7 @@ export function ProjectAdvancedFields({ values, onChange, errors, onBlur, open, 
   const error = (id: string, text?: string) => text && <p id={id} className="text-[11px] leading-relaxed text-destructive" aria-live="polite">{text}</p>;
   return (
     <Collapsible open={open} onOpenChange={onOpenChange} className="h1-group" data-project-advanced>
-      <CollapsibleTrigger asChild><button type="button" disabled={disabled} className="group flex w-full items-center gap-2 rounded-lg px-3 py-3 text-left text-xs font-medium outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50" data-advanced-toggle><ChevronRight className="size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />高级设置<span className="ml-auto text-[11px] font-normal text-muted-foreground">环境变量 · 其他命令</span></button></CollapsibleTrigger>
+      <CollapsibleTrigger asChild><button type="button" disabled={disabled} className="group flex w-full items-center gap-2 rounded-lg px-3 py-3 text-left text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring/25" data-advanced-toggle><ChevronRight className="size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />高级设置<span className="ml-auto text-[11px] font-normal text-muted-foreground">环境变量 · 其他命令</span></button></CollapsibleTrigger>
       <CollapsibleContent className="space-y-5 border-t px-3 py-4">
         <section className="space-y-2" aria-label="环境变量">
           <Label>环境变量</Label>
@@ -55,7 +55,7 @@ export function ProjectAdvancedFields({ values, onChange, errors, onBlur, open, 
         </section>
         <section className="space-y-2" aria-label="其他命令">
           <Label>其他命令 <span className="font-normal text-muted-foreground">（最多 10 个）</span></Label>
-          {values.commands.map((entry, index) => <div key={index} className="space-y-2 rounded-md border bg-muted/20 p-2" data-extra-command-row={index}>
+          {values.commands.map((entry, index) => <div key={index} className="space-y-2 rounded-md border p-2" data-extra-command-row={index}>
             <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto] items-start gap-2">
               <div className="min-w-0 space-y-2">
                 <Input aria-label={`命令 ${index + 1} 名称`} placeholder="名称，例如 build" value={entry.name} disabled={disabled} aria-invalid={!!errors.commands[index]?.name} aria-describedby={`command-${index}-name-error`} onChange={event => command(index, { name: event.target.value })} onBlur={onBlur} />
@@ -76,7 +76,7 @@ export function ProjectAdvancedFields({ values, onChange, errors, onBlur, open, 
           <Button type="button" variant="outline" size="sm" disabled={disabled || values.commands.length >= 10} onClick={() => onChange({ commands: [...values.commands, { name: '', command: '' }] })} data-add-command><Plus />添加命令</Button>
         </section>
         <div className="space-y-2">
-          <label className="flex items-center gap-2 text-xs"><input type="checkbox" className="size-3.5 accent-primary" checked={values.autoOpen} disabled={disabled || !canAutoOpen} onChange={event => onChange({ autoOpen: event.target.checked })} data-auto-open />启动就绪后自动打开网页</label>
+          <label className="flex items-center gap-2 text-xs"><input type="checkbox" className="size-3.5" checked={values.autoOpen} disabled={disabled || !canAutoOpen} onChange={event => onChange({ autoOpen: event.target.checked })} data-auto-open />启动就绪后自动打开网页</label>
           {!canAutoOpen && <p className="text-[11px] text-muted-foreground">仅填写端口的 Web 项目可用。</p>}
         </div>
         <p className="text-[11px] leading-relaxed text-muted-foreground">环境变量修改将在下次启动项目或重启终端后生效。其他命令仅在终端空闲时运行。</p>

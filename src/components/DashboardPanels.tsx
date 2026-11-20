@@ -5,6 +5,7 @@ import { usePortStandard } from '../lib/usePortStandard';
 import { useProjectLogLines } from '../lib/useProjectLogs';
 import type { DashboardGit, DashboardRun, ProjectConfig, ProjectLaunchPlan, Service } from '../types';
 import { ProjectStandardDialog } from './ProjectStandardDialog';
+import { LogText } from './LogText';
 import { SegmentedControl } from './ui/segmented-control';
 
 export function DashboardOutput({ project, services, active, last, now, config, onTerminal, onJump, onClear }: {
@@ -53,7 +54,7 @@ export function DashboardOutput({ project, services, active, last, now, config, 
       <button type="button" className="h1-tag dash-right" onClick={onTerminal}>打开终端 <ArrowRight size={13} aria-hidden="true" /></button>
       {config}
     </header>
-    <div className="dash-output-panel">
+    <div className="dash-output-panel terminal-chrome">
       <div className="dash-log-toolbar">
         <SegmentedControl className="dash-log-filters" label="过滤启动输出" options={options} value={value}
           onChange={filter => { follow.current = true; setSelected(filter); }} />
@@ -61,8 +62,8 @@ export function DashboardOutput({ project, services, active, last, now, config, 
           {active ? <>
             {counts.errors > 0 && <span className="dash-error">{counts.errors} 条错误</span>}
             <span className={counts.warnings ? 'dash-log-warning' : undefined}>{counts.warnings} 条警告</span>
-            {latestError && <button type="button" className="h1-tag" onClick={() => onJump(latestError.id)} data-dashboard-jump>跳到错误</button>}
-          </> : <button type="button" className="h1-tag" disabled={!logs.length} onClick={onClear} data-dashboard-clear>清空</button>}
+            {latestError && <button type="button" className="h1-button" onClick={() => onJump(latestError.id)} data-dashboard-jump>跳到错误</button>}
+          </> : <button type="button" className="h1-button" disabled={!logs.length} onClick={onClear} data-dashboard-clear>清空</button>}
         </div>
       </div>
       <div className="dash-log" ref={log} tabIndex={0} aria-label={active ? '最近输出' : '上次输出'} data-dashboard-log
@@ -74,7 +75,7 @@ export function DashboardOutput({ project, services, active, last, now, config, 
           data-service-key={line.service?.key} title={line.text}>
           <time className="dash-log-time" dateTime={new Date(line.timestamp).toISOString()}>{logTime(line.timestamp)}</time>
           {line.service && <span className="dash-log-service" title={line.service.name}>{line.service.name}</span>}
-          <span className="dash-log-text">{line.text}</span>
+          <span className="dash-log-text"><LogText text={line.text} /></span>
         </div>)}
         {!filtered.length && <p className="dash-log-empty">{lines.length ? '没有符合筛选条件的输出' : active ? '暂无启动输出' : '启动后这里显示实时输出'}</p>}
         {!active && last && value === 'all' && logs.length > 0 && <div className="dash-log-exit" data-dashboard-exit>

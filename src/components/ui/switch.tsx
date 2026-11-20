@@ -15,10 +15,10 @@ export const Switch = React.forwardRef<HTMLButtonElement, SwitchProps>(
       role="switch"
       aria-checked={checked}
       data-state={checked ? 'checked' : 'unchecked'}
-      className={cn('inline-flex h-6 w-10 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=unchecked]:bg-input', className)}
+      className={cn('h1-switch inline-flex h-6 w-10 shrink-0 cursor-pointer items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50', className)}
       onClick={event => { onClick?.(event); if (!event.defaultPrevented) onCheckedChange(!checked); }}
     >
-      <span aria-hidden="true" className={cn('pointer-events-none block size-5 rounded-full bg-background shadow-sm transition-transform', checked ? 'translate-x-4' : 'translate-x-0')} />
+      <span aria-hidden="true" className={cn('pointer-events-none block size-5 rounded-full transition-transform', checked ? 'translate-x-4' : 'translate-x-0')} />
     </button>
   ),
 );

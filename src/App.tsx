@@ -56,7 +56,7 @@ let sidebarDropPending = false;
 
 export async function handleSidebarDragDrop(event: DragDropEvent) {
   const sidebar = document.querySelector<HTMLElement>('aside.app-sidebar');
-  if (!sidebar) return;
+  if (!sidebar || sidebar.inert) return;
   const context = sidebarDropContext;
   if (event.type === 'enter') sidebarDragPaths = event.paths;
   if (!context || context.isDialogOpen() || event.type === 'leave') {
@@ -114,14 +114,15 @@ export function App() {
   const settings = useSettings();
   const terminalControls = useRef<TerminalWorkspaceControls>(null);
   const [focusMode, setFocusMode] = useState(false);
+  const [folderDropName, setFolderDropName] = useState<string | null>(null);
   const toggleFocusMode = useCallback(() => {
     setFocusMode(value => !value);
+    setFolderDropName(null);
     terminalControls.current?.focusInput();
   }, []);
   const toggleSplit = useCallback(() => terminalControls.current?.toggleSplit(), []);
   const changeFontSize = settings.changeFontSize;
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [folderDropName, setFolderDropName] = useState<string | null>(null);
   const terminals = useSyncExternalStore(subscribeTerminals, getTerminalSnapshot);
   const terminalCount = Object.values(terminals).filter(terminal => terminal.alive).length;
   const [projects, setProjects] = useState<ProjectConfig[]>([]);
@@ -640,60 +641,60 @@ export function App() {
       .catch(error => console.warn('Bento traffic lights:', error));
   }, [focusActive]);
   const projectOrder = useMemo(() => sidebarNavigation(projects, groups), [projects, groups]);
-  const railProjects = focusActive ? [...projectOrder].sort((a, b) =>
-    Number(['running', 'starting'].includes(projectStatuses[b.id])) - Number(['running', 'starting'].includes(projectStatuses[a.id]))) : [];
-  if (focusActive && selectedProject?.archived) railProjects.unshift(selectedProject);
   const activeSlot = selectedProject ? activeSlots[selectedProject.id] ?? 1 : 1;
   const slots = selectedProject ? getProjectTerminalSlots(selectedProject.id, terminals) : [];
 
   return (
     <TooltipProvider delayDuration={150}>
-      <div className="h1-window flex h-screen cursor-default select-none overflow-hidden" data-terminal-view={inTerminal || undefined}
+      <Toaster theme={settings.colorScheme} />
+      <div className="h1-window cursor-default select-none" data-terminal-view={inTerminal || undefined}
         data-focus-mode={focusActive || undefined} style={{
           '--terminal-surface': TERMINAL_THEME.background,
           '--terminal-text-color': TERMINAL_THEME.foreground,
         } as CSSProperties}>
-        <Toaster theme={settings.colorScheme} />
+        <div className="h1-sidebar-panel">
+          <ProjectSidebar
+            projects={projects}
+            inactive={focusActive}
+            folderDropName={folderDropName}
+            groups={groups}
+            visibleProjects={visibleProjects}
+            searchQuery={searchQuery}
+            searchInputRef={searchInput}
+            onSearchChange={setSearchQuery}
+            onReorder={reorderProjects}
+            reordering={reordering}
+            filter={filter}
+            onFilterChange={setFilter}
+            attentionProjects={attentionProjects}
+            changedProjects={changedProjects}
+            onQuickSwitch={openQuickSwitcher}
+            onUpdateGroup={updateGroup}
+            onReorderGroups={reorderGroups}
+            onGroupAction={(action, group) => setGroupForm({ action, group })}
+            onProjectFlags={setProjectFlags}
+            statuses={projectStatuses}
+            conflicts={conflicts}
+            selection={selection}
+            maxPerProject={settings.maxPerProject}
+            loading={loading}
+            projectsLoaded={projectsLoaded}
+            onSelectProject={selectProject}
+            onCreateTerminal={openTerminal}
+            onRefresh={loadProjects}
+            onCreate={createProject}
+            managedCount={managedProjects.length}
+            onStopAll={openStopAll}
+            currentVersion={updater.currentVersion}
+            availableVersion={updater.update?.version}
+            onCheckUpdates={updater.checkNow}
+            onOpenSettings={openSettings}
+          />
+          <ProjectFocusRail projects={projects} groups={groups} active={focusActive} statuses={projectStatuses}
+            selectedId={selectedProject?.id} onSelect={selectProject} onOpenSettings={openSettings} />
+        </div>
 
-        {focusActive && selectedProject ? <ProjectFocusRail projects={railProjects} statuses={projectStatuses}
-          selectedId={selectedProject.id} onSelect={selectProject} /> : <ProjectSidebar
-          projects={projects}
-          folderDropName={folderDropName}
-          groups={groups}
-          visibleProjects={visibleProjects}
-          searchQuery={searchQuery}
-          searchInputRef={searchInput}
-          onSearchChange={setSearchQuery}
-          onReorder={reorderProjects}
-          reordering={reordering}
-          filter={filter}
-          onFilterChange={setFilter}
-          attentionProjects={attentionProjects}
-          changedProjects={changedProjects}
-          onQuickSwitch={openQuickSwitcher}
-          onUpdateGroup={updateGroup}
-          onReorderGroups={reorderGroups}
-          onGroupAction={(action, group) => setGroupForm({ action, group })}
-          onProjectFlags={setProjectFlags}
-          statuses={projectStatuses}
-          conflicts={conflicts}
-          selection={selection}
-          maxPerProject={settings.maxPerProject}
-          loading={loading}
-          projectsLoaded={projectsLoaded}
-          onSelectProject={selectProject}
-          onCreateTerminal={openTerminal}
-          onRefresh={loadProjects}
-          onCreate={createProject}
-          managedCount={managedProjects.length}
-          onStopAll={openStopAll}
-          currentVersion={updater.currentVersion}
-          availableVersion={updater.update?.version}
-          onCheckUpdates={updater.checkNow}
-          onOpenSettings={openSettings}
-        />}
-
-        <main className={'h1-main flex min-h-0 min-w-0 flex-1 flex-col' + (inTerminal ? ' terminal-chrome' : '')}>
+        <main className={'h1-main flex min-h-0 min-w-0 flex-col' + (inTerminal ? ' terminal-chrome' : '')}>
           {!selectedProject && <div data-tauri-drag-region className="h-10 shrink-0" aria-hidden="true" />}
           {projects.length === 0 ? (
             <Empty className="h1-group flex-1">

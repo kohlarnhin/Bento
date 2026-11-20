@@ -6,11 +6,11 @@ const badgeVariants = cva('inline-flex items-center gap-1.5 rounded-md border px
   variants: {
     variant: {
       default: 'border-transparent bg-primary text-primary-foreground',
-      secondary: 'border-transparent bg-secondary text-secondary-foreground',
+      secondary: 'text-foreground',
       outline: 'text-muted-foreground',
-      success: 'border-success/15 bg-success-muted text-success-foreground',
-      warning: 'border-warning/20 bg-warning-muted text-warning-foreground',
-      destructive: 'border-destructive/20 bg-destructive/5 text-destructive',
+      success: 'text-success-foreground',
+      warning: 'text-warning-foreground',
+      destructive: 'text-destructive',
     },
   },
   defaultVariants: { variant: 'default' },

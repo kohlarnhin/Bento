@@ -168,11 +168,11 @@ export function Select({ id, label, value, options, onValueChange, disabled, cla
 
   return <>
     <button {...props} ref={trigger} id={id} type="button" role={open && search ? undefined : 'combobox'}
-      aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? listId : undefined}
+      aria-label={label} aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? listId : undefined}
       aria-activedescendant={!search ? activeId : undefined} data-select-open={open ? '' : undefined}
       disabled={disabled} aria-busy={search?.creating || undefined} onBlur={onBlur} onKeyDown={onKeyDown}
       onClick={() => { if (open) close(true); else openMenu(); }}
-      className={cn('h1-field flex h-9 w-full min-w-0 items-center gap-2 px-3 text-left text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50', className)}>
+      className={cn('h1-field flex h-9 w-full min-w-0 items-center gap-2 px-3 text-left text-[13px] outline-none disabled:cursor-not-allowed disabled:opacity-50', className)}>
       {selected?.color && <Dot color={selected.color} />}
       <span className="min-w-0 flex-1 truncate">{selected?.label ?? '—'}</span>
       <ChevronDown aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
@@ -191,10 +191,9 @@ export function Select({ id, label, value, options, onValueChange, disabled, cla
         </div>}
         <div id={listId} role="listbox" aria-label={label} className="flex min-h-0 flex-col" aria-busy={search?.creating || undefined}>
           <div ref={list} className="min-h-0 overflow-y-auto overscroll-contain">
-            {filtered.map((option, index) => <div key={option.value} id={optionId(index)} role="option" aria-selected={option.value === value}
+            {filtered.map((option, index) => <div key={option.value} id={optionId(index)} role="option" aria-selected={option.value === value} data-active={index === activeIndex || undefined}
               aria-disabled={search?.creating || undefined} onMouseDown={event => event.preventDefault()} onClick={() => { void choose(index); }}
-              className={cn('flex min-h-8 cursor-default items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px] hover:bg-muted',
-                option.value === value && 'bg-muted', index === activeIndex && 'bg-accent ring-1 ring-inset ring-border')}>
+              className="choice-row flex min-h-8 cursor-default items-center gap-2 rounded-md px-2.5 py-1.5 text-[13px]">
               {option.color && <Dot color={option.color} />}
               <span className="min-w-0 flex-1 truncate">{option.label}</span>
               {option.count != null && <span className="tabular-nums text-[11px] text-muted-foreground">{option.count}<span className="sr-only"> 个项目</span></span>}
@@ -202,11 +201,11 @@ export function Select({ id, label, value, options, onValueChange, disabled, cla
             </div>)}
           </div>
           {search && <div className="mt-1 shrink-0 border-t pt-1">
-            <div id={createIndex >= 0 ? optionId(createIndex) : undefined} role="option" aria-selected="false"
+            <div id={createIndex >= 0 ? optionId(createIndex) : undefined} role="option" aria-selected="false" data-active={(createIndex >= 0 && createIndex === activeIndex) || undefined}
               aria-disabled={search.creating || exact >= 0} onMouseDown={event => event.preventDefault()}
               onClick={() => { if (exact >= 0) setError('已有同名分组'); else void choose(createIndex); }}
-              className={cn('flex min-h-8 cursor-default items-center justify-between gap-2 rounded-md px-2.5 py-1.5 text-[13px] font-medium',
-                exact >= 0 ? 'text-muted-foreground' : 'hover:bg-muted', createIndex >= 0 && createIndex === activeIndex && 'bg-accent ring-1 ring-inset ring-border')}>
+              className={cn('choice-row flex min-h-8 cursor-default items-center justify-between gap-2 rounded-md px-2.5 py-1.5 text-[13px] font-medium',
+                exact >= 0 && 'text-muted-foreground')}>
               <span className="truncate">{search.creating ? '创建中…' : name && exact < 0 ? `＋ 新建分组「${name}」` : '＋ 新建分组'}</span>
               {search.creating ? <Loader2 aria-hidden="true" className="size-3.5 shrink-0 animate-spin" /> :
                 <kbd aria-hidden="true" className="rounded border bg-background px-1 text-[10px] text-muted-foreground">↵</kbd>}

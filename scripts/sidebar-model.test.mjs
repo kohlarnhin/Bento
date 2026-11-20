@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { fuzzyMatch, matchesSidebarFilter, moveProjectOrder, projectAvatar, searchCreationActions, searchProjects, sidebarDensity, sidebarNavigation, sidebarSections, substringMatch } from '../src/lib/sidebarModel.ts';
+import { focusRailSections, fuzzyMatch, matchesSidebarFilter, moveProjectOrder, projectInitial, searchCreationActions, searchProjects, sidebarDensity, sidebarNavigation, sidebarSections, substringMatch } from '../src/lib/sidebarModel.ts';
 
 const project = (id, extra = {}) => ({ id, name: id, path: '~/work/' + id, port: null, groupId: null, pinned: false, archived: false, ...extra });
 const groups = [{ id: 'work', name: '工作', sortOrder: 2, collapsed: false }, { id: 'personal', name: '个人', sortOrder: 1, collapsed: true }];
@@ -23,6 +23,15 @@ test('Sidebar partitions pins, ordered groups, ungrouped and archives without du
   assert.deepEqual(sidebarNavigation(projects, groups).map(p => p.id), ['b', 'd', 'a', 'c', 'f']);
   assert.deepEqual(groups.map(group => group.id), ['work', 'personal']);
   assert.deepEqual(sidebarSections([project('old')], []).map(s => s.name), ['项目']);
+});
+
+test('Focus rail groups running projects once and keeps the selected archived project reachable', () => {
+  const projects = [project('a', { groupId: 'work' }), project('b', { pinned: true }), project('c'),
+    project('d', { groupId: 'personal' }), project('e', { archived: true }), project('f', { archived: true })];
+  const summary = (selectedId) => focusRailSections(projects, groups, { b: 'starting', c: 'running', a: 'error' }, selectedId)
+    .map(section => [section.id, section.projects.map(p => p.id)]);
+  assert.deepEqual(summary('e'), [['archived', ['e']], ['running', ['b', 'c']], ['personal', ['d']], ['work', ['a']]]);
+  assert.deepEqual(summary('a'), [['running', ['b', 'c']], ['personal', ['d']], ['work', ['a']]]);
 });
 
 test('Cross-group reorder keeps every project, places empty-group drops and does not mutate source', () => {
@@ -97,12 +106,12 @@ test('Creation actions support Chinese/English keywords, partial queries and lit
   assert.deepEqual(searchCreationActions('new').map(action => action.indices), [[], []]);
 });
 
-test('Avatar colours survive reordering and Unicode initials remain intact', () => {
-  assert.deepEqual(projectAvatar(' AppHub '), projectAvatar('AppHub'));
-  assert.equal(projectAvatar('𠀀项目').initial, '𠀀');
-  assert.equal(projectAvatar('  ').initial, '?');
-  assert.match(projectAvatar('apphub').color, /^#[a-f0-9]{6}$/);
-  assert.ok(new Set(['apphub', 'blog', 'api-gateway', 'docs', 'shop-admin'].map(name => projectAvatar(name).color)).size >= 3);
+test('Monochrome project initials preserve Unicode and ignore leading whitespace', () => {
+  assert.equal(projectInitial(' AppHub '), 'A');
+  assert.equal(projectInitial('blog-site'), 'B');
+  assert.equal(projectInitial('𠀀项目'), '𠀀');
+  assert.equal(projectInitial('e\u0301diteur'), 'É');
+  assert.equal(projectInitial('  '), '?');
 });
 
 test('Filters count projects, include starting services and combine with search upstream', () => {

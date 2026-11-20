@@ -227,9 +227,13 @@ mod macos {
             ]);
 
             // Design centers in logical points from the top-left of the window.
-            let (x, y) = match self.layout {
-                Layout::Sidebar => (34.0, 36.0),
-                Layout::Focus => (39.0 - self.button_spacing, 24.0),
+            let (x, y, spacing) = match self.layout {
+                Layout::Sidebar => (34.0, 36.0, self.button_spacing),
+                Layout::Focus => {
+                    // Center the native buttons inside the 64-point panel.
+                    let spacing = self.button_spacing.min(20.0);
+                    (32.0 - spacing, 24.0, spacing)
+                }
             };
             let window_height = window.frame().size.height;
             let current_titlebar = container.frame();
@@ -244,7 +248,7 @@ mod macos {
             for (index, button) in buttons.iter().enumerate() {
                 let frame = button.frame();
                 let center =
-                    NSPoint::new(x + index as f64 * self.button_spacing, window_height - y);
+                    NSPoint::new(x + index as f64 * spacing, window_height - y);
                 let center = button_group.convertPoint_fromView(center, None);
                 let origin = NSPoint::new(
                     center.x - frame.size.width / 2.0,

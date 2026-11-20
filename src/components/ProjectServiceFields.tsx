@@ -81,7 +81,7 @@ export function ProjectServiceFields({ services, newIds, checks, errors, disable
         })}
       </table>
     </div>
-    <button type="button" className="inline-flex items-center gap-1 rounded px-2 pt-0.5 text-[12.5px] text-foreground hover:underline focus-visible:outline-ring disabled:opacity-50"
+    <button type="button" className="inline-flex items-center gap-1 rounded px-2 pt-0.5 text-[12.5px] text-foreground hover:underline disabled:opacity-50"
       disabled={disabled} onClick={onAdd} data-add-service><Plus className="size-3.5" />添加服务</button>
     <details className="rounded-lg border border-card-border" open={services.some(service => !!service.startCommand?.trim()) || undefined}>
       <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-muted-foreground">服务独立启动命令（可选）</summary>

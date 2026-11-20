@@ -43,7 +43,7 @@ type Field = Exclude<keyof Values, 'env' | 'commands' | 'autoOpen' | 'services' 
 type Errors = Partial<Record<Field, string>>;
 type Rescan = { status: 'scanning' } | { status: 'error'; message: string } |
   { status: 'ready'; result: ProjectDirInspection; unchecked: Set<RescanField> };
-const updatedInput = 'border-warning/45';
+const updatedInput = 'border-[var(--selected-line)]';
 const types = [
   { value: 'web', label: 'Web 项目', attributes: { 'data-type': 'web' } },
   { value: 'app', label: '桌面应用', attributes: { 'data-type': 'app' } },
@@ -82,7 +82,7 @@ function validateServices(services: ServiceDraft[], conflictForPort: (port: numb
 }
 
 function UpdatedBadge() {
-  return <span className="ml-1.5 rounded-full bg-success-muted px-1.5 py-0.5 text-[10px] font-medium text-success-foreground">已更新</span>;
+  return <span className="service-primary-label ml-1.5">已更新</span>;
 }
 
 export function ProjectFormDialog({ project, initialInspection, focusPort, projects, groups, onCreateGroup, status, onClose, onSaved }: Props) {
@@ -469,7 +469,7 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
         <Input {...fieldProps('port')} inputMode="numeric" className={cn('font-mono text-[length:var(--text-control)]', updated.port && updatedInput)} placeholder={values.type === 'web' ? '例如 5173' : '无开发服务器时可留空'} />
         {message('port', portHint)}
         <div id="project-port-warnings" className="space-y-2" role="status" aria-live="polite">
-          {checkedPort?.inUse && <div className="flex gap-2 rounded-[9px] bg-[var(--h1-track)] p-2.5 text-[11px] text-warning-foreground">
+          {checkedPort?.inUse && <div className="flex gap-2 rounded-[9px] border border-card-border p-2.5 text-[11px] text-warning-foreground">
             <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
             <div className="min-w-0 space-y-1">
               <p>此端口正被其他进程监听，仍可保存。</p>
@@ -486,12 +486,12 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
           <div className="flex flex-wrap gap-1.5">
             {inspection.portCandidates.map((candidate) => <Button key={candidate.port} type="button" variant="outline" size="sm" disabled={saving} aria-pressed={Number(values.port) === candidate.port}
               onClick={() => change('port', String(candidate.port))}
-              className={cn('h-auto max-w-full items-start gap-2 px-2.5 py-2 text-left', Number(values.port) === candidate.port && 'border-primary/40 bg-primary/5')}>
+              className={cn('h-auto max-w-full items-start gap-2 px-2.5 py-2 text-left', Number(values.port) === candidate.port && 'font-semibold')}>
               <span className="min-w-0"><span className="flex items-center gap-1.5 font-mono text-xs">{candidate.port}{Number(values.port) === candidate.port && <Check className="!size-3" />}</span><span className="mt-0.5 block whitespace-normal break-words text-[10px] font-normal leading-relaxed text-muted-foreground">{candidate.source}</span></span>
             </Button>)}
           </div>
         </div>}
-        <button type="button" className="flex items-center gap-1 rounded text-[12.5px] text-foreground hover:underline focus-visible:outline-ring" disabled={saving} onClick={addService} data-add-service>
+        <button type="button" className="flex items-center gap-1 rounded text-[12.5px] text-foreground hover:underline" disabled={saving} onClick={addService} data-add-service>
           <Plus className="size-3.5" />添加服务
         </button>
       </div>
@@ -500,7 +500,7 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
   return (<>
     <Dialog open onOpenChange={(isOpen) => { if (!isOpen && !saving && !standardDialog) onClose(); }}>
       <DialogContent className={cn('flex max-h-[calc(100dvh-3rem)] flex-col gap-0 rounded-2xl p-0', serviceLayout ? 'max-w-[760px]' : project ? 'max-w-[680px]' : 'max-w-[620px]')}
-        overlayClassName="backdrop-blur-[1.5px]" hideClose={saving} data-project-form onOpenAutoFocus={event => {
+        hideClose={saving} data-project-form onOpenAutoFocus={event => {
           if (!focusPort) return;
           const control = form.current?.querySelector<HTMLInputElement>(values.services.length
             ? '[data-service-port-input="' + CSS.escape(focusPort.serviceId) + '"]' : '#project-port');
@@ -569,12 +569,12 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
               <div className="relative">
                 <Input {...fieldProps('startCommand')} className={cn('font-mono text-[length:var(--text-control)]', multiService && 'h-9 rounded-lg',
                   updated.startCommand && !multiService && updatedInput, detectedScript && 'pr-[min(55%,180px)]')} placeholder="例如 pnpm dev" />
-                {detectedScript && <span data-start-script-source className="pointer-events-none absolute right-2.5 top-1/2 max-w-[47%] -translate-y-1/2 truncate rounded-[5px] bg-success-muted px-1.5 py-px text-[11px] text-success-foreground"
+                {detectedScript && <span data-start-script-source className="service-primary-label pointer-events-none absolute right-2.5 top-1/2 max-w-[47%] -translate-y-1/2 truncate"
                   title={detectedScript.source}>检测到 · {detectedScript.source}</span>}
               </div>
               {errors.startCommand && message('startCommand')}
               {launchPreview?.error && <p className="text-xs text-warning-foreground" role="status" data-launch-preview-error>{launchPreview.error}</p>}
-              {launchPreview?.data && <div className="space-y-1.5 rounded-[9px] bg-[var(--h1-track)] px-3 py-2.5 text-xs leading-relaxed"
+              {launchPreview?.data && <div className="space-y-1.5 rounded-[9px] border border-card-border px-3 py-2.5 text-xs leading-relaxed"
                 data-launch-preview aria-live="polite">
                 {launchPreview.data.steps.map(step => <p key={step.serviceId ?? 'root'} className="break-words">
                   <span className="text-muted-foreground">启动时将执行：{step.dir !== '.' && step.dir + '/ · '}</span><code className="[overflow-wrap:anywhere]">{step.command}</code>
@@ -598,7 +598,7 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
               <Label htmlFor="project-inject-ports">端口注入</Label>
               <label className="flex min-h-9 items-center gap-2 rounded-lg border border-input px-[11px] py-2 text-[12.5px]">
                 <input id="project-inject-ports" type="checkbox" role="switch" checked={values.injectPorts} disabled={saving}
-                  className="size-3.5 shrink-0 accent-primary" onChange={event => setValues(current => ({ ...current, injectPorts: event.target.checked }))} />
+                  className="size-3.5 shrink-0" onChange={event => setValues(current => ({ ...current, injectPorts: event.target.checked }))} />
                 <span>{values.services.length >= 2 && !hasServiceCommands
                   ? <>向总启动命令注入 <code>PORT</code>、<code>BENTO_PORT_&lt;KEY&gt;</code> 和 <code>BENTO_PORTS</code></>
                   : '按启动方式自动适配已填写的端口'}</span>

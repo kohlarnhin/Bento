@@ -1,13 +1,7 @@
 import type { ProjectConfig, ProjectGroup, ProjectStatus } from '../types.ts';
 
-// A fixed palette keeps identities stable across sorting, groups and app restarts.
-const avatarColors = ['#343436', '#3a3a3c', '#414143', '#474749', '#38383a', '#3d3d3f', '#434345', '#4b4b4d', '#3b3b3d', '#454547'];
-export function projectAvatar(name: string) {
-  let hash = 2166136261;
-  for (const character of name.trim().normalize('NFC').toLowerCase()) {
-    hash = Math.imul(hash ^ character.codePointAt(0)!, 16777619) >>> 0;
-  }
-  return { color: avatarColors[hash % avatarColors.length], initial: Array.from(name.trim())[0]?.toLocaleUpperCase() || '?' };
+export function projectInitial(name: string) {
+  return Array.from(name.trim().normalize('NFC'))[0]?.toLocaleUpperCase() || '?';
 }
 
 export function sidebarDensity(projects: readonly Pick<ProjectConfig, 'archived'>[]): 'comfortable' | 'compact' {
@@ -48,6 +42,20 @@ export function sidebarSections(projects: ProjectConfig[], groups: ProjectGroup[
 
 export function sidebarNavigation(projects: ProjectConfig[], groups: ProjectGroup[]) {
   return sidebarSections(projects, groups).filter(section => section.id !== 'archived').flatMap(section => section.projects);
+}
+
+export function focusRailSections(projects: ProjectConfig[], groups: ProjectGroup[], statuses: Record<string, ProjectStatus>, selectedId?: string) {
+  const sections = sidebarSections(projects, groups);
+  const active = sections.filter(section => section.id !== 'archived');
+  const running = active.flatMap(section => section.projects.filter(project =>
+    statuses[project.id] === 'running' || statuses[project.id] === 'starting'));
+  const runningIds = new Set(running.map(project => project.id));
+  const selectedArchive = sections.find(section => section.id === 'archived')?.projects.filter(project => project.id === selectedId) ?? [];
+  return [
+    { id: 'archived', name: '已归档', projects: selectedArchive },
+    { id: 'running', name: '运行中', projects: running },
+    ...active.map(section => ({ ...section, projects: section.projects.filter(project => !runningIds.has(project.id)) })),
+  ].filter(section => section.projects.length > 0);
 }
 
 export function moveProjectOrder(projects: ProjectConfig[], id: string, groupId: string | null, beforeId: string | null, afterId?: string | null) {
