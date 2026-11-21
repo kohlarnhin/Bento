@@ -115,6 +115,45 @@ fn both_cli_formats_use_cwd_and_extract_title_duration_and_distinct_edits() {
 }
 
 #[test]
+fn batch_search_uses_registered_roots_and_assigns_nested_sessions_once() {
+    let fixture = Fixture::new();
+    let claude = fixture.write(AgentKind::Claude, CLAUDE_ID, CLAUDE);
+    let duplicate = fixture.0.join(".claude/projects/duplicate");
+    fs::create_dir_all(&duplicate).unwrap();
+    fs::copy(&claude, duplicate.join(claude.file_name().unwrap())).unwrap();
+    fixture.write(AgentKind::Codex, CODEX_ID, CODEX);
+    let other_id = "383c4fef-fd6e-452a-9130-bdbdea62bc03";
+    fixture.write(
+        AgentKind::Claude,
+        other_id,
+        &CLAUDE
+            .replace(CLAUDE_ID, other_id)
+            .replace(ROOT, "/sample/projects/current-other"),
+    );
+    let mut catalog = fixture.catalog();
+    catalog.refresh();
+    let sessions = catalog.all_project_sessions([
+        ("root", PathBuf::from(ROOT)),
+        ("nested", Path::new(ROOT).join("nested")),
+        ("invalid", PathBuf::new()),
+    ]);
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[0].project_id, "root");
+    assert_eq!(sessions[0].session.reference.id, CLAUDE_ID);
+    assert_eq!(sessions[1].project_id, "nested");
+    assert_eq!(sessions[1].session.reference.id, CODEX_ID);
+    let value = serde_json::to_value(&sessions[1]).unwrap();
+    assert_eq!(value["projectId"], "nested");
+    assert_eq!(value["id"], CODEX_ID);
+    assert_eq!(value["tool"], "codex");
+    let other =
+        catalog.all_project_sessions([("other", PathBuf::from("/sample/projects/current-other"))]);
+    assert_eq!(other.len(), 1);
+    assert_eq!(other[0].session.reference.id, other_id);
+    assert!(catalog.all_project_sessions([]).is_empty());
+}
+
+#[test]
 fn missing_directories_bad_files_and_old_logs_are_ignored() {
     let fixture = Fixture::new();
     let mut catalog = fixture.catalog();
@@ -160,6 +199,9 @@ fn cache_tracks_mtime_and_removals_and_lists_only_the_latest_twenty() {
     catalog.refresh();
     let list = catalog.project_sessions(Path::new(ROOT));
     assert_eq!(list.len(), PROJECT_LIMIT);
+    let searchable = catalog.all_project_sessions([("root", PathBuf::from(ROOT))]);
+    assert_eq!(searchable.len(), 25);
+    assert!(searchable[24].session.reference.id.ends_with("0000"));
     assert!(list[0].reference.id.ends_with("0024"));
     assert!(list[19].reference.id.ends_with("0005"));
     let log = fs::read_to_string(&last)

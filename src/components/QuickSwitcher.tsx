@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Columns2, Focus, FolderPlus, Play, Plus, RefreshCw, Search, Square, Terminal } from 'lucide-react';
 import type { ProjectConfig, ProjectStatus, Snippet } from '../types';
+import type { AgentArgv, ProjectAgentSession } from '../lib/agentSessions';
+import { quickSwitcherResultKey, quickSwitcherSessionOptions } from '../lib/quickSwitcher';
 import { searchCreationActions, searchProjects, substringMatch } from '../lib/sidebarModel';
+import { AgentSessionRow } from './AgentSessionActions';
 import { ProjectAvatar } from './ProjectAvatar';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
 import { Input } from './ui/input';
@@ -19,9 +22,10 @@ function Highlight({ text, indices }: { text: string; indices: number[] }) {
     ? <mark key={run.start} className="bg-transparent font-semibold text-foreground">{run.text}</mark> : run.text)}</>;
 }
 
-export function QuickSwitcher({ projects, statuses, snippets, onRunSnippet, terminalActions, onRescan, onClose, onCreate, onCreateGroup, onSelect, onToggle, onNewTerminal, onRunCommand }: {
+export function QuickSwitcher({ projects, statuses, sessions, snippets, onRunSnippet, terminalActions, onRescan, onClose, onCreate, onCreateGroup, onSelect, onToggle, onNewTerminal, onOpenAgent, onRunCommand }: {
   projects: ProjectConfig[];
   statuses: Record<string, ProjectStatus>;
+  sessions: ProjectAgentSession[];
   snippets: Record<string, Snippet[]>;
   onRunSnippet: (project: ProjectConfig, command: string) => void;
   terminalActions?: { focused: boolean; onFocus: () => void; onSplit: () => void };
@@ -32,14 +36,16 @@ export function QuickSwitcher({ projects, statuses, snippets, onRunSnippet, term
   onSelect: (project: ProjectConfig) => void;
   onToggle: (project: ProjectConfig) => void;
   onNewTerminal: (project: ProjectConfig) => void;
+  onOpenAgent: (projectId: string, argv: AgentArgv) => void;
   onRunCommand: (project: ProjectConfig, command: string) => void;
 }) {
   const [query, setQuery] = useState('');
-  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [selectedId, setSelectedId] = useState<string>();
   const [targetId, setTargetId] = useState<string | null>(null);
   const composing = useRef(false);
   const list = useRef<HTMLDivElement>(null);
   const matches = useMemo(() => searchProjects(projects, query), [projects, query]);
+  const sessionOptions = useMemo(() => quickSwitcherSessionOptions(projects, sessions, query, onOpenAgent), [projects, sessions, query, onOpenAgent]);
   const creationActions = useMemo(() => searchCreationActions(query), [query]);
   const creationFirst = query.trim().length > 0 && creationActions.length > 0;
   const target = matches.find(match => match.project.id === targetId)?.project ?? matches[0]?.project;
@@ -72,30 +78,30 @@ export function QuickSwitcher({ projects, statuses, snippets, onRunSnippet, term
     ...workspaceActions.map(action => ({ ...action, indices: [] as number[] })),
     ...creationActions.map(action => ({ ...action, icon: action.id === 'add-project' ? Plus : FolderPlus, key: action.id === 'add-project' ? '⌘N' : '', run: action.id === 'add-project' ? onCreate : onCreateGroup })),
   ];
-  const count = matches.length + actions.length;
+  const projectOptions = matches.map(match => ({ ...match, id: `project:${match.project.id}`, run: () => onSelect(match.project) }));
+  const options = creationFirst ? [...actions, ...projectOptions, ...sessionOptions] : [...projectOptions, ...sessionOptions, ...actions];
   const projectOffset = creationFirst ? actions.length : 0;
-  const actionOffset = creationFirst ? 0 : matches.length;
-  const activeIndex = Math.min(selectedIndex, Math.max(0, count - 1));
+  const sessionOffset = projectOffset + projectOptions.length;
+  const actionOffset = creationFirst ? 0 : sessionOffset + sessionOptions.length;
+  const activeIndex = Math.max(0, options.findIndex(option => option.id === selectedId));
   const choose = (index: number) => {
-    setSelectedIndex(index);
-    if (index >= projectOffset && index < projectOffset + matches.length) setTargetId(matches[index - projectOffset].project.id);
+    setSelectedId(options[index].id);
+    const project = projectOptions[index - projectOffset]?.project;
+    if (project) setTargetId(project.id);
   };
-  const activate = () => {
-    if (activeIndex >= projectOffset && activeIndex < projectOffset + matches.length) onSelect(matches[activeIndex - projectOffset].project);
-    else actions[activeIndex - actionOffset]?.run();
-  };
-  useEffect(() => { list.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' }); }, [activeIndex]);
-  const projectResults = ((matches.length > 0 || !actions.length) && <div className="h1-form-section" role="group" aria-label="项目">
+  const activeId = options[activeIndex]?.id;
+  useEffect(() => { list.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' }); }, [activeIndex, activeId]);
+  const projectResults = ((matches.length > 0 || (!actions.length && !sessionOptions.length)) && <div className="h1-form-section" role="group" aria-label="项目">
           <p className="h1-group-title px-2.5 pb-1 pt-3">项目 <span className="ml-1 tabular-nums opacity-60">{matches.length}</span></p>
           <div className="h1-group h1-palette-options">
           {!matches.length && <p role="status" className="px-4 py-8 text-center text-sm text-muted-foreground">没有匹配的项目</p>}
-          {matches.map((match, index) => {
+          {projectOptions.map((match, index) => {
             const project = match.project;
             const status = statuses[project.id] || 'stopped';
             const optionIndex = projectOffset + index;
             return <button key={project.id} role="option" tabIndex={-1} id={`quick-option-${optionIndex}`} aria-selected={activeIndex === optionIndex}
               data-quick-project={project.id} className="choice-row flex w-full items-center gap-3 px-3 py-2 text-left outline-none"
-              onMouseDown={event => event.preventDefault()} onMouseMove={() => { if (activeIndex !== optionIndex) choose(optionIndex); }} onClick={() => onSelect(project)}>
+              onMouseDown={event => event.preventDefault()} onMouseMove={() => { if (activeIndex !== optionIndex) choose(optionIndex); }} onClick={match.run}>
               <ProjectAvatar project={project} status={status} className="size-7 rounded-[7px] text-xs" />
               <span className="min-w-0 flex-1">
                 <span className="flex items-center gap-2 text-[13px]"><span className="truncate"><Highlight text={project.displayName || project.name} indices={match.name} /></span>
@@ -112,6 +118,22 @@ export function QuickSwitcher({ projects, statuses, snippets, onRunSnippet, term
           })}
           </div>
         </div>);
+  const sessionResults = sessionOptions.length > 0 && <div className="h1-form-section" role="group" aria-label="AI 会话">
+    <p className="h1-group-title px-2.5 pb-1 pt-3">AI 会话</p>
+    <div className="h1-group h1-palette-options">
+      {sessionOptions.map(({ id, project, session, indices, run }, index) => {
+        const optionIndex = sessionOffset + index;
+        return <button key={id} role="option" tabIndex={-1} id={`quick-option-${optionIndex}`} aria-selected={activeIndex === optionIndex}
+          data-quick-session={session.tool} title={session.title} onMouseDown={event => event.preventDefault()}
+          onMouseMove={() => { if (activeIndex !== optionIndex) choose(optionIndex); }} onClick={run}
+          className="choice-row flex w-full items-center gap-3 px-3 py-2 text-left text-[13px] outline-none [&>svg]:mx-[7px]">
+          <AgentSessionRow session={session} projectName={project.displayName || project.name}>
+            <Highlight text={session.title} indices={indices} />
+          </AgentSessionRow>
+        </button>;
+      })}
+    </div>
+  </div>;
   const actionResults = (actions.length > 0 && <div className="h1-form-section" role="group" aria-label="操作">
           <p className="h1-group-title px-2.5 pb-1 pt-3">操作</p>
           <div className="h1-group h1-palette-options">
@@ -143,27 +165,25 @@ export function QuickSwitcher({ projects, statuses, snippets, onRunSnippet, term
         } else if (command && (event.key === 'Enter' || event.key.toLowerCase() === 't')) {
           event.preventDefault(); event.stopPropagation();
           if (!event.repeat && target) (event.key === 'Enter' ? onToggle : onNewTerminal)(target);
-        } else if (!event.metaKey && !event.ctrlKey && !event.altKey && ['ArrowUp', 'ArrowDown'].includes(event.key)) {
+        } else if (!event.metaKey && !event.ctrlKey && !event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown' || (event.key === 'Enter' && !event.shiftKey))) {
           event.preventDefault(); event.stopPropagation();
-          if (count) choose((activeIndex + (event.key === 'ArrowDown' ? 1 : -1) + count) % count);
-        } else if (event.key === 'Enter' && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey) {
-          event.preventDefault(); event.stopPropagation();
-          if (!event.repeat) activate();
+          const next = quickSwitcherResultKey(event.key, event.repeat, activeIndex, options);
+          if (next !== undefined) choose(next);
         }
       }}>
-      <DialogHeader className="sr-only"><DialogTitle>快速切换项目</DialogTitle><DialogDescription>搜索名称、路径或端口，使用方向键选择项目或操作。</DialogDescription></DialogHeader>
+      <DialogHeader className="sr-only"><DialogTitle>快速切换</DialogTitle><DialogDescription>搜索项目或 AI 会话，使用方向键选择结果或操作。</DialogDescription></DialogHeader>
       <div className="flex items-center gap-3 border-b px-4 py-3">
         <Search className="size-[18px] shrink-0 text-muted-foreground" />
-        <Input autoFocus role="combobox" aria-label="快速切换项目" aria-expanded="true" aria-autocomplete="list" aria-controls="quick-switcher-results"
-          aria-activedescendant={count ? `quick-option-${activeIndex}` : undefined} data-quick-switcher-input
-          placeholder="搜索项目名称、路径或端口…" value={query}
+        <Input autoFocus role="combobox" aria-label="快速切换" aria-expanded="true" aria-autocomplete="list" aria-controls="quick-switcher-results"
+          aria-activedescendant={options.length ? `quick-option-${activeIndex}` : undefined} data-quick-switcher-input
+          placeholder="搜索项目名称、路径、端口或 AI 会话…" value={query}
           className="h-8 min-w-0 border-0 bg-transparent px-0 text-base shadow-none focus-visible:ring-0"
           onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }}
-          onChange={event => { setQuery(event.target.value); setSelectedIndex(0); setTargetId(null); }} />
+          onChange={event => { setQuery(event.target.value); setSelectedId(undefined); setTargetId(null); }} />
         <button onClick={onClose} className="button-neutral rounded-full px-2 py-0.5 text-[10px]" aria-label="关闭快速切换">esc</button>
       </div>
-      <div ref={list} id="quick-switcher-results" role="listbox" aria-label="项目与操作" className="max-h-[min(58vh,460px)] overflow-y-auto px-3 pb-3">
-        {creationFirst ? <>{actionResults}{projectResults}</> : <>{projectResults}{actionResults}</>}
+      <div ref={list} id="quick-switcher-results" role="listbox" aria-label="项目、AI 会话与操作" className="max-h-[min(58vh,460px)] overflow-y-auto px-3 pb-3">
+        {creationFirst ? <>{actionResults}{projectResults}{sessionResults}</> : <>{projectResults}{sessionResults}{actionResults}</>}
       </div>
       <footer className="h1-form-footer flex flex-wrap gap-x-5 gap-y-1 px-4 py-3 text-[11px] text-muted-foreground">
         <span>↑↓ 选择</span><span>↵ 打开</span><span>⌘↵ 启动 / 停止</span><span>⌘T 新终端</span><span>⌘N 添加</span><span>Esc 关闭</span>

@@ -4,14 +4,14 @@ use super::{
 };
 use crate::processes::{process_cwd, quote_shell};
 use crate::projects::EnvVar;
-use crate::terminal_agent::sessions::{Catalog, SessionRef, SessionSummary};
+use crate::terminal_agent::sessions::{Catalog, ProjectSessionSummary, SessionRef, SessionSummary};
 use crate::terminal_agent::{AgentKind, AgentProcess};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CString, OsString};
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
@@ -367,6 +367,30 @@ pub async fn terminal_agent_menu(
     })
     .await
     .map_err(|error| format!("读取 AI 会话失败：{error}"))?
+}
+
+#[tauri::command]
+pub async fn terminal_agent_project_sessions(
+    state: State<'_, TerminalManager>,
+) -> Result<Vec<ProjectSessionSummary>, String> {
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let projects = crate::get_projects_sync()?.projects;
+        if projects.is_empty() {
+            return Ok(Vec::new());
+        }
+        let roots = projects.iter().map(|project| {
+            (
+                project.id.as_str(),
+                PathBuf::from(crate::expand_tilde(&project.path)),
+            )
+        });
+        let mut catalog = lock(&manager.agent_catalog);
+        catalog.refresh();
+        Ok(catalog.all_project_sessions(roots))
+    })
+    .await
+    .map_err(|error| format!("读取项目的 AI 会话失败：{error}"))?
 }
 
 #[tauri::command]

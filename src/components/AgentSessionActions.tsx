@@ -1,7 +1,27 @@
 import { Sparkle, SquareTerminal } from 'lucide-react';
+import type { ReactNode } from 'react';
 import { agentArgv, agentSessionDate, type AgentArgv, type AgentHistorySession, type AgentMenuData } from '../lib/agentSessions';
 import { durationText } from '../lib/dashboard';
 import { agentNames } from '../lib/terminalUsability';
+
+export function AgentSessionRow({ session, projectName, children }: {
+  session: AgentHistorySession;
+  projectName?: string;
+  children?: ReactNode;
+}) {
+  return <>
+    <Sparkle size={14} className="shrink-0 text-muted-foreground" aria-hidden="true" />
+    <span className="min-w-0 flex-1">
+      <span className="block truncate">{children ?? session.title}</span>
+      <span className="terminal-agent-session-meta block truncate">
+        {projectName && `${projectName} · `}{agentNames[session.tool]} · {agentSessionDate(session.lastAt)}
+      </span>
+    </span>
+    <span className="terminal-agent-session-meta shrink-0 whitespace-nowrap">
+      {durationText(session.durationMs)}{session.fileCount != null && ` · ${session.fileCount} 个文件`}
+    </span>
+  </>;
+}
 
 export function AgentSessionMenuItems({ data, atLimit, onTerminal, onAgent }: {
   data?: AgentMenuData;
@@ -26,14 +46,7 @@ export function AgentSessionMenuItems({ data, atLimit, onTerminal, onAgent }: {
           {sessions.map(session => <button key={`${session.tool}:${session.id}`} type="button" role="menuitem"
             className="terminal-agent-session-option" title={session.title} data-agent-session-option
             onClick={() => onAgent(agentArgv(session.tool, session.id))}>
-            <Sparkle aria-hidden="true" />
-            <span className="min-w-0 flex-1">
-              <span className="block truncate">{session.title}</span>
-              <span className="terminal-agent-session-meta block">{agentNames[session.tool]} · {agentSessionDate(session.lastAt)}</span>
-            </span>
-            <span className="terminal-agent-session-meta whitespace-nowrap">
-              {durationText(session.durationMs)}{session.fileCount != null && ` · ${session.fileCount} 个文件`}
-            </span>
+            <AgentSessionRow session={session} />
           </button>)}
         </div>
       </div>

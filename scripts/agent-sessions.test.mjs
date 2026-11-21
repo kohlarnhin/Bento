@@ -29,6 +29,7 @@ const hooks = registerHooks({
 });
 const { AgentSessionMenuItems, AgentRecoveryCard } = await import('../src/components/AgentSessionActions.tsx');
 const { activateAgentTerminal, agentSessionDate } = await import('../src/lib/agentSessions.ts');
+const { quickSwitcherResultKey, quickSwitcherSessionOptions } = await import('../src/lib/quickSwitcher.ts');
 hooks.deregister();
 
 const claude = {
@@ -109,4 +110,64 @@ test('the recovery card continues in the original tab or dismisses without resum
   await continueButton.props.onClick();
   assert.deepEqual(invoked, [{ command: 'terminal_agent_start', args: { projectId: 'project', argv: ['claude', '--resume', claude.id], recovery } }]);
   assert.deepEqual(selected, [{ ...recovery, projectId: 'project' }]);
+});
+
+const projects = [{ id: 'records', name: 'Records' }, { id: 'reports', name: 'Reports' }];
+const paletteOptions = (query, sessions, open = () => {}) => quickSwitcherSessionOptions(projects, sessions, query, open);
+
+test('empty and whitespace-only palette queries omit history even after the index has loaded', () => {
+  const sessions = [{ ...claude, projectId: 'records' }, { ...codex, projectId: 'reports' }];
+  assert.deepEqual(paletteOptions('', sessions), []);
+  assert.deepEqual(paletteOptions('   ', sessions), []);
+});
+
+test('palette matches session titles with project-name-search Unicode highlights across registered projects', () => {
+  const sessions = [
+    { ...claude, projectId: 'records', title: '𠀀导出 CSV' },
+    { ...codex, projectId: 'reports', title: '导出 CSV 历史' },
+    { ...claude, projectId: 'removed', title: '导出 CSV' },
+    { ...codex, projectId: 'records', title: '调整字段', cwd: '/local/CSV' },
+  ];
+  const options = paletteOptions(' cSv ', sessions);
+  assert.deepEqual(options.map(({ project }) => project.id), ['records', 'reports']);
+  assert.deepEqual(options.map(({ indices }) => indices), [[4, 5, 6], [3, 4, 5]]);
+  assert.deepEqual(paletteOptions('𠀀 cV', sessions)[0].indices, [0, 4, 6]);
+  assert.deepEqual(paletteOptions('Reports', sessions), []);
+  assert.deepEqual(paletteOptions('Codex', sessions), []);
+});
+
+test('palette limits matching history to the newest eight across projects even when a newer match is fuzzy', () => {
+  const sessions = Array.from({ length: 12 }, (_, index) => ({
+    ...claude, id: String(index), projectId: projects[index % 2].id, lastAt: index * 100,
+    title: index === 11 ? 'daily account totals' : 'dat report',
+  }));
+  sessions.push({ ...codex, projectId: 'reports', title: 'CSV', lastAt: 2000 });
+  sessions.push({ ...codex, projectId: 'removed', title: 'dat', lastAt: 3000 });
+  const options = paletteOptions('dat', sessions);
+  assert.deepEqual(options.map(({ session }) => session.id), ['11', '10', '9', '8', '7', '6', '5', '4']);
+});
+
+test('palette arrows cross groups and Enter calls the same resume path as the plus menu, selecting the returned tab', async t => {
+  const invoked = [], selected = [], pending = [];
+  const running = { projectId: 'records', slot: 2, sessionId: 'running-tab', alive: true };
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { __TAURI_INTERNALS__: {
+    invoke: async (command, args) => { invoked.push({ command, args }); return running; },
+  } } });
+  t.after(() => { delete globalThis.window; });
+
+  const openAgent = (projectId, argv) => pending.push(activateAgentTerminal(projectId, argv, tab => selected.push(tab)));
+  const session = { ...codex, projectId: 'reports' };
+  const options = [{ run: () => assert.fail('project activation') }, ...paletteOptions('CSV', [session], openAgent)];
+  const index = quickSwitcherResultKey('ArrowDown', false, 0, options);
+  assert.equal(index, 1);
+  assert.equal(quickSwitcherResultKey('ArrowUp', false, index, options), 0);
+  quickSwitcherResultKey('Enter', false, index, options);
+  quickSwitcherResultKey('Enter', true, index, options);
+  const menuRow = buttons(menu({ sessions: [session], tools: [] }, argv => openAgent('reports', argv)))[1];
+  menuRow.props.onClick();
+  await Promise.all(pending);
+
+  const invocation = { command: 'terminal_agent_start', args: { projectId: 'reports', argv: ['codex', 'resume', codex.id], recovery: undefined } };
+  assert.deepEqual(invoked, [invocation, invocation]);
+  assert.deepEqual(selected, [running, running]);
 });

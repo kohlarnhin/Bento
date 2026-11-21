@@ -28,7 +28,7 @@ import { Toaster } from './components/ui/sonner';
 import { MotionPresence } from './components/ui/motion-presence';
 import { Empty, EmptyTitle, EmptyDescription } from './components/ui/empty';
 import { createTerminal, getProjectTerminalSlots, getTerminal, getTerminalSnapshot, initTerminalRegistry, registerTerminalResult, subscribeTerminals, takeRestoredSlot, terminalKey } from './lib/terminalRegistry';
-import { activateAgentTerminal, useAgentRecoveries, type AgentArgv, type AgentRecoveryTarget } from './lib/agentSessions';
+import { activateAgentTerminal, useAgentRecoveries, type AgentArgv, type AgentRecoveryTarget, type ProjectAgentSession } from './lib/agentSessions';
 import { projectLogs } from './lib/useProjectLogs';
 import { recordRender } from './lib/renderMetrics';
 import { DEFAULT_TERMINAL_FONT_SIZE, TERMINAL_THEME } from './lib/terminalAppearance';
@@ -145,6 +145,8 @@ export function App() {
     try { localStorage.setItem(SIDEBAR_FILTER_KEY, filter); } catch { /* In-memory fallback. */ }
   }, [filter]);
   const [quickOpen, setQuickOpen] = useState(false);
+  const [quickSessions, setQuickSessions] = useState<ProjectAgentSession[]>([]);
+  const loadingQuickSessions = useRef(false);
   const quickOpenRef = useRef(quickOpen);
   quickOpenRef.current = quickOpen;
   const [groupForm, setGroupForm] = useState<{ action: 'create' | 'rename' | 'delete'; group?: ProjectGroup } | null>(null);
@@ -314,6 +316,11 @@ export function App() {
     terminalControls.current?.closeFind();
     dialogOpen.current = true;
     setQuickOpen(true);
+    if (!loadingQuickSessions.current) {
+      loadingQuickSessions.current = true;
+      void invoke<ProjectAgentSession[]>('terminal_agent_project_sessions').then(setQuickSessions).catch(() => {})
+        .finally(() => { loadingQuickSessions.current = false; });
+    }
   }, []);
   const closeQuickSwitcher = useCallback(() => { setQuickOpen(false); quickOpenRef.current = false; dialogOpen.current = false; }, []);
   const openSettings = useCallback(() => {
@@ -374,6 +381,13 @@ export function App() {
       creatingTerminals.current.delete(projectId);
     }
   }, [dismissAgentRecovery, selectTerminalSlot]);
+
+  const openQuickAgent = useCallback((projectId: string, argv: AgentArgv) => {
+    closeQuickSwitcher();
+    setSearchQuery('');
+    setFilter('all');
+    void openAgent(projectId, argv);
+  }, [closeQuickSwitcher, openAgent]);
 
   useEffect(() => {
     const captured = new Set<string>();
@@ -759,6 +773,7 @@ export function App() {
       .catch(error => console.warn('Bento traffic lights:', error));
   }, [focusActive]);
   const projectOrder = useMemo(() => sidebarNavigation(projects, groups), [projects, groups]);
+  const quickProjects = useMemo(() => [...projectOrder, ...projects.filter(project => project.archived)], [projectOrder, projects]);
   const slots = selectedProject ? getProjectTerminalSlots(selectedProject.id, terminals) : [];
 
   return (
@@ -871,7 +886,7 @@ export function App() {
         </main>
 
         <UpdateDialog updater={updater} projects={managedProjects} terminalCount={terminalCount} />
-        <MotionPresence>{quickOpen && <QuickSwitcher projects={[...projectOrder, ...projects.filter(project => project.archived)]} statuses={projectStatuses}
+        <MotionPresence>{quickOpen && <QuickSwitcher projects={quickProjects} statuses={projectStatuses} sessions={quickSessions} onOpenAgent={openQuickAgent}
           snippets={snippets} onRunSnippet={(project, command) => {
             closeQuickSwitcher(); void handleRunCommand(project.id, command, true);
           }}

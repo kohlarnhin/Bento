@@ -55,6 +55,14 @@ pub struct SessionSummary {
     pub file_count: Option<usize>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSessionSummary {
+    pub project_id: String,
+    #[serde(flatten)]
+    pub session: SessionSummary,
+}
+
 struct IndexedSession {
     summary: SessionSummary,
     canonical_cwd: PathBuf,
@@ -144,20 +152,45 @@ impl Catalog {
             .sessions()
             .filter(|(session, _)| project.contains(session))
             .collect();
-        matches.sort_unstable_by(|(left, left_mtime), (right, right_mtime)| {
-            right
-                .summary
-                .last_at
-                .cmp(&left.summary.last_at)
-                .then(right_mtime.cmp(left_mtime))
-                .then(left.summary.reference.id.cmp(&right.summary.reference.id))
-        });
+        matches.sort_unstable_by(|left, right| most_recent(*left, *right));
         let mut seen = HashSet::new();
         matches
             .into_iter()
             .filter(|(session, _)| seen.insert(&session.summary.reference))
             .take(PROJECT_LIMIT)
             .map(|(session, _)| session.summary.clone())
+            .collect()
+    }
+
+    pub fn all_project_sessions<'a>(
+        &self,
+        projects: impl IntoIterator<Item = (&'a str, PathBuf)>,
+    ) -> Vec<ProjectSessionSummary> {
+        let roots: Vec<_> = projects
+            .into_iter()
+            .map(|(id, path)| (id, ProjectPath::new(&path)))
+            .collect();
+        let mut matches: Vec<_> = self
+            .sessions()
+            .filter_map(|(session, modified)| {
+                let cwd = absolute_path(&session.summary.cwd);
+                // A session in a nested project belongs to its closest registered root.
+                let (_, project_id) = roots
+                    .iter()
+                    .filter_map(|(id, root)| Some((root.matching_depth(session, &cwd)?, *id)))
+                    .max_by(|left, right| left.0.cmp(&right.0).then(right.1.cmp(left.1)))?;
+                Some(((session, modified), project_id))
+            })
+            .collect();
+        matches.sort_unstable_by(|left, right| most_recent(left.0, right.0));
+        let mut seen = HashSet::new();
+        matches
+            .into_iter()
+            .filter(|((session, _), _)| seen.insert(&session.summary.reference))
+            .map(|((session, _), project_id)| ProjectSessionSummary {
+                project_id: project_id.into(),
+                session: session.summary.clone(),
+            })
             .collect()
     }
 
@@ -197,6 +230,22 @@ impl Catalog {
     }
 }
 
+fn most_recent(left: (&IndexedSession, u64), right: (&IndexedSession, u64)) -> std::cmp::Ordering {
+    right
+        .0
+        .summary
+        .last_at
+        .cmp(&left.0.summary.last_at)
+        .then(right.1.cmp(&left.1))
+        .then(
+            left.0
+                .summary
+                .reference
+                .id
+                .cmp(&right.0.summary.reference.id),
+        )
+}
+
 struct ProjectPath {
     original: PathBuf,
     canonical: PathBuf,
@@ -213,6 +262,17 @@ impl ProjectPath {
     fn contains(&self, session: &IndexedSession) -> bool {
         session.canonical_cwd.starts_with(&self.canonical)
             || absolute_path(&session.summary.cwd).starts_with(&self.original)
+    }
+
+    fn matching_depth(&self, session: &IndexedSession, cwd: &Path) -> Option<usize> {
+        [
+            (&self.canonical, session.canonical_cwd.as_path()),
+            (&self.original, cwd),
+        ]
+        .into_iter()
+        .filter(|(root, cwd)| root.is_absolute() && cwd.starts_with(root))
+        .map(|(root, _)| root.components().count())
+        .max()
     }
 }
 

@@ -14,6 +14,10 @@ export interface AgentHistorySession {
   fileCount: number | null;
 }
 
+export interface ProjectAgentSession extends AgentHistorySession {
+  projectId: string;
+}
+
 export type AgentArgv = ['claude' | 'codex'] | ['claude', '--resume', string] | ['codex', 'resume', string];
 export type AgentRecoveryTarget = { slot: number; sessionId: string };
 export type OpenAgent = (argv: AgentArgv, recovery?: AgentRecoveryTarget) => Promise<void>;

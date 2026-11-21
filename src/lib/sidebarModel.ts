@@ -137,7 +137,7 @@ export function substringMatch(text: string, query: string, preferLastSegment = 
   return best;
 }
 
-function nameMatch(text: string, query: string) {
+export function nameMatch(text: string, query: string) {
   const continuous = substringMatch(text, query);
   if (continuous) return { ...continuous, rank: continuous.indices[0] === 0 ? 0 : 1 };
   const subsequence = fuzzyMatch(text, query);

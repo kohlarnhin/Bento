@@ -620,6 +620,7 @@ pub fn run() {
         terminal::terminal_restart,
         terminal::terminal_create,
         terminal::agent_sessions::terminal_agent_menu,
+        terminal::agent_sessions::terminal_agent_project_sessions,
         terminal::agent_sessions::terminal_agent_recoveries,
         terminal::agent_sessions::terminal_agent_start,
         terminal::terminal_close,
