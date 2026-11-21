@@ -49,15 +49,22 @@ pub fn now_secs() -> u64 {
         .as_secs()
 }
 
-pub fn replay(terminal: &SavedTerminal, saved_at: u64) -> String {
-    let history = bounded_history(&terminal.history).replace('\n', "\r\n");
+pub fn replay(history: &str, saved_at: u64) -> String {
+    let history = bounded_history(history).replace('\n', "\r\n");
+    format!(
+        "{history}\r\n\x1b[90m{}\x1b[0m\r\n",
+        restore_marker(saved_at)
+    )
+}
+
+pub fn restore_marker(saved_at: u64) -> String {
     let mut time: libc::tm = unsafe { std::mem::zeroed() };
     let timestamp = saved_at as libc::time_t;
     unsafe {
         libc::localtime_r(&timestamp, &mut time);
     }
     format!(
-        "{history}\r\n\x1b[90m—— 已恢复 · 上次会话 {:02}:{:02} ——\x1b[0m\r\n",
+        "—— 已恢复 · 上次会话 {:02}:{:02} ——",
         time.tm_hour, time.tm_min
     )
 }
@@ -155,12 +162,20 @@ mod tests {
 
     #[test]
     fn older_tabs_load_and_the_ai_extension_stores_only_tool_and_session_id() {
-        let mut terminal: SavedTerminal = serde_json::from_str(r#"{"slot":1,"cwd":"/tmp/project","title":null,"history":""}"#).unwrap();
+        let mut terminal: SavedTerminal =
+            serde_json::from_str(r#"{"slot":1,"cwd":"/tmp/project","title":null,"history":""}"#)
+                .unwrap();
         assert!(terminal.agent_session.is_none());
-        assert!(serde_json::to_value(&terminal).unwrap().get("agent_session").is_none());
+        assert!(serde_json::to_value(&terminal)
+            .unwrap()
+            .get("agent_session")
+            .is_none());
         let id = "383c4fef-fd6e-452a-9130-bdbdea62bc01";
         terminal.agent_session = SessionRef::new(crate::terminal_agent::AgentKind::Claude, id);
-        assert_eq!(serde_json::to_value(&terminal).unwrap()["agent_session"], serde_json::json!({"tool":"claude","id":id}));
+        assert_eq!(
+            serde_json::to_value(&terminal).unwrap()["agent_session"],
+            serde_json::json!({"tool":"claude","id":id})
+        );
     }
 
     #[test]
@@ -187,7 +202,7 @@ mod tests {
         let mut reader = Store::new(directory.clone(), true);
         assert_eq!(reader.load().unwrap(), written);
         let loaded = &written["project"];
-        let playback = replay(&loaded.terminals[0], loaded.saved_at);
+        let playback = replay(&loaded.terminals[0].history, loaded.saved_at);
         assert!(playback.contains("last\r\n\x1b[90m—— 已恢复 · 上次会话 "));
         assert!(!playback.contains("133;"));
         terminal.history = bounded_history(&"字".repeat(MAX_BYTES));

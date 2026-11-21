@@ -9,8 +9,12 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod cache;
 #[cfg(test)]
 mod tests;
+mod title;
+
+pub use cache::SharedCatalog;
 
 const HEAD_LINES: usize = 96;
 const HEAD_BYTES: u64 = 256 * 1024;
@@ -42,7 +46,7 @@ impl SessionRef {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSummary {
     #[serde(flatten)]
@@ -63,17 +67,38 @@ pub struct ProjectSessionSummary {
     pub session: SessionSummary,
 }
 
+#[derive(Clone, Deserialize, Serialize)]
 struct IndexedSession {
     summary: SessionSummary,
     canonical_cwd: PathBuf,
+    evidence: SessionEvidence,
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+struct SessionEvidence {
+    user_messages: Option<usize>,
+    duration_ms: Option<u64>,
+    file_edit: Option<bool>,
+}
+
+impl IndexedSession {
+    fn in_history(&self, protected: &HashSet<SessionRef>) -> bool {
+        protected.contains(&self.summary.reference)
+            || !matches!(
+                (self.evidence.user_messages, self.evidence.duration_ms, self.evidence.file_edit),
+                (Some(1), Some(duration), Some(false)) if duration < 60_000
+            )
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
 struct CachedFile {
     modified: SystemTime,
     len: u64,
     parsed: Option<IndexedSession>,
 }
 
+#[derive(Clone)]
 pub struct Catalog {
     home: Option<PathBuf>,
     files: HashMap<PathBuf, CachedFile>,
@@ -87,18 +112,19 @@ impl Catalog {
         }
     }
 
-    pub fn refresh(&mut self) {
-        self.refresh_at(unix_millis(SystemTime::now()));
+    pub fn refresh(&mut self) -> bool {
+        self.refresh_at(unix_millis(SystemTime::now()))
     }
 
-    fn refresh_at(&mut self, now: u64) {
+    fn refresh_at(&mut self, now: u64) -> bool {
         let Some(home) = &self.home else {
-            return;
+            return false;
         };
         let cutoff = now.saturating_sub(RECENT);
         let claude: Vec<_> = children(&home.join(".claude/projects"), true).collect();
         let codex = codex_days(&home.join(".codex/sessions"), cutoff);
         let mut seen = HashSet::new();
+        let mut changed = false;
         for (tool, dirs) in [(AgentKind::Claude, claude), (AgentKind::Codex, codex)] {
             for directory in dirs {
                 for entry in children(&directory.path(), false) {
@@ -121,23 +147,25 @@ impl Catalog {
                         .get(&path)
                         .is_none_or(|file| file.modified != modified || file.len != len)
                     {
-                        let parsed = read_session(tool, &path, len, unix_millis(modified))
-                            .ok()
-                            .flatten();
-                        self.files.insert(
-                            path.clone(),
-                            CachedFile {
-                                modified,
-                                len,
-                                parsed,
-                            },
-                        );
+                        if let Ok(parsed) = read_session(tool, &path, len, unix_millis(modified)) {
+                            self.files.insert(
+                                path.clone(),
+                                CachedFile {
+                                    modified,
+                                    len,
+                                    parsed,
+                                },
+                            );
+                            changed = true;
+                        }
                     }
                     seen.insert(path);
                 }
             }
         }
+        let before = self.files.len();
         self.files.retain(|path, _| seen.contains(path));
+        changed || self.files.len() != before
     }
 
     fn sessions(&self) -> impl Iterator<Item = (&IndexedSession, u64)> {
@@ -146,11 +174,15 @@ impl Catalog {
             .filter_map(|file| Some((file.parsed.as_ref()?, unix_millis(file.modified))))
     }
 
-    pub fn project_sessions(&self, project: &Path) -> Vec<SessionSummary> {
+    pub fn project_sessions(
+        &self,
+        project: &Path,
+        protected: &HashSet<SessionRef>,
+    ) -> Vec<SessionSummary> {
         let project = ProjectPath::new(project);
         let mut matches: Vec<_> = self
             .sessions()
-            .filter(|(session, _)| project.contains(session))
+            .filter(|(session, _)| project.contains(session) && session.in_history(protected))
             .collect();
         matches.sort_unstable_by(|left, right| most_recent(*left, *right));
         let mut seen = HashSet::new();
@@ -165,6 +197,7 @@ impl Catalog {
     pub fn all_project_sessions<'a>(
         &self,
         projects: impl IntoIterator<Item = (&'a str, PathBuf)>,
+        protected: &HashSet<SessionRef>,
     ) -> Vec<ProjectSessionSummary> {
         let roots: Vec<_> = projects
             .into_iter()
@@ -172,6 +205,7 @@ impl Catalog {
             .collect();
         let mut matches: Vec<_> = self
             .sessions()
+            .filter(|(session, _)| session.in_history(protected))
             .filter_map(|(session, modified)| {
                 let cwd = absolute_path(&session.summary.cwd);
                 // A session in a nested project belongs to its closest registered root.
@@ -421,9 +455,14 @@ struct Parser {
     reference: Option<SessionRef>,
     cwd: Option<PathBuf>,
     title: Option<String>,
+    fallback_title: Option<String>,
     first: Option<u64>,
     last: Option<u64>,
     files: HashSet<String>,
+    user_messages: usize,
+    file_edit: bool,
+    evidence_known: bool,
+    last_codex_user: Option<(bool, u64, String)>,
 }
 
 impl Parser {
@@ -436,34 +475,72 @@ impl Parser {
             reference,
             cwd: None,
             title: None,
+            fallback_title: None,
             first: None,
             last: None,
             files: HashSet::new(),
+            user_messages: 0,
+            file_edit: false,
+            evidence_known: true,
+            last_codex_user: None,
         }
     }
 
     fn line(&mut self, line: &[u8]) {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            return;
+        }
         let Ok(value) = serde_json::from_slice::<Value>(line) else {
+            self.evidence_known = false;
             return;
         };
         let entry_type = value["type"].as_str().unwrap_or_default();
+        if entry_type.is_empty() {
+            self.evidence_known = false;
+        }
+        let recorded = value["timestamp"].as_str().and_then(timestamp);
         match self.tool {
             AgentKind::Claude => {
-                if !self.claude_id(value["sessionId"].as_str())
-                    || value["isSidechain"].as_bool() == Some(true)
-                {
+                if value["isSidechain"].as_bool() == Some(true) {
+                    return;
+                }
+                let session_id = value["sessionId"].as_str();
+                if !self.claude_id(session_id) {
+                    if session_id.is_none() && matches!(entry_type, "user" | "assistant") {
+                        self.evidence_known = false;
+                    }
                     return;
                 }
                 self.set_cwd(value["cwd"].as_str());
-                if self.title.is_none()
-                    && entry_type == "user"
+                let content = &value["message"]["content"];
+                if matches!(entry_type, "user" | "assistant") && recorded.is_none() {
+                    self.evidence_known = false;
+                }
+                if entry_type == "user"
                     && value["isMeta"].as_bool() != Some(true)
+                    && value["isCompactSummary"].as_bool() != Some(true)
                 {
-                    self.title = message_title(&value["message"]["content"], "text");
+                    self.record_user(user_content(content, "text"), None, recorded);
                 }
                 if entry_type == "assistant" {
-                    self.files
-                        .extend(claude_files(&value["message"]["content"]).map(str::to_owned));
+                    self.files.extend(claude_files(content).map(str::to_owned));
+                    if let Some(blocks) = content.as_array() {
+                        for block in blocks {
+                            if block["type"].as_str() == Some("tool_use") {
+                                match block["name"].as_str() {
+                                    Some("Edit" | "Write" | "MultiEdit" | "NotebookEdit") => {
+                                        self.file_edit = true
+                                    }
+                                    Some(_) => (),
+                                    None => self.evidence_known = false,
+                                }
+                            } else if block["type"].as_str().is_none() {
+                                self.evidence_known = false;
+                            }
+                        }
+                    } else if !content.is_string() {
+                        self.evidence_known = false;
+                    }
                 }
             }
             AgentKind::Codex => {
@@ -474,28 +551,93 @@ impl Parser {
                         .as_str()
                         .and_then(|id| SessionRef::new(self.tool, id));
                     self.set_cwd(payload["cwd"].as_str());
-                    self.record_time(payload["timestamp"].as_str());
+                    self.record_time(payload["timestamp"].as_str().and_then(timestamp));
                 }
                 if self.reference.is_none() {
                     return;
                 }
-                if self.title.is_none() {
-                    self.title = match (entry_type, payload_type) {
-                        ("response_item", "message")
-                            if payload["role"].as_str() == Some("user") =>
-                        {
-                            message_title(&payload["content"], "input_text")
+                if matches!(entry_type, "event_msg" | "response_item")
+                    && (recorded.is_none() || payload_type.is_empty())
+                {
+                    self.evidence_known = false;
+                }
+                match (entry_type, payload_type) {
+                    ("response_item", "message") if payload["role"].as_str() == Some("user") => {
+                        self.record_user(
+                            user_content(&payload["content"], "input_text"),
+                            Some(false),
+                            recorded,
+                        );
+                    }
+                    ("response_item", "message") if !payload["role"].is_string() => {
+                        self.evidence_known = false;
+                    }
+                    ("event_msg", "user_message") => {
+                        let content = payload["message"].as_str().map(|text| {
+                            let images = ["images", "local_images"].into_iter().any(|key| {
+                                payload[key]
+                                    .as_array()
+                                    .is_some_and(|items| !items.is_empty())
+                            });
+                            (text.to_owned(), images)
+                        });
+                        self.record_user(content, Some(true), recorded);
+                    }
+                    ("response_item", "custom_tool_call" | "function_call") => {
+                        match payload["name"].as_str() {
+                            Some(
+                                "apply_patch" | "write_file" | "edit_file" | "create_file"
+                                | "delete_file",
+                            ) => self.file_edit = true,
+                            Some(_) => (),
+                            None => self.evidence_known = false,
                         }
-                        ("event_msg", "user_message") => {
-                            payload["message"].as_str().and_then(title)
-                        }
-                        _ => None,
-                    };
+                    }
+                    ("event_msg", "patch_apply_begin" | "patch_apply_end") => self.file_edit = true,
+                    _ => (),
                 }
                 collect_codex_files(entry_type, payload_type, payload, &mut self.files);
             }
         }
-        self.record_time(value["timestamp"].as_str());
+        self.record_time(recorded);
+    }
+
+    fn record_user(
+        &mut self,
+        content: Option<(String, bool)>,
+        codex_event: Option<bool>,
+        recorded: Option<u64>,
+    ) {
+        let Some((raw, attached)) = content else {
+            self.evidence_known = false;
+            return;
+        };
+        let body = title::strip_wrappers(&raw).unwrap_or_default();
+        if !attached && !title::user_text(&body) {
+            return;
+        }
+        if self.title.is_none() {
+            self.title = title::clean_title(&body);
+            if self.fallback_title.is_none() {
+                self.fallback_title = title::legacy_title(&body);
+            }
+        }
+        if let (Some(event), Some(time)) = (codex_event, recorded) {
+            // Older Codex logs may record the same turn as both a response item and an event.
+            let text = body.trim();
+            if self
+                .last_codex_user
+                .as_ref()
+                .is_some_and(|(previous, at, body)| {
+                    *previous != event && time.abs_diff(*at) <= 1_000 && body == text
+                })
+            {
+                self.last_codex_user = None;
+                return;
+            }
+            self.last_codex_user = Some((event, time, text.to_owned()));
+        }
+        self.user_messages += 1;
     }
 
     fn claude_id(&self, id: Option<&str>) -> bool {
@@ -513,8 +655,8 @@ impl Parser {
         }
     }
 
-    fn record_time(&mut self, value: Option<&str>) {
-        if let Some(time) = value.and_then(timestamp) {
+    fn record_time(&mut self, timestamp: Option<u64>) {
+        if let Some(time) = timestamp {
             self.first = Some(self.first.map_or(time, |first| first.min(time)));
             self.last = Some(self.last.map_or(time, |last| last.max(time)));
         }
@@ -529,7 +671,7 @@ impl Parser {
         }
         if let Ok(tail) = serde_json::from_slice::<Tail>(line) {
             if self.tool == AgentKind::Codex || self.claude_id(tail.session_id) {
-                self.record_time(tail.timestamp);
+                self.record_time(tail.timestamp.and_then(timestamp));
             }
         }
     }
@@ -538,6 +680,12 @@ impl Parser {
         let cwd = self.cwd?;
         let started_at = self.first.unwrap_or(modified);
         let last_at = self.last.unwrap_or(modified);
+        let known = complete && self.evidence_known;
+        let evidence = SessionEvidence {
+            user_messages: known.then_some(self.user_messages),
+            duration_ms: known.then(|| self.last?.checked_sub(self.first?)).flatten(),
+            file_edit: (known || self.file_edit).then_some(self.file_edit),
+        };
         let canonical_cwd = canonical_path(&cwd);
         // A skipped middle can contain more edits. Show counts only when both samples cover the log.
         let file_count = (complete && !self.files.is_empty()).then(|| {
@@ -549,113 +697,43 @@ impl Parser {
         });
         Some(IndexedSession {
             canonical_cwd,
+            evidence,
             summary: SessionSummary {
                 reference: self.reference?,
                 cwd,
                 started_at,
                 last_at,
                 duration_ms: last_at.saturating_sub(started_at),
-                title: self.title.unwrap_or_else(|| "未命名会话".into()),
+                title: self
+                    .title
+                    .or(self.fallback_title)
+                    .unwrap_or_else(|| "未命名会话".into()),
                 file_count,
             },
         })
     }
 }
 
-fn message_title(content: &Value, text_type: &str) -> Option<String> {
+fn user_content(content: &Value, text_type: &str) -> Option<(String, bool)> {
     if let Some(text) = content.as_str() {
-        return title(text);
+        return Some((text.to_owned(), false));
     }
-    content
-        .as_array()?
-        .iter()
-        .filter(|block| block["type"].as_str() == Some(text_type))
-        .filter_map(|block| block["text"].as_str())
-        .find_map(title)
-}
-
-const WRAPPERS: &[&str] = &[
-    "INSTRUCTIONS",
-    "system-reminder",
-    "system_instructions",
-    "user_instructions",
-    "environment_context",
-    "command-name",
-    "command-message",
-    "command-args",
-    "local-command-caveat",
-    "local-command-stdout",
-    "ide_opened_file",
-    "ide_selection",
-    "task-notification",
-    "teammate-message",
-    "turn_aborted",
-    "permissions instructions",
-    "collaboration_mode",
-    "app-context",
-];
-
-fn title(raw: &str) -> Option<String> {
-    let raw = if raw.trim_start().starts_with("# Context from my IDE setup:") {
-        raw.split_once("## My request for Codex:")?.1
-    } else {
-        raw
-    };
-    let mut clean = raw.to_owned();
-    for tag in WRAPPERS {
-        let opening = format!("<{tag}");
-        let closing = format!("</{tag}>");
-        let mut offset = 0;
-        while let Some(index) = clean[offset..].find(&opening) {
-            let start = offset + index;
-            offset = start + opening.len();
-            if !clean[offset..].starts_with(['>', ' ', '\t', '/']) {
-                continue;
+    let mut text = String::new();
+    let mut attached = false;
+    for block in content.as_array()? {
+        match block["type"].as_str()? {
+            kind if kind == text_type => {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(block["text"].as_str()?);
             }
-            let Some(tag_end) = clean[offset..].find('>').map(|index| offset + index) else {
-                break;
-            };
-            let end = if clean[offset..tag_end].trim_end().ends_with('/') {
-                tag_end + 1
-            } else {
-                clean[tag_end + 1..]
-                    .find(&closing)
-                    .map_or(clean.len(), |index| tag_end + 1 + index + closing.len())
-            };
-            clean.replace_range(start..end, "\n");
-            offset = start + 1;
+            "image" | "input_image" | "document" | "input_file" => attached = true,
+            "tool_result" => (),
+            _ => return None,
         }
     }
-    let mut line = clean
-        .lines()
-        .map(str::trim)
-        .find(|line| {
-            !line.is_empty()
-                && !line.starts_with('<')
-                && !line.starts_with("# AGENTS.md instructions")
-                && !matches!(
-                    line.split_whitespace().next(),
-                    Some(
-                        "/exit"
-                            | "/status"
-                            | "/clear"
-                            | "/help"
-                            | "/resume"
-                            | "/compact"
-                            | "/model"
-                    )
-                )
-                && !line
-                    .get(..7)
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("caveat:"))
-        })?
-        .chars()
-        .filter(|character| !character.is_control());
-    let mut result: String = line.by_ref().take(100).collect();
-    if line.next().is_some() {
-        result.push('…');
-    }
-    (!result.is_empty()).then_some(result)
+    Some((text, attached))
 }
 
 fn claude_files(content: &Value) -> impl Iterator<Item = &str> {

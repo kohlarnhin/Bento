@@ -4,6 +4,7 @@ import type { ProjectConfig, ProjectStatus, Snippet } from '../types';
 import type { AgentArgv, ProjectAgentSession } from '../lib/agentSessions';
 import { quickSwitcherResultKey, quickSwitcherSessionOptions } from '../lib/quickSwitcher';
 import { searchCreationActions, searchProjects, substringMatch } from '../lib/sidebarModel';
+import { pinyinMatcher } from '../lib/pinyinSearch';
 import { AgentSessionRow } from './AgentSessionActions';
 import { ProjectAvatar } from './ProjectAvatar';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
@@ -47,17 +48,18 @@ export function QuickSwitcher({ projects, statuses, sessions, snippets, onRunSni
   const matches = useMemo(() => searchProjects(projects, query), [projects, query]);
   const sessionOptions = useMemo(() => quickSwitcherSessionOptions(projects, sessions, query, onOpenAgent), [projects, sessions, query, onOpenAgent]);
   const creationActions = useMemo(() => searchCreationActions(query), [query]);
-  const creationFirst = query.trim().length > 0 && creationActions.length > 0;
+  const creationFirst = query.trim().length > 0 && creationActions.some(action => !action.pinyin);
   const target = matches.find(match => match.project.id === targetId)?.project ?? matches[0]?.project;
   const running = target && ['running', 'starting'].includes(statuses[target.id]);
   const name = target?.displayName || target?.name;
   const search = query.trim().toLowerCase();
+  const matchesPinyin = useMemo(() => pinyinMatcher(query), [query]);
   const snippetActions = (search ? projects : target ? [target] : []).flatMap(project => (snippets[project.id] ?? []).flatMap(snippet => {
     const label = (project.displayName || project.name) + ' · ' + (snippet.name || snippet.command);
     const match = search ? substringMatch(label, search) ?? substringMatch(snippet.command, search) : undefined;
-    if (search && !match) return [];
+    if (search && !match && !matchesPinyin(label)) return [];
     return [{ id: 'snippet-' + snippet.id, label, icon: Terminal, key: '', run: () => onRunSnippet(project, snippet.command),
-      indices: substringMatch(label, search)?.indices ?? [] }];
+      pinyin: !!search && !match, indices: substringMatch(label, search)?.indices ?? [] }];
   }));
   const workspaceActions = [
     ...(onRescan ? [{ id: 'rescan-project', label: '重新扫描当前项目', icon: RefreshCw, key: '', run: onRescan, keywords: 'rescan scan 重新识别' }] : []),
@@ -65,7 +67,10 @@ export function QuickSwitcher({ projects, statuses, sessions, snippets, onRunSni
       { id: 'terminal-focus', label: terminalActions.focused ? '退出专注' : '专注模式', icon: Focus, key: '⌘⇧↩', run: terminalActions.onFocus, keywords: '专注 focus' },
       { id: 'terminal-split', label: '切换终端分屏', icon: Columns2, key: '⌘D', run: terminalActions.onSplit, keywords: '分屏 split' },
     ] : []),
-  ].filter(action => !search || action.label.includes(search) || action.keywords.includes(search));
+  ].flatMap(action => {
+    const direct = !search || action.label.includes(search) || action.keywords.includes(search);
+    return direct || matchesPinyin(action.label) ? [{ ...action, pinyin: !direct }] : [];
+  });
   const actions = [
     ...(target && !creationFirst ? [
       { id: 'toggle', label: `${running ? '停止' : '启动'} ${name}`, icon: running ? Square : Play, key: '⌘↵', run: () => onToggle(target), indices: [] as number[] },
@@ -74,9 +79,11 @@ export function QuickSwitcher({ projects, statuses, sessions, snippets, onRunSni
         id: `command-${index}`, label: `运行 ${entry.name}`, icon: Terminal, key: '', run: () => onRunCommand(target, entry.command), indices: [],
       })),
     ] : []),
-    ...snippetActions,
-    ...workspaceActions.map(action => ({ ...action, indices: [] as number[] })),
-    ...creationActions.map(action => ({ ...action, icon: action.id === 'add-project' ? Plus : FolderPlus, key: action.id === 'add-project' ? '⌘N' : '', run: action.id === 'add-project' ? onCreate : onCreateGroup })),
+    ...[
+      ...snippetActions,
+      ...workspaceActions.map(action => ({ ...action, indices: [] as number[] })),
+      ...creationActions.map(action => ({ ...action, icon: action.id === 'add-project' ? Plus : FolderPlus, key: action.id === 'add-project' ? '⌘N' : '', run: action.id === 'add-project' ? onCreate : onCreateGroup })),
+    ].sort((a, b) => Number(a.pinyin) - Number(b.pinyin)),
   ];
   const projectOptions = matches.map(match => ({ ...match, id: `project:${match.project.id}`, run: () => onSelect(match.project) }));
   const options = creationFirst ? [...actions, ...projectOptions, ...sessionOptions] : [...projectOptions, ...sessionOptions, ...actions];

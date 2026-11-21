@@ -28,7 +28,7 @@ const hooks = registerHooks({
   },
 });
 const { AgentSessionMenuItems, AgentRecoveryCard } = await import('../src/components/AgentSessionActions.tsx');
-const { activateAgentTerminal, agentSessionDate } = await import('../src/lib/agentSessions.ts');
+const { activateAgentTerminal, agentSessionDate, loadAgentIndex } = await import('../src/lib/agentSessions.ts');
 const { quickSwitcherResultKey, quickSwitcherSessionOptions } = await import('../src/lib/quickSwitcher.ts');
 hooks.deregister();
 
@@ -145,6 +145,40 @@ test('palette limits matching history to the newest eight across projects even w
   sessions.push({ ...codex, projectId: 'removed', title: 'dat', lastAt: 3000 });
   const options = paletteOptions('dat', sessions);
   assert.deepEqual(options.map(({ session }) => session.id), ['11', '10', '9', '8', '7', '6', '5', '4']);
+});
+
+test('palette matches pinyin, initials and mixed text after direct title matches', () => {
+  const direct = { ...codex, projectId: 'reports', title: 'sxtj export', lastAt: 1 };
+  const chinese = { ...claude, projectId: 'records', title: '筛选条件进 URL', lastAt: 2 };
+  const sessions = [chinese, direct];
+  for (const query of ['shaixuan', 'shaixuan条件', '筛选tj', 'sxtjjurl', 'SHAIXUAN 条件进URL']) {
+    assert.deepEqual(paletteOptions(query, sessions).map(row => row.session.id), [chinese.id], query);
+  }
+  const options = paletteOptions('sxtj', sessions);
+  assert.deepEqual(options.map(row => row.session.id), [direct.id, chinese.id]);
+  assert.deepEqual(options.map(row => row.indices), [[0, 1, 2, 3], []]);
+  assert.deepEqual(paletteOptions('筛选', sessions)[0].indices, [0, 1]);
+});
+
+test('history publishes the startup cache while its background refresh is still pending', async t => {
+  const requests = [], published = [];
+  let finishRefresh;
+  const refresh = new Promise(resolve => { finishRefresh = resolve; });
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { __TAURI_INTERNALS__: {
+    invoke: (command, args) => {
+      requests.push({ command, args });
+      return args.cached ? Promise.resolve([claude]) : refresh;
+    },
+  } } });
+  t.after(() => { delete globalThis.window; });
+  const command = 'terminal_agent_project_sessions';
+  const loaded = loadAgentIndex(command, {}, result => published.push(result));
+  await new Promise(setImmediate);
+  assert.deepEqual(published, [[claude]]);
+  assert.deepEqual(requests, [{ command, args: { cached: true } }, { command, args: {} }]);
+  finishRefresh([codex]);
+  await loaded;
+  assert.deepEqual(published, [[claude], [codex]]);
 });
 
 test('palette arrows cross groups and Enter calls the same resume path as the plus menu, selecting the returned tab', async t => {

@@ -28,7 +28,7 @@ import { Toaster } from './components/ui/sonner';
 import { MotionPresence } from './components/ui/motion-presence';
 import { Empty, EmptyTitle, EmptyDescription } from './components/ui/empty';
 import { createTerminal, getProjectTerminalSlots, getTerminal, getTerminalSnapshot, initTerminalRegistry, registerTerminalResult, subscribeTerminals, takeRestoredSlot, terminalKey } from './lib/terminalRegistry';
-import { activateAgentTerminal, useAgentRecoveries, type AgentArgv, type AgentRecoveryTarget, type ProjectAgentSession } from './lib/agentSessions';
+import { activateAgentTerminal, loadAgentIndex, useAgentRecoveries, type AgentArgv, type AgentRecoveryTarget, type ProjectAgentSession } from './lib/agentSessions';
 import { projectLogs } from './lib/useProjectLogs';
 import { recordRender } from './lib/renderMetrics';
 import { DEFAULT_TERMINAL_FONT_SIZE, TERMINAL_THEME } from './lib/terminalAppearance';
@@ -147,6 +147,13 @@ export function App() {
   const [quickOpen, setQuickOpen] = useState(false);
   const [quickSessions, setQuickSessions] = useState<ProjectAgentSession[]>([]);
   const loadingQuickSessions = useRef(false);
+  const loadQuickSessions = useCallback(() => {
+    if (loadingQuickSessions.current) return;
+    loadingQuickSessions.current = true;
+    void loadAgentIndex<ProjectAgentSession[]>('terminal_agent_project_sessions', {}, setQuickSessions).catch(() => {})
+      .finally(() => { loadingQuickSessions.current = false; });
+  }, []);
+  useEffect(loadQuickSessions, [loadQuickSessions]);
   const quickOpenRef = useRef(quickOpen);
   quickOpenRef.current = quickOpen;
   const [groupForm, setGroupForm] = useState<{ action: 'create' | 'rename' | 'delete'; group?: ProjectGroup } | null>(null);
@@ -316,12 +323,8 @@ export function App() {
     terminalControls.current?.closeFind();
     dialogOpen.current = true;
     setQuickOpen(true);
-    if (!loadingQuickSessions.current) {
-      loadingQuickSessions.current = true;
-      void invoke<ProjectAgentSession[]>('terminal_agent_project_sessions').then(setQuickSessions).catch(() => {})
-        .finally(() => { loadingQuickSessions.current = false; });
-    }
-  }, []);
+    loadQuickSessions();
+  }, [loadQuickSessions]);
   const closeQuickSwitcher = useCallback(() => { setQuickOpen(false); quickOpenRef.current = false; dialogOpen.current = false; }, []);
   const openSettings = useCallback(() => {
     if (dialogOpen.current) return;

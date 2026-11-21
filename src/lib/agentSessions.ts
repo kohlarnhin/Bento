@@ -28,6 +28,16 @@ export interface AgentMenuData {
   sessions: AgentHistorySession[];
 }
 
+export async function loadAgentIndex<T>(command: 'terminal_agent_project_sessions' | 'terminal_agent_menu' | 'terminal_agent_recoveries',
+  args: Record<string, string>, receive: (data: T) => void, cachedOnly = false) {
+  try {
+    receive(await invoke<T>(command, { ...args, cached: true }));
+  } catch (error) {
+    if (cachedOnly) throw error;
+  }
+  if (!cachedOnly) receive(await invoke<T>(command, args));
+}
+
 export function agentArgv(tool: TerminalAgentKind, id?: string): AgentArgv {
   if (id === undefined) return [tool];
   return tool === 'claude' ? ['claude', '--resume', id] : ['codex', 'resume', id];
@@ -59,7 +69,7 @@ export function useAgentRecoveries(terminals: Record<string, TerminalStatus>) {
   useEffect(() => {
     if (!batch) return;
     let current = true;
-    void invoke<AgentRecoveries>('terminal_agent_recoveries').then(result => {
+    void loadAgentIndex<AgentRecoveries>('terminal_agent_recoveries', {}, result => {
       if (current) setResolved(result);
     }).catch(() => {});
     return () => { current = false; };

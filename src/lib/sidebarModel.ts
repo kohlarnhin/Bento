@@ -1,4 +1,5 @@
 import type { ProjectConfig, ProjectGroup, ProjectStatus } from '../types.ts';
+import { pinyinMatcher } from './pinyinSearch.ts';
 
 export function projectInitial(name: string) {
   return Array.from(name.trim().normalize('NFC'))[0]?.toLocaleUpperCase() || '?';
@@ -145,6 +146,7 @@ export function nameMatch(text: string, query: string) {
 }
 
 export function searchProjects(projects: ProjectConfig[], query: string) {
+  const matchesPinyin = pinyinMatcher(query);
   return projects.flatMap((project, index) => {
     if (!query.trim()) return [{ project, name: [], original: [], path: [], port: [], rank: 0, score: 0, index }];
     const name = nameMatch(project.displayName || project.name, query);
@@ -156,17 +158,23 @@ export function searchProjects(projects: ProjectConfig[], query: string) {
     const candidates = [name, original, port && { ...port, rank: 3 }, path && { ...path, rank: path.lastSegment ? 4 : 5 }]
       .filter((match): match is FuzzyMatch & { rank: number } => !!match)
       .sort((a, b) => a.rank - b.rank || b.score - a.score);
-    const best = candidates[0];
+    const best = candidates[0] ?? ((matchesPinyin(project.displayName ?? '', project) || matchesPinyin(project.name, project))
+      ? { rank: 6, score: 0 } : undefined);
     if (!best) return [];
     return [{ project, name: name?.indices ?? [], original: original?.indices ?? [], path: path?.indices ?? [], port: port?.indices ?? [], rank: best.rank, score: best.score, index }];
-  }).sort((a, b) => Number(a.project.archived) - Number(b.project.archived) || a.rank - b.rank || b.score - a.score || a.index - b.index);
+  }).sort((a, b) => Number(a.rank === 6) - Number(b.rank === 6) ||
+    Number(a.project.archived) - Number(b.project.archived) || a.rank - b.rank || b.score - a.score || a.index - b.index);
 }
 
 export function searchCreationActions(query: string) {
   const text = query.trim().toLowerCase().replace(/\s+/gu, '');
+  const matchesPinyin = pinyinMatcher(query);
   return [
     { id: 'add-project' as const, label: '添加项目…', aliases: ['添加项目', '新建项目', 'addproject', 'newproject'] },
     { id: 'add-group' as const, label: '添加分组', aliases: ['添加分组', '新建分组', 'addgroup', 'newgroup'] },
-  ].filter(action => !text || action.aliases.some(alias => alias.includes(text)))
-    .map(action => ({ id: action.id, label: action.label, indices: substringMatch(action.label, query)?.indices ?? [] }));
+  ].flatMap(action => {
+    const direct = !text || action.aliases.some(alias => alias.includes(text));
+    if (!direct && !action.aliases.some(alias => matchesPinyin(alias))) return [];
+    return [{ id: action.id, label: action.label, pinyin: !direct, indices: substringMatch(action.label, query)?.indices ?? [] }];
+  }).sort((a, b) => Number(a.pinyin) - Number(b.pinyin));
 }

@@ -66,7 +66,7 @@ fn both_cli_formats_use_cwd_and_extract_title_duration_and_distinct_edits() {
     );
     let mut catalog = fixture.catalog();
     catalog.refresh();
-    let sessions = catalog.project_sessions(Path::new(ROOT));
+    let sessions = catalog.project_sessions(Path::new(ROOT), &HashSet::new());
     assert_eq!(sessions.len(), 2);
     let [claude, codex] = sessions.as_slice() else {
         unreachable!()
@@ -87,13 +87,16 @@ fn both_cli_formats_use_cwd_and_extract_title_duration_and_distinct_edits() {
     assert_eq!(codex.file_count, Some(2));
     assert_eq!(
         catalog
-            .project_sessions(Path::new("/sample/projects/current/nested"))
+            .project_sessions(
+                Path::new("/sample/projects/current/nested"),
+                &HashSet::new()
+            )
             .len(),
         1
     );
     assert_eq!(
         catalog
-            .project_sessions(Path::new("/sample/projects/current-other"))
+            .project_sessions(Path::new("/sample/projects/current-other"), &HashSet::new())
             .len(),
         1
     );
@@ -132,11 +135,14 @@ fn batch_search_uses_registered_roots_and_assigns_nested_sessions_once() {
     );
     let mut catalog = fixture.catalog();
     catalog.refresh();
-    let sessions = catalog.all_project_sessions([
-        ("root", PathBuf::from(ROOT)),
-        ("nested", Path::new(ROOT).join("nested")),
-        ("invalid", PathBuf::new()),
-    ]);
+    let sessions = catalog.all_project_sessions(
+        [
+            ("root", PathBuf::from(ROOT)),
+            ("nested", Path::new(ROOT).join("nested")),
+            ("invalid", PathBuf::new()),
+        ],
+        &HashSet::new(),
+    );
     assert_eq!(sessions.len(), 2);
     assert_eq!(sessions[0].project_id, "root");
     assert_eq!(sessions[0].session.reference.id, CLAUDE_ID);
@@ -146,11 +152,13 @@ fn batch_search_uses_registered_roots_and_assigns_nested_sessions_once() {
     assert_eq!(value["projectId"], "nested");
     assert_eq!(value["id"], CODEX_ID);
     assert_eq!(value["tool"], "codex");
-    let other =
-        catalog.all_project_sessions([("other", PathBuf::from("/sample/projects/current-other"))]);
+    let other = catalog.all_project_sessions(
+        [("other", PathBuf::from("/sample/projects/current-other"))],
+        &HashSet::new(),
+    );
     assert_eq!(other.len(), 1);
     assert_eq!(other[0].session.reference.id, other_id);
-    assert!(catalog.all_project_sessions([]).is_empty());
+    assert!(catalog.all_project_sessions([], &HashSet::new()).is_empty());
 }
 
 #[test]
@@ -158,7 +166,9 @@ fn missing_directories_bad_files_and_old_logs_are_ignored() {
     let fixture = Fixture::new();
     let mut catalog = fixture.catalog();
     catalog.refresh();
-    assert!(catalog.project_sessions(Path::new(ROOT)).is_empty());
+    assert!(catalog
+        .project_sessions(Path::new(ROOT), &HashSet::new())
+        .is_empty());
     let old = fixture.write(AgentKind::Claude, CLAUDE_ID, CLAUDE);
     File::options()
         .write(true)
@@ -180,7 +190,9 @@ fn missing_directories_bad_files_and_old_logs_are_ignored() {
         "{invalid}\n",
     );
     catalog.refresh();
-    assert!(catalog.project_sessions(Path::new(ROOT)).is_empty());
+    assert!(catalog
+        .project_sessions(Path::new(ROOT), &HashSet::new())
+        .is_empty());
     assert_eq!(catalog.files.len(), 2);
 }
 
@@ -197,9 +209,9 @@ fn cache_tracks_mtime_and_removals_and_lists_only_the_latest_twenty() {
         last = fixture.write(AgentKind::Claude, &id, &data);
     }
     catalog.refresh();
-    let list = catalog.project_sessions(Path::new(ROOT));
+    let list = catalog.project_sessions(Path::new(ROOT), &HashSet::new());
     assert_eq!(list.len(), PROJECT_LIMIT);
-    let searchable = catalog.all_project_sessions([("root", PathBuf::from(ROOT))]);
+    let searchable = catalog.all_project_sessions([("root", PathBuf::from(ROOT))], &HashSet::new());
     assert_eq!(searchable.len(), 25);
     assert!(searchable[24].session.reference.id.ends_with("0000"));
     assert!(list[0].reference.id.ends_with("0024"));
@@ -217,15 +229,17 @@ fn cache_tracks_mtime_and_removals_and_lists_only_the_latest_twenty() {
         .unwrap();
     catalog.refresh();
     assert_eq!(
-        catalog.project_sessions(Path::new(ROOT))[0].title,
+        catalog.project_sessions(Path::new(ROOT), &HashSet::new())[0].title,
         "新的标题进 URL"
     );
     fs::remove_file(last).unwrap();
     catalog.refresh();
-    assert!(!catalog.project_sessions(Path::new(ROOT))[0]
-        .reference
-        .id
-        .ends_with("0024"));
+    assert!(
+        !catalog.project_sessions(Path::new(ROOT), &HashSet::new())[0]
+            .reference
+            .id
+            .ends_with("0024")
+    );
 }
 
 #[test]
@@ -239,7 +253,7 @@ fn bounded_samples_keep_tail_time_and_omit_incomplete_file_counts() {
     writeln!(file, "{{\"timestamp\":\"2026-11-20T14:12:00Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_complete\"}}}}").unwrap();
     let mut catalog = fixture.catalog();
     catalog.refresh();
-    let result = catalog.project_sessions(Path::new(ROOT));
+    let result = catalog.project_sessions(Path::new(ROOT), &HashSet::new());
     assert_eq!(result[0].title, "导出 CSV 加时间范围");
     assert_eq!(result[0].duration_ms, 60 * 60_000);
     assert_eq!(result[0].file_count, None);
@@ -259,7 +273,281 @@ fn fallback_user_events_and_legacy_patch_arguments_are_supported() {
     );
     let mut catalog = fixture.catalog();
     catalog.refresh();
-    let result = catalog.project_sessions(Path::new(ROOT));
+    let result = catalog.project_sessions(Path::new(ROOT), &HashSet::new());
     assert_eq!(result[0].title, format!("{}…", "字".repeat(100)));
     assert_eq!(result[0].file_count, Some(2));
+}
+
+fn claude_message(kind: &str, time: &str, content: Value) -> Value {
+    serde_json::json!({"type": kind, "timestamp": time, "sessionId": CLAUDE_ID, "cwd": ROOT,
+        "message": {"role": kind, "content": content}})
+}
+
+const START: &str = "2026-11-20T13:12:00.000Z";
+const SHORT: &str = "2026-11-20T13:12:59.999Z";
+const MINUTE: &str = "2026-11-20T13:13:00.000Z";
+
+fn rows_to_jsonl(rows: &[Value]) -> String {
+    rows.iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn parse_rows(tool: AgentKind, rows: &[Value], complete: bool) -> IndexedSession {
+    let mut parser = Parser::new(tool, Path::new(CLAUDE_ID));
+    for row in rows {
+        parser.line(row.to_string().as_bytes());
+    }
+    parser.finish(complete, 0).unwrap()
+}
+
+#[test]
+fn claude_short_history_requires_one_user_under_a_minute_and_no_edit_call() {
+    use serde_json::json;
+    let user = claude_message("user", START, json!("请检查"));
+    let read = claude_message(
+        "assistant",
+        SHORT,
+        json!([{"type":"tool_use","name":"Read"}]),
+    );
+    let tools = claude_message(
+        "user",
+        SHORT,
+        json!([{"type":"tool_result","content":"fixture"}]),
+    );
+    let mut records = vec![user.clone(), read.clone(), tools];
+    let empty = HashSet::new();
+    let short = parse_rows(AgentKind::Claude, &records, true);
+    assert_eq!(short.evidence.user_messages, Some(1));
+    assert_eq!(short.evidence.duration_ms, Some(59_999));
+    assert!(!short.in_history(&empty));
+    assert!(short.in_history(&HashSet::from([short.summary.reference.clone()])));
+    assert!(parse_rows(AgentKind::Claude, &records, false).in_history(&empty));
+
+    records[1]["timestamp"] = json!(MINUTE);
+    assert!(parse_rows(AgentKind::Claude, &records, true).in_history(&empty));
+    records[1] = claude_message("user", SHORT, json!("再问一个问题"));
+    assert!(parse_rows(AgentKind::Claude, &records, true).in_history(&empty));
+
+    for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
+        records[1] = claude_message("assistant", SHORT, json!([{"type":"tool_use","name":tool}]));
+        let edited = parse_rows(AgentKind::Claude, &records, true);
+        assert!(edited.in_history(&empty), "{tool}");
+        assert_eq!(edited.evidence.file_edit, Some(true));
+        assert_eq!(edited.summary.file_count, None);
+    }
+
+    for (index, field) in [(0, "timestamp"), (1, "message"), (1, "sessionId")] {
+        let mut incomplete = vec![user.clone(), read.clone()];
+        incomplete[index].as_object_mut().unwrap().remove(field);
+        assert!(
+            parse_rows(AgentKind::Claude, &incomplete, true).in_history(&empty),
+            "{field}"
+        );
+    }
+    records[1] = claude_message("assistant", SHORT, json!([{"type":"tool_use"}]));
+    assert!(parse_rows(AgentKind::Claude, &records, true).in_history(&empty));
+}
+
+#[test]
+fn codex_user_event_duplicates_and_distinct_turns_are_counted_and_edits_kept() {
+    use serde_json::json;
+    let head: Value = serde_json::from_str(CODEX.lines().next().unwrap()).unwrap();
+    let user = json!({"timestamp": START, "type":"response_item", "payload":{"type":"message","role":"user",
+        "content":[{"type":"input_text","text":"<environment_context>fixture</environment_context>\n检查一下"}]}});
+    let event = json!({"timestamp": START, "type":"event_msg","payload":{"type":"user_message","message":"检查一下"}});
+    let end = json!({"timestamp": SHORT, "type":"event_msg","payload":{"type":"task_complete"}});
+    let mut records = vec![head, user, event, end];
+    let empty = HashSet::new();
+    let short = parse_rows(AgentKind::Codex, &records, true);
+    assert_eq!(short.evidence.user_messages, Some(1));
+    assert!(!short.in_history(&empty));
+    records[2]["payload"]["message"] = json!("还有一件事");
+    assert_eq!(
+        parse_rows(AgentKind::Codex, &records, true)
+            .evidence
+            .user_messages,
+        Some(2)
+    );
+    records[2]["payload"]["message"] = json!("检查一下");
+    records[3]["timestamp"] = json!(MINUTE);
+    assert!(parse_rows(AgentKind::Codex, &records, true).in_history(&empty));
+    records[3]["timestamp"] = json!(SHORT);
+    let unclassified =
+        json!({"timestamp": SHORT, "type":"response_item","payload":{"type":"custom_tool_call"}});
+    records.push(unclassified);
+    assert!(parse_rows(AgentKind::Codex, &records, true).in_history(&empty));
+    for kind in ["custom_tool_call", "function_call"] {
+        records[4]["payload"] = json!({"type":kind,"name":"apply_patch"});
+        assert_eq!(
+            parse_rows(AgentKind::Codex, &records, true)
+                .evidence
+                .file_edit,
+            Some(true)
+        );
+    }
+    records[4] = json!({"timestamp": SHORT,"type":"event_msg","payload":{"type":"patch_apply_end","success":false}});
+    assert!(parse_rows(AgentKind::Codex, &records, true).in_history(&empty));
+}
+
+#[test]
+fn both_history_queries_hide_short_sessions_but_keep_pending_recoveries() {
+    let fixture = Fixture::new();
+    let records = [
+        claude_message("user", START, serde_json::json!("很短的请求")),
+        claude_message(
+            "assistant",
+            SHORT,
+            serde_json::json!([{"type":"text","text":"fixture"}]),
+        ),
+    ];
+    fixture.write(AgentKind::Claude, CLAUDE_ID, &rows_to_jsonl(&records));
+    let mut catalog = fixture.catalog();
+    catalog.refresh();
+    let reference = SessionRef::new(AgentKind::Claude, CLAUDE_ID).unwrap();
+    assert!(catalog.find(&reference, Some(Path::new(ROOT))).is_some());
+    for (protected, expected) in [(HashSet::new(), 0), (HashSet::from([reference]), 1)] {
+        assert_eq!(
+            catalog.project_sessions(Path::new(ROOT), &protected).len(),
+            expected
+        );
+        assert_eq!(
+            catalog
+                .all_project_sessions([("root", PathBuf::from(ROOT))], &protected)
+                .len(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn titles_skip_wrappers_instructions_pastes_images_and_paths_before_the_request() {
+    let raw = concat!(
+        "# AGENTS.md instructions\n<INSTRUCTIONS>fixture instructions</INSTRUCTIONS>\n",
+        "<user_instructions>fixture context</user_instructions>\n<environment_context>fixture env</environment_context>\n",
+        "<command-name>/status</command-name><local-command-stdout>fixture output</local-command-stdout>\n",
+        "Caveat: fixture caveat\n![preview](fixture.png)\n[Image #1]\n",
+        "```js\nconst veryLongSnippet = 1;\n```\n",
+        "2026-11-20 13:00:00 ERROR socket closed\nTypeError: sample stack\n    at f (fixture.js:64:8)\n",
+        "`/Users/fixture/Projects/sample/a/very/long/configuration.yml`\n",
+        "[图片2]  修复\t 登录   回调。下一句不进标题。\nmore"
+    );
+    let cleaned = title::strip_wrappers(raw).unwrap();
+    assert_eq!(
+        title::clean_title(&cleaned).as_deref(),
+        Some("修复 登录 回调。")
+    );
+    assert!(title::strip_wrappers(
+        "# AGENTS.md instructions\nUnbounded fixture instructions\nsecond instruction"
+    )
+    .is_none());
+    assert_eq!(
+        title::clean_title("Export file.json. Keep the rest separate.").as_deref(),
+        Some("Export file.json.")
+    );
+    assert_eq!(
+        title::clean_title(&"字".repeat(101)).unwrap(),
+        format!("{}…", "字".repeat(100))
+    );
+}
+
+#[test]
+fn skips_empty_cleaned_messages_before_using_the_legacy_title() {
+    let records = [
+        claude_message("user", START, serde_json::json!("[Image #1]")),
+        claude_message("user", SHORT, serde_json::json!("Traceback (most recent call last):\n  File \"test.py\", line 1\n    crash()\nTypeError: fixture")),
+        claude_message("user", SHORT, serde_json::json!("完善  CSV 导出")),
+    ];
+    assert_eq!(
+        parse_rows(AgentKind::Claude, &records, true).summary.title,
+        "完善 CSV 导出"
+    );
+    assert_eq!(
+        parse_rows(AgentKind::Claude, &records[..1], true)
+            .summary
+            .title,
+        "[Image #1]"
+    );
+}
+
+#[test]
+fn disk_cache_hits_before_refresh_and_reparses_only_changed_mtime_or_size() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let data = fixture.0.join("app-data");
+    let claude = fixture.write(AgentKind::Claude, CLAUDE_ID, CLAUDE);
+    let codex = fixture.write(AgentKind::Codex, CODEX_ID, CODEX);
+    let open = || SharedCatalog::new(Some(fixture.0.clone()), Some(&data));
+    let empty = HashSet::new();
+    let list = |catalog: &Catalog| catalog.project_sessions(Path::new(ROOT), &empty);
+    let initial = open();
+    assert!(list(&initial.snapshot()).is_empty());
+    assert_eq!(list(&initial.refresh()).len(), 2);
+    let disk = data.join("agent-sessions.json");
+    assert_eq!(
+        fs::metadata(&disk).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    let claude_stamp = fs::metadata(&claude).unwrap().modified().unwrap();
+    let updated_claude = CLAUDE.replace("筛选条件进 URL", "过滤规则进 URL");
+    assert_eq!(updated_claude.len(), CLAUDE.len());
+    fs::write(&claude, &updated_claude).unwrap();
+    File::options()
+        .write(true)
+        .open(&claude)
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(claude_stamp))
+        .unwrap();
+    let codex_stamp = fs::metadata(&codex).unwrap().modified().unwrap();
+    fs::write(
+        &codex,
+        CODEX.replace("导出 CSV 加时间范围", "更新导出 CSV 的检索时间范围"),
+    )
+    .unwrap();
+    File::options()
+        .write(true)
+        .open(&codex)
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(codex_stamp))
+        .unwrap();
+    let restarted = open();
+    assert_eq!(list(&restarted.snapshot())[0].title, "筛选条件进 URL");
+    assert_eq!(list(&restarted.snapshot())[1].title, "导出 CSV 加时间范围");
+    let refreshed = list(&restarted.refresh());
+    assert_eq!(refreshed[0].title, "筛选条件进 URL");
+    assert_eq!(refreshed[1].title, "更新导出 CSV 的检索时间范围");
+
+    File::options()
+        .write(true)
+        .open(&claude)
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(claude_stamp + Duration::from_secs(1)))
+        .unwrap();
+    fs::remove_file(codex).unwrap();
+    let refreshed = list(&restarted.refresh());
+    assert_eq!(refreshed.len(), 1);
+    assert_eq!(refreshed[0].title, "过滤规则进 URL");
+    assert_eq!(list(&open().snapshot()).len(), 1);
+}
+
+#[test]
+fn wrong_version_and_corrupt_disk_cache_rebuild_from_the_source_logs() {
+    let fixture = Fixture::new();
+    let data = fixture.0.join("app-data");
+    fixture.write(AgentKind::Claude, CLAUDE_ID, CLAUDE);
+    let open = || SharedCatalog::new(Some(fixture.0.clone()), Some(&data));
+    let list = |catalog: &Catalog| catalog.project_sessions(Path::new(ROOT), &HashSet::new());
+    assert_eq!(list(&open().refresh()).len(), 1);
+    let disk = data.join("agent-sessions.json");
+    let mut wrong: Value = serde_json::from_reader(File::open(&disk).unwrap()).unwrap();
+    wrong["version"] = serde_json::json!(0);
+    for content in [wrong.to_string(), "{incomplete".into()] {
+        fs::write(&disk, content).unwrap();
+        let catalog = open();
+        assert!(list(&catalog.snapshot()).is_empty());
+        assert_eq!(list(&catalog.refresh()).len(), 1);
+        assert_eq!(list(&open().snapshot()).len(), 1);
+    }
 }

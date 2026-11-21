@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { ChevronDown, Plus, RotateCcw, Sparkle, X } from 'lucide-react';
 import { toast } from 'sonner';
 import type { ProjectView, TerminalAgent } from '../types';
 import { closeTerminal, getTerminalSnapshot, restartTerminal, terminalKey, type TerminalStatus } from '../lib/terminalRegistry';
 import { agentNames } from '../lib/terminalUsability';
-import type { AgentMenuData, OpenAgent } from '../lib/agentSessions';
+import { loadAgentIndex, type AgentMenuData, type OpenAgent } from '../lib/agentSessions';
 import { AgentSessionMenuItems } from './AgentSessionActions';
 import { SidebarMenu } from './SidebarMenu';
 import Button from './ui/button';
@@ -47,7 +46,7 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
   const [confirmation, setConfirmation] = useState<Request>();
   const [creating, setCreating] = useState(false);
   const [agentMenuOpen, setAgentMenuOpen] = useState(false);
-  const [agentMenu, setAgentMenu] = useState<AgentMenuData>();
+  const [agentMenu, setAgentMenu] = useState<{ projectId: string; data: AgentMenuData }>();
   const agentMenuTrigger = useRef<HTMLButtonElement>(null);
   const [busy, setBusy] = useState(false);
   const executing = useRef(false);
@@ -59,13 +58,13 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
 
   useEffect(() => {
     if (!terminalView) closeAgentMenu();
-    if (!terminalView || !agentMenuOpen) return;
+    if (!terminalView) return;
     let current = true;
-    void invoke<AgentMenuData>('terminal_agent_menu', { projectId }).then(next => {
-      if (current) setAgentMenu(next);
-    }).catch(error => {
-      if (current) {
-        setAgentMenu({ tools: [], sessions: [] });
+    void loadAgentIndex<AgentMenuData>('terminal_agent_menu', { projectId }, data => {
+      if (current) setAgentMenu({ projectId, data });
+    }, !agentMenuOpen).catch(error => {
+      if (current && agentMenuOpen) {
+        setAgentMenu(previous => previous?.projectId === projectId ? previous : { projectId, data: { tools: [], sessions: [] } });
         toast.error(String(error));
       }
     });
@@ -164,7 +163,7 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
     </div>
     <MotionPresence>{terminalView && agentMenuOpen && agentMenuTrigger.current && <SidebarMenu x={0} y={0} label="终端与 AI 会话"
       className="terminal-agent-menu terminal-chrome" items={[]} anchor={agentMenuTrigger.current} onClose={closeAgentMenu}>
-      <AgentSessionMenuItems data={agentMenu} atLimit={atLimit || creating} onTerminal={() => { closeAgentMenu(); create(); }}
+      <AgentSessionMenuItems data={agentMenu?.projectId === projectId ? agentMenu.data : undefined} atLimit={atLimit || creating} onTerminal={() => { closeAgentMenu(); create(); }}
         onAgent={argv => { closeAgentMenu(); void onOpenAgent(argv); }} />
     </SidebarMenu>}</MotionPresence>
     <MotionPresence>{menu && <SidebarMenu x={menu.x} y={menu.y} label={`终端 ${menu.slot} 操作`} className={terminalView ? 'terminal-chrome' : undefined}

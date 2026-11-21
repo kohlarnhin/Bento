@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use crate::terminal_agent::{AgentSession, AgentStatus, Probe};
-use crate::terminal_agent::sessions::Catalog as AgentCatalog;
+use crate::terminal_agent::sessions::SharedCatalog as AgentCatalog;
 use crate::terminal_attention::{AttentionManager, Sinks as AttentionSinks};
 use crate::terminal_escape::{osc_cwd, EscapeStream};
 use crate::terminal_persistence::{self as persistence, SavedProject, SavedSessions, SavedTerminal, Store};
@@ -160,6 +160,7 @@ struct Scrollback {
     bytes: usize,
     seq: u64,
     cap: usize,
+    saved: Option<(String, u64)>,
 }
 
 impl Scrollback {
@@ -169,7 +170,14 @@ impl Scrollback {
             bytes: 0,
             seq: 0,
             cap,
+            saved: None,
         }
+    }
+
+    fn defer_replay(&mut self, history: String, saved_at: u64) {
+        // Reserve the first sequence before live PTY output arrives.
+        self.seq = 1;
+        self.saved = Some((history, saved_at));
     }
 
     fn append(&mut self, data: String) -> u64 {
@@ -177,11 +185,33 @@ impl Scrollback {
         self.bytes += data.len();
         self.chunks.push_back((self.seq, data));
         while self.bytes > self.cap {
+            // The replay prefix is older than every live chunk.
+            self.saved = None;
             if let Some((_, oldest)) = self.chunks.pop_front() {
                 self.bytes -= oldest.len();
             }
         }
         self.seq
+    }
+
+    fn open_snapshot(&mut self) -> Snapshot {
+        if let Some((history, saved_at)) = self.saved.take() {
+            let data = persistence::replay(&history, saved_at);
+            if self.bytes + data.len() <= self.cap {
+                self.bytes += data.len();
+                self.chunks.push_front((1, data));
+            }
+        }
+        self.snapshot()
+    }
+
+    fn history_for_save(&self) -> String {
+        let current = self.snapshot().data;
+        if let Some((saved, timestamp)) = &self.saved {
+            let marker = persistence::restore_marker(*timestamp);
+            return persistence::bounded_history(&format!("{saved}\n{marker}\n{current}"));
+        }
+        persistence::bounded_history(&current)
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -262,8 +292,9 @@ impl Session {
     }
 
     fn result(&self) -> OpenResult {
+        let snapshot = lock(&self.scrollback).open_snapshot();
         OpenResult {
-            snapshot: lock(&self.scrollback).snapshot(),
+            snapshot,
             session: self.info(),
         }
     }
@@ -374,7 +405,7 @@ pub struct TerminalManager {
     completion: CompletionSink,
     inactive: Arc<dyn Fn() -> bool + Send + Sync>,
     visible_tabs: Arc<Mutex<HashSet<TerminalKey>>>,
-    agent_catalog: Arc<Mutex<AgentCatalog>>,
+    agent_catalog: Arc<AgentCatalog>,
 }
 
 impl TerminalManager {
@@ -401,7 +432,7 @@ impl TerminalManager {
             completion: Arc::new(|_, _| {}),
             inactive: Arc::new(|| false),
             visible_tabs: Arc::new(Mutex::new(HashSet::new())),
-            agent_catalog: Arc::new(Mutex::new(AgentCatalog::new(dirs::home_dir()))),
+            agent_catalog: Arc::new(AgentCatalog::new(None, None)),
         }
     }
 
@@ -465,6 +496,7 @@ impl TerminalManager {
             Ok(integration) => Some(integration),
             Err(error) => { eprintln!("初始化终端 shell 集成失败：{error}"); None }
         });
+        manager.agent_catalog = Arc::new(AgentCatalog::new(dirs::home_dir(), directory.as_deref()));
         manager.store = directory.map(|path| Arc::new(Mutex::new(Store::new(path.join("terminals"), restore))));
         manager.inactive = inactive;
         manager.agent_notices = agent_notices;
@@ -493,14 +525,15 @@ impl TerminalManager {
                     if !root.is_dir() { continue; }
                     for tab in saved.terminals {
                         if validate_slot(tab.slot).is_err() || self.get(&project.id, tab.slot).is_ok() { continue; }
-                        let cwd = if tab.cwd.is_absolute() && tab.cwd.is_dir() { &tab.cwd } else { &root };
+                        let cwd = if tab.cwd.is_absolute() && tab.cwd.is_dir() { tab.cwd.clone() } else { root.clone() };
+                        let slot = tab.slot;
                         let active = saved.active == Some(tab.slot);
-                        match self.spawn(&project.id, tab.slot, cwd, 80, 24, &project.env, Some((&tab, saved.saved_at, active))) {
+                        match self.spawn(&project.id, slot, &cwd, 80, 24, &project.env, Some((tab, saved.saved_at, active))) {
                             Ok(session) => {
-                                if active { lock(&self.active_slots).insert(project.id.clone(), tab.slot); }
+                                if active { lock(&self.active_slots).insert(project.id.clone(), slot); }
                                 lock(&self.sessions).insert(session.key.clone(), session);
                             }
-                            Err(error) => eprintln!("恢复终端失败 ({} #{})：{error}", project.id, tab.slot),
+                            Err(error) => eprintln!("恢复终端失败 ({} #{slot})：{error}", project.id),
                         }
                     }
                 }
@@ -573,10 +606,10 @@ impl TerminalManager {
                 saved_at: persistence::now_secs(),
                 terminals: Vec::new(),
             });
-            let raw = lock(&session.scrollback).snapshot().data;
+            let history = lock(&session.scrollback).history_for_save();
             entry.terminals.push(SavedTerminal {
                 slot: session.key.slot, cwd: session.current_directory(), title: lock(&session.metadata).title.clone(),
-                history: persistence::bounded_history(&raw),
+                history,
                 agent_session: session.saved_agent_reference(),
             });
         }
@@ -665,7 +698,7 @@ impl TerminalManager {
         cols: u16,
         rows: u16,
         env: &[crate::projects::EnvVar],
-        restore: Option<(&SavedTerminal, u64, bool)>,
+        restore: Option<(SavedTerminal, u64, bool)>,
     ) -> Result<Session, String> {
         crate::projects::validate_env(env)?;
         let pair = native_pty_system()
@@ -689,9 +722,13 @@ impl TerminalManager {
         let killer = child.clone_killer();
         let (sender, receiver) = mpsc::channel::<Input>();
         let mut history = Scrollback::new(SCROLLBACK_BYTES);
-        if let Some((tab, timestamp, _)) = restore {
-            history.append(persistence::replay(tab, timestamp));
-        }
+        let (title, recovery, restored_active) = match restore {
+            Some((tab, timestamp, active)) => {
+                history.defer_replay(tab.history, timestamp);
+                (tab.title, tab.agent_session, active)
+            }
+            None => (None, None, false),
+        };
         let session = Session {
             session_id: format!(
                 "{}-{}",
@@ -713,9 +750,9 @@ impl TerminalManager {
             scrollback: Arc::new(Mutex::new(history)),
             attention: self.attention.clone(),
             project_dir: cwd.to_owned(),
-            metadata: Arc::new(Mutex::new(ShellMetadata { title: restore.and_then(|(tab, _, _)| tab.title.clone()), ..Default::default() })),
-            restored_active: restore.is_some_and(|(_, _, active)| active),
-            agent_link: Arc::new(Mutex::new(agent_sessions::AgentLink::new(restore.and_then(|(tab, _, _)| tab.agent_session.clone())))),
+            metadata: Arc::new(Mutex::new(ShellMetadata { title, ..Default::default() })),
+            restored_active,
+            agent_link: Arc::new(Mutex::new(agent_sessions::AgentLink::new(recovery))),
         };
         let master = Arc::downgrade(&session.master);
         let probe = Probe::new(move || {
@@ -1589,6 +1626,26 @@ mod tests {
         buffer.append("this chunk exceeds the cap".into());
         assert_eq!(buffer.snapshot().data, "");
         assert_eq!(buffer.snapshot().seq, 4);
+    }
+
+    #[test]
+    fn dormant_history_is_saved_without_replay_and_prepended_once_on_attach() {
+        let mut buffer = Scrollback::new(4096);
+        buffer.defer_replay("saved output".into(), 1_795_123_400);
+        assert_eq!(buffer.append("live prompt".into()), 2);
+        assert_eq!(buffer.snapshot().data, "live prompt");
+        let saved_again = buffer.history_for_save();
+        assert!(saved_again.starts_with("saved output\n"));
+        assert!(saved_again.ends_with("\nlive prompt"));
+        assert!(buffer.saved.is_some());
+        let snapshot = buffer.open_snapshot();
+        assert_eq!(snapshot.seq, 2);
+        assert!(snapshot.data.starts_with("saved output\r\n"));
+        assert!(snapshot.data.ends_with("live prompt"));
+        assert_eq!(snapshot.data.matches("已恢复").count(), 1);
+        assert_eq!(persistence::bounded_history(&snapshot.data), saved_again);
+        assert_eq!(buffer.open_snapshot().data, snapshot.data);
+        assert_eq!(buffer.append("more".into()), 3);
     }
 
     #[test]

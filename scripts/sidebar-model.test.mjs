@@ -2,9 +2,35 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { filterSidebarProjects, savedSidebarFilter, focusRailSections, fuzzyMatch, matchesSidebarFilter, moveProjectOrder, projectInitial, searchCreationActions, searchProjects, sidebarNavigation, sidebarSections, substringMatch } from '../src/lib/sidebarModel.ts';
 import { sidebarContextPosition, sidebarThumb } from '../src/lib/sidebarLayout.ts';
+import pinyin from 'tiny-pinyin';
 
 const project = (id, extra = {}) => ({ id, name: id, path: '~/work/' + id, port: null, groupId: null, pinned: false, archived: false, ...extra });
 const groups = [{ id: 'work', name: '工作', sortOrder: 2, collapsed: false }, { id: 'personal', name: '个人', sortOrder: 1, collapsed: true }];
+
+test('palette finds project names and creation actions by full pinyin, initials and mixed text', () => {
+  const chinese = project('docs', { displayName: '文档 API 工具' });
+  const direct = project('literal', { displayName: 'wd API guide', archived: true });
+  for (const query of ['wendangapi', 'wdapigj', '文档 api gj', 'wdAPI工具']) {
+    const [match] = searchProjects([chinese], query);
+    assert.equal(match?.project.id, 'docs', query);
+    assert.deepEqual(match.name, []);
+  }
+  assert.deepEqual(searchProjects([chinese, direct], 'wd').map(item => item.project.id), ['literal', 'docs']);
+  assert.deepEqual(searchCreationActions('tjfz').map(item => item.id), ['add-group']);
+});
+
+test('typing successive pinyin queries reuses each project spelling until its name changes', t => {
+  const original = pinyin.parse;
+  let conversions = 0;
+  pinyin.parse = text => { conversions++; return original(text); };
+  t.after(() => { pinyin.parse = original; });
+  const chinese = project('work', { displayName: '账务核对' });
+  for (const query of ['zh', 'zhang', 'zhangwu', 'zwhd']) assert.equal(searchProjects([chinese], query).length, 1);
+  assert.equal(conversions, 1);
+  chinese.displayName = '导出工具';
+  assert.equal(searchProjects([chinese], 'dcgj').length, 1);
+  assert.equal(conversions, 2);
+});
 
 test('Sidebar group counts include every project in a large group and keep archives separate', () => {
   const active = Array.from({ length: 11 }, (_, index) => project(`p${index}`, { groupId: 'work' }));

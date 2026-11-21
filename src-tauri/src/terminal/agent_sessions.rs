@@ -84,11 +84,24 @@ impl TerminalManager {
         lock(&self.sessions).values().cloned().collect()
     }
 
-    fn associate_agent_sessions(&self, catalog: &Catalog, sessions: &[Session]) {
+    fn pending_recoveries(&self) -> Vec<(String, SessionRef)> {
+        self.all_sessions()
+            .into_iter()
+            .filter_map(|session| {
+                let recovery = lock(&session.agent_link).recovery.clone()?;
+                Some((session.session_id, recovery))
+            })
+            .collect()
+    }
+
+    fn associate_agent_sessions(&self, catalog: &Catalog) {
+        // Serialize claims made by foreground launches and periodic persistence.
+        let _mutation = lock(&self.mutation);
+        let sessions = self.all_sessions();
         let mut claimed = HashSet::new();
         let mut unlinked = Vec::new();
         let now = now();
-        for session in sessions {
+        for session in &sessions {
             let process = session.agent_process();
             let linked = lock(&session.agent_link).active(process, now, true);
             if let Some(reference) = linked {
@@ -140,26 +153,21 @@ impl TerminalManager {
                     .is_none()
             })
         }) {
-            let mut catalog = lock(&self.agent_catalog);
-            catalog.refresh();
-            self.associate_agent_sessions(&catalog, &sessions);
+            let catalog = self.agent_catalog.refresh();
+            self.associate_agent_sessions(&catalog);
         }
     }
 
-    fn agent_recoveries(&self) -> HashMap<String, SessionSummary> {
-        let pending: Vec<_> = self
-            .all_sessions()
-            .into_iter()
-            .filter_map(|session| {
-                let recovery = lock(&session.agent_link).recovery.clone()?;
-                Some((session.session_id, recovery))
-            })
-            .collect();
+    fn agent_recoveries(&self, cached: bool) -> HashMap<String, SessionSummary> {
+        let pending = self.pending_recoveries();
         if pending.is_empty() {
             return HashMap::new();
         }
-        let mut catalog = lock(&self.agent_catalog);
-        catalog.refresh();
+        let catalog = if cached {
+            self.agent_catalog.snapshot()
+        } else {
+            self.agent_catalog.refresh()
+        };
         pending
             .into_iter()
             .filter_map(|(id, reference)| Some((id, catalog.find(&reference, None)?)))
@@ -176,9 +184,8 @@ impl TerminalManager {
         let project_dir = crate::expand_tilde(&project.path);
         let project_dir = Path::new(&project_dir);
         let summary = reference.as_ref().and_then(|reference| {
-            let mut catalog = lock(&self.agent_catalog);
-            catalog.refresh();
-            self.associate_agent_sessions(&catalog, &self.all_sessions());
+            let catalog = self.agent_catalog.refresh();
+            self.associate_agent_sessions(&catalog);
             catalog.find(reference, recovery.is_none().then_some(project_dir))
         });
         let cwd = summary
@@ -349,17 +356,24 @@ pub struct RecoveryTarget {
 pub async fn terminal_agent_menu(
     state: State<'_, TerminalManager>,
     project_id: String,
+    cached: Option<bool>,
 ) -> Result<AgentMenu, String> {
     let manager = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let project = project_config(&project_id)?;
         let path = crate::expand_tilde(&project.path);
         let cwd = Path::new(&path);
-        let sessions = {
-            let mut catalog = lock(&manager.agent_catalog);
-            catalog.refresh();
-            catalog.project_sessions(cwd)
+        let catalog = if cached == Some(true) {
+            manager.agent_catalog.snapshot()
+        } else {
+            manager.agent_catalog.refresh()
         };
+        let protected = manager
+            .pending_recoveries()
+            .into_iter()
+            .map(|(_, reference)| reference)
+            .collect();
+        let sessions = catalog.project_sessions(cwd, &protected);
         Ok(AgentMenu {
             tools: available_tools(cwd, &project.env),
             sessions,
@@ -372,6 +386,7 @@ pub async fn terminal_agent_menu(
 #[tauri::command]
 pub async fn terminal_agent_project_sessions(
     state: State<'_, TerminalManager>,
+    cached: Option<bool>,
 ) -> Result<Vec<ProjectSessionSummary>, String> {
     let manager = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -385,9 +400,17 @@ pub async fn terminal_agent_project_sessions(
                 PathBuf::from(crate::expand_tilde(&project.path)),
             )
         });
-        let mut catalog = lock(&manager.agent_catalog);
-        catalog.refresh();
-        Ok(catalog.all_project_sessions(roots))
+        let catalog = if cached == Some(true) {
+            manager.agent_catalog.snapshot()
+        } else {
+            manager.agent_catalog.refresh()
+        };
+        let protected = manager
+            .pending_recoveries()
+            .into_iter()
+            .map(|(_, reference)| reference)
+            .collect();
+        Ok(catalog.all_project_sessions(roots, &protected))
     })
     .await
     .map_err(|error| format!("读取项目的 AI 会话失败：{error}"))?
@@ -396,9 +419,10 @@ pub async fn terminal_agent_project_sessions(
 #[tauri::command]
 pub async fn terminal_agent_recoveries(
     state: State<'_, TerminalManager>,
+    cached: Option<bool>,
 ) -> Result<HashMap<String, SessionSummary>, String> {
     let manager = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || manager.agent_recoveries())
+    tauri::async_runtime::spawn_blocking(move || manager.agent_recoveries(cached == Some(true)))
         .await
         .map_err(|error| format!("读取待恢复的 AI 会话失败：{error}"))
 }
