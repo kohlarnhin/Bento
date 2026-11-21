@@ -13,6 +13,7 @@ import { usePortStandard } from '../lib/usePortStandard';
 import { useReducedMotion } from '../lib/motion';
 import { dashboardEntranceLimit, readyProjectView } from '../lib/motionMath';
 import { terminalKey, type TerminalStatus } from '../lib/terminalRegistry';
+import type { AgentRecoveries, OpenAgent } from '../lib/agentSessions';
 import { useProjectViewMotion } from '../hooks/useProjectViewMotion';
 import { DashboardGitCard, DashboardOutput } from './DashboardPanels';
 import { OpenServiceButton, ProjectWebMenu } from './ProjectServices';
@@ -39,6 +40,9 @@ interface ProjectCardProps {
   focused: boolean;
   onToggleFocus: () => void;
   onNewTerminal: () => Promise<void>;
+  onOpenAgent: OpenAgent;
+  agentRecoveries: AgentRecoveries;
+  onDismissAgentRecovery: (sessionId: string) => void;
   onTerminalClosed: (slot: number) => void;
   terminalControls: RefObject<TerminalWorkspaceControls>;
   onFocusedTerminal: (projectId: string, slot: number, left: number, right?: number) => void;
@@ -247,7 +251,7 @@ function ConflictDialog({ conflict, onClose, onConfirm }: {
 }
 
 export function ProjectCard({ project, view, slots, activeSlot, terminals, terminalControls, onFocusedTerminal, onJumpToAttention, onSelectView, onSelectTerminal,
-  focused, maxTerminals, snippets, onRunSnippet, onChangeSnippet, onToggleFocus, onNewTerminal, onTerminalClosed,
+  focused, maxTerminals, snippets, onRunSnippet, onChangeSnippet, onToggleFocus, onNewTerminal, onOpenAgent, agentRecoveries, onDismissAgentRecovery, onTerminalClosed,
   status: runtimeStatus, runtime, conflicts, onStart, onStop, onRestart, onOpenBrowser,
   onSetDefaultService, onRevealPath, onOpenEditor, onOpenTerminal, onOpenLogs, onClearLogs, onEdit }: ProjectCardProps) {
   const { snapshot, snapshotError, git, health, now, refresh } = useDashboard(project, runtime, view);
@@ -374,7 +378,7 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
       </div>
       <ProjectTabs projectId={project.id} view={view} activeSlot={activeSlot} slots={slots} terminals={terminals}
         maxTerminals={maxTerminals} onSelectView={onSelectView} onSelectTerminal={onSelectTerminal}
-        onNewTerminal={onNewTerminal} onTerminalClosed={onTerminalClosed} />
+        onNewTerminal={onNewTerminal} onOpenAgent={onOpenAgent} onTerminalClosed={onTerminalClosed} />
       <div className="dash-actions">
         {services.length > 1 ? <ProjectWebMenu project={project} listeningPort={listeningPort} actualPort={openPort} terminal={terminalView}
           onOpenBrowser={onOpenBrowser} onSetDefault={onSetDefaultService} />
@@ -457,6 +461,7 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
       </div>
       <div className="workspace-view terminal-chrome" data-workspace-view="terminal" {...{ inert: !terminalInteractive ? '' : undefined }}>
         {mountTerminal && <TerminalWorkspace ref={terminalControls} project={project} activeSlot={activeSlot} slots={slots} terminals={terminals}
+          agentRecoveries={agentRecoveries} onOpenAgent={onOpenAgent} onDismissAgentRecovery={onDismissAgentRecovery}
           snippets={snippets} onRunSnippet={onRunSnippet} onChangeSnippet={onChangeSnippet}
           onJumpToAttention={onJumpToAttention}
           focused={focused} interactive={terminalInteractive} ready={terminalReady} onReady={setReadySlot} onFocusedSlot={onFocusedTerminal} />}

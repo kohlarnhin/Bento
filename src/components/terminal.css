@@ -31,8 +31,47 @@
 }
 .terminal-tab-close:enabled:hover, .terminal-tab-add:enabled:hover { background: var(--h1-hover); color: hsl(var(--foreground)); }
 .terminal-tab-close:disabled, .terminal-tab-add:disabled { color: hsl(var(--muted-foreground) / .55); }
-.terminal-tab-add-wrap { display: grid; place-items: center; flex: none; }
+.terminal-tab-add-wrap { display: flex; align-items: center; gap: 1px; flex: none; }
 .terminal-tab-add { width: 30px; height: 30px; }
+.terminal-tab-add-wrap [data-terminal-tab-add] { border-start-end-radius: 3px; border-end-end-radius: 3px; }
+.terminal-tab-menu-trigger.terminal-tab-add { width: 22px; border-start-start-radius: 3px; border-end-start-radius: 3px; }
+.h1-toolbar .terminal-tab-menu-trigger[aria-expanded="true"] { background-color: var(--toolbar-hover); }
+
+.h1-popup.terminal-agent-menu {
+  width: min(400px, calc(100vw - 16px));
+  padding: 7px;
+  outline: none;
+  background: color-mix(in srgb, var(--h1-surface), white 5%);
+}
+.terminal-agent-menu kbd, .terminal-agent-menu-heading, .terminal-agent-session-meta {
+  color: var(--h1-label);
+  font: 11px/1.4 var(--font-ui);
+}
+.terminal-agent-menu-heading { padding: 5px 9px 4px; }
+.terminal-agent-session-list { max-block-size: min(300px, 50vh); overflow-y: auto; overscroll-behavior: contain; }
+.terminal-agent-menu .terminal-agent-session-option { gap: 9px; min-height: 44px; padding-block: 6px; }
+.terminal-agent-menu button:focus-visible { background: var(--h1-hover); outline: 1px solid var(--hairline-selection); outline-offset: -1px; }
+.terminal-agent-session-option > svg { color: var(--h1-label); }
+
+.terminal-agent-recovery {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 10px;
+  border: 1px solid var(--hairline-card);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--h1-surface), white 4%);
+  color: hsl(var(--foreground));
+  font: 13px/1.45 var(--font-ui);
+}
+.terminal-agent-recovery > svg { flex: none; }
+.terminal-agent-recovery-copy { flex: 1 1 175px; min-width: 0; }
+.terminal-agent-recovery-copy p { color: var(--h1-label); font-size: 11.5px; }
+.terminal-agent-recovery-actions { display: flex; flex: none; gap: 8px; margin-inline-start: auto; }
+.terminal-agent-recovery-actions .h1-button { min-height: 30px; border-radius: 8px; padding-inline: 11px; font-size: 12px; }
 
 .terminal-workspace {
   display: flex;

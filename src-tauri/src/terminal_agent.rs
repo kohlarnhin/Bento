@@ -1,17 +1,18 @@
 mod foreground;
 mod screen;
+pub(crate) mod sessions;
 
 use crate::terminal_escape::{EscapeEvent, EscapeStream};
 use foreground::{Detector, ForegroundAgent};
 use screen::Screen;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
 const CODEX_QUIET_MS: u64 = 3_000;
 // Claude can stop animating its title just before it paints the approval panel.
 const CLAUDE_IDLE_SETTLE_MS: u64 = 500;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Hash, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
     Claude,
@@ -296,6 +297,7 @@ impl Output {
 
 pub struct Tracker {
     pub session: AgentSession,
+    pub process: Option<AgentProcess>,
     output: Output,
     last_activity: u64,
     idle_at: Option<u64>,
@@ -312,6 +314,7 @@ impl Tracker {
                 round_started_at: None,
                 acknowledged: true,
             },
+            process: None,
             output: Output::default(),
             last_activity: now,
             idle_at: None,
@@ -411,6 +414,13 @@ impl Tracker {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AgentProcess {
+    pub kind: AgentKind,
+    pub pid: u32,
+    pub started_at: u64,
+}
+
 pub struct Probe {
     foreground: Box<dyn Fn() -> Option<i32> + Send + Sync>,
     // Sample foreground and apply its result in the same order on the PTY
@@ -456,9 +466,17 @@ impl Sample {
         if self.observed != self.active {
             self.active = self.observed;
             self.pasting = false;
-            *tracker = self
-                .active
-                .map(|agent| Tracker::new(agent.kind, now, self.cols, self.rows));
+            *tracker = self.active.map(|agent| {
+                let mut tracker = Tracker::new(agent.kind, now, self.cols, self.rows);
+                let pid = agent.pid as u32;
+                tracker.process = Some(AgentProcess {
+                    kind: agent.kind,
+                    pid,
+                    started_at: crate::processes::identity(pid)
+                        .map_or(now, |identity| identity.started_at_millis()),
+                });
+                tracker
+            });
         }
     }
 

@@ -706,9 +706,16 @@ export function retryTerminal(projectId: string, slot: number) {
 export async function createTerminal(projectId: string): Promise<number> {
   await initTerminalRegistry(registry.showError);
   const result = await invoke<TerminalOpenResult>('terminal_create', { projectId, cols: 80, rows: 24 });
-  const current = registry.snapshot[terminalKey(projectId, result.session.slot)];
-  if (!current?.sessionId) receiveOpened(result.session);
+  registerTerminalResult(result.session);
   return result.session.slot;
+}
+
+export function registerTerminalResult(session: TerminalSessionInfo) {
+  const current = registry.snapshot[terminalKey(session.projectId, session.slot)];
+  if (!current?.sessionId) receiveOpened(session);
+  else if (current.sessionId === session.sessionId && current.hasAgentRecovery !== session.hasAgentRecovery) {
+    publish({ ...current, hasAgentRecovery: session.hasAgentRecovery });
+  }
 }
 
 export async function closeTerminal(projectId: string, slot: number) {

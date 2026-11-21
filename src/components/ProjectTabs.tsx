@@ -1,9 +1,12 @@
-import { useCallback, useRef, useState } from 'react';
-import { Plus, RotateCcw, Sparkle, X } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { ChevronDown, Plus, RotateCcw, Sparkle, X } from 'lucide-react';
 import { toast } from 'sonner';
 import type { ProjectView, TerminalAgent } from '../types';
 import { closeTerminal, getTerminalSnapshot, restartTerminal, terminalKey, type TerminalStatus } from '../lib/terminalRegistry';
 import { agentNames } from '../lib/terminalUsability';
+import type { AgentMenuData, OpenAgent } from '../lib/agentSessions';
+import { AgentSessionMenuItems } from './AgentSessionActions';
 import { SidebarMenu } from './SidebarMenu';
 import Button from './ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
@@ -34,20 +37,45 @@ interface Props {
   onSelectView: (view: 'overview' | 'git') => void;
   onSelectTerminal: (slot: number) => void;
   onNewTerminal: () => Promise<void>;
+  onOpenAgent: OpenAgent;
   onTerminalClosed: (slot: number) => void;
 }
 
 export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, maxTerminals,
-  onSelectView, onSelectTerminal, onNewTerminal, onTerminalClosed }: Props) {
+  onSelectView, onSelectTerminal, onNewTerminal, onOpenAgent, onTerminalClosed }: Props) {
   const [menu, setMenu] = useState<{ slot: number; x: number; y: number }>();
   const [confirmation, setConfirmation] = useState<Request>();
   const [creating, setCreating] = useState(false);
+  const [agentMenuOpen, setAgentMenuOpen] = useState(false);
+  const [agentMenu, setAgentMenu] = useState<AgentMenuData>();
+  const agentMenuTrigger = useRef<HTMLButtonElement>(null);
   const [busy, setBusy] = useState(false);
   const executing = useRef(false);
   const closeMenu = useCallback(() => setMenu(undefined), []);
+  const closeAgentMenu = useCallback(() => setAgentMenuOpen(false), []);
   const terminalView = view === 'terminal';
   const atLimit = slots.length >= maxTerminals;
   const createLabel = atLimit ? `已达上限（${maxTerminals} 个），可在设置中调整` : '新建终端 (⌘T)';
+
+  useEffect(() => {
+    if (!terminalView) closeAgentMenu();
+    if (!terminalView || !agentMenuOpen) return;
+    let current = true;
+    void invoke<AgentMenuData>('terminal_agent_menu', { projectId }).then(next => {
+      if (current) setAgentMenu(next);
+    }).catch(error => {
+      if (current) {
+        setAgentMenu({ tools: [], sessions: [] });
+        toast.error(String(error));
+      }
+    });
+    return () => { current = false; };
+  }, [agentMenuOpen, terminalView, projectId, closeAgentMenu]);
+
+  function create() {
+    setCreating(true);
+    void onNewTerminal().finally(() => setCreating(false));
+  }
 
   async function perform({ action, slot, sessionId }: Request) {
     if (executing.current || getTerminalSnapshot()[terminalKey(projectId, slot)]?.sessionId !== sessionId) {
@@ -81,15 +109,23 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
 
   const menuStatus = menu && terminals[terminalKey(projectId, menu.slot)];
   const disabled = busy || !menuStatus?.sessionId || menuStatus.opening;
-  const add = <ActionTooltip label={createLabel}>
-    <span className="terminal-tab-add-wrap" title={createLabel} data-view-control aria-hidden={!terminalView || undefined}>
-      <button type="button" aria-label={createLabel} aria-keyshortcuts="Meta+T" className="terminal-tab-add" data-terminal-tab-add
-        disabled={!terminalView || atLimit || creating} onClick={() => {
-          setCreating(true);
-          void onNewTerminal().finally(() => setCreating(false));
-        }}><Plus size={15} aria-hidden="true" /></button>
-    </span>
-  </ActionTooltip>;
+  const add = <div className="terminal-tab-add-wrap" data-view-control aria-hidden={!terminalView || undefined}>
+    <ActionTooltip label={createLabel}>
+      <span title={createLabel}>
+        <button type="button" aria-label={createLabel} aria-keyshortcuts="Meta+T" className="terminal-tab-add" data-terminal-tab-add
+          disabled={!terminalView || atLimit || creating} onClick={create}><Plus size={15} aria-hidden="true" /></button>
+      </span>
+    </ActionTooltip>
+    <button ref={agentMenuTrigger} type="button" className="terminal-tab-add terminal-tab-menu-trigger" data-terminal-agent-menu-trigger
+      title="终端与 AI 会话" aria-label="终端与 AI 会话" aria-haspopup="menu" aria-expanded={agentMenuOpen && terminalView}
+      disabled={!terminalView} onClick={() => { closeMenu(); setAgentMenuOpen(open => !open); }}
+      onKeyDown={event => {
+        if (event.key !== 'ArrowDown') return;
+        event.preventDefault();
+        closeMenu();
+        setAgentMenuOpen(true);
+      }}><ChevronDown size={13} aria-hidden="true" /></button>
+  </div>;
 
   const agentCounts = { claude: 0, codex: 0 };
   const tabs = [
@@ -105,6 +141,7 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
         label: <TabLabel label={label} agent={agent} attention={status?.attention} completion={!!status?.completion} />,
         onContextMenu: (event: React.MouseEvent<HTMLButtonElement>) => {
           event.preventDefault();
+          closeAgentMenu();
           const bounds = event.currentTarget.getBoundingClientRect();
           setMenu({ slot, x: event.clientX || bounds.left, y: event.clientY || bounds.bottom });
         },
@@ -125,6 +162,11 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
         }} />
       {add}
     </div>
+    <MotionPresence>{terminalView && agentMenuOpen && agentMenuTrigger.current && <SidebarMenu x={0} y={0} label="终端与 AI 会话"
+      className="terminal-agent-menu terminal-chrome" items={[]} anchor={agentMenuTrigger.current} onClose={closeAgentMenu}>
+      <AgentSessionMenuItems data={agentMenu} atLimit={atLimit || creating} onTerminal={() => { closeAgentMenu(); create(); }}
+        onAgent={argv => { closeAgentMenu(); void onOpenAgent(argv); }} />
+    </SidebarMenu>}</MotionPresence>
     <MotionPresence>{menu && <SidebarMenu x={menu.x} y={menu.y} label={`终端 ${menu.slot} 操作`} className={terminalView ? 'terminal-chrome' : undefined}
       items={[
         { label: '重启', icon: <RotateCcw size={14} />, disabled, onSelect: () => request('restart', menu.slot) },

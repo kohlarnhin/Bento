@@ -27,7 +27,8 @@ import Button from './components/ui/button';
 import { Toaster } from './components/ui/sonner';
 import { MotionPresence } from './components/ui/motion-presence';
 import { Empty, EmptyTitle, EmptyDescription } from './components/ui/empty';
-import { createTerminal, getProjectTerminalSlots, getTerminalSnapshot, initTerminalRegistry, subscribeTerminals, takeRestoredSlot, terminalKey } from './lib/terminalRegistry';
+import { createTerminal, getProjectTerminalSlots, getTerminal, getTerminalSnapshot, initTerminalRegistry, registerTerminalResult, subscribeTerminals, takeRestoredSlot, terminalKey } from './lib/terminalRegistry';
+import { activateAgentTerminal, useAgentRecoveries, type AgentArgv, type AgentRecoveryTarget } from './lib/agentSessions';
 import { projectLogs } from './lib/useProjectLogs';
 import { recordRender } from './lib/renderMetrics';
 import { DEFAULT_TERMINAL_FONT_SIZE, TERMINAL_THEME } from './lib/terminalAppearance';
@@ -131,6 +132,7 @@ export function App() {
   const changeFontSize = settings.changeFontSize;
   const [settingsOpen, setSettingsOpen] = useState(false);
   const terminals = useSyncExternalStore(subscribeTerminals, getTerminalSnapshot);
+  const { recoveries: agentRecoveries, counts: agentRecoveryCounts, dismiss: dismissAgentRecovery } = useAgentRecoveries(terminals);
   const terminalCount = Object.values(terminals).filter(terminal => terminal.alive).length;
   const [projects, setProjects] = useState<ProjectConfig[]>([]);
   const [groups, setGroups] = useState<ProjectGroup[]>([]);
@@ -355,6 +357,23 @@ export function App() {
       creatingTerminals.current.delete(projectId);
     }
   }, [selectTerminalSlot]);
+
+  const openAgent = useCallback(async (projectId: string, argv: AgentArgv, recovery?: AgentRecoveryTarget) => {
+    if (dialogOpen.current || creatingTerminals.current.has(projectId)) return;
+    creatingTerminals.current.add(projectId);
+    try {
+      await activateAgentTerminal(projectId, argv, terminal => {
+        registerTerminalResult(terminal);
+        if (recovery) dismissAgentRecovery(recovery.sessionId);
+        selectTerminalSlot(terminal.projectId, terminal.slot);
+        requestAnimationFrame(() => getTerminal(terminal.projectId, terminal.slot)?.focus());
+      }, recovery);
+    } catch (error) {
+      toast.error(String(error));
+    } finally {
+      creatingTerminals.current.delete(projectId);
+    }
+  }, [dismissAgentRecovery, selectTerminalSlot]);
 
   useEffect(() => {
     const captured = new Set<string>();
@@ -766,6 +785,7 @@ export function App() {
             onFilterChange={setFilter}
             attentionProjects={attentionProjects}
             projectAgents={projectAgents}
+            agentRecoveryCounts={agentRecoveryCounts}
             completions={completions}
             snippets={snippets}
             onRunSnippet={(id, command) => { void handleRunCommand(id, command, true); }}
@@ -824,6 +844,9 @@ export function App() {
                   focused={focusActive}
                   onToggleFocus={toggleFocusMode}
                   onNewTerminal={() => openTerminal(selectedProject.id)}
+                  onOpenAgent={(argv, recovery) => openAgent(selectedProject.id, argv, recovery)}
+                  agentRecoveries={agentRecoveries}
+                  onDismissAgentRecovery={dismissAgentRecovery}
                   onTerminalClosed={slot => onTerminalClosed(selectedProject.id, slot)}
                   terminalControls={terminalControls}
                   onFocusedTerminal={onFocusedTerminal}

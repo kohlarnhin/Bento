@@ -348,6 +348,12 @@ impl AttentionManager {
             .map(|entry| (entry.tracker.raised, entry.agent_status())).unwrap_or_default()
     }
 
+    pub fn agent_process(&self, key: &TerminalKey, session_id: &str) -> Option<crate::terminal_agent::AgentProcess> {
+        let state = self.state.lock().unwrap();
+        let entry = state.sessions.get(key).filter(|entry| entry.session_id == session_id)?;
+        entry.agent.as_ref()?.process
+    }
+
     #[cfg(test)]
     fn raised(&self, key: &TerminalKey, session_id: &str) -> bool {
         self.snapshot(key, session_id).0

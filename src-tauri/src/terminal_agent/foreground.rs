@@ -7,7 +7,7 @@ const DISCOVERY_MS: u64 = 125;
 pub(super) struct ForegroundAgent {
     pub(super) kind: AgentKind,
     group: i32,
-    pid: i32,
+    pub(super) pid: i32,
 }
 
 #[derive(Default)]

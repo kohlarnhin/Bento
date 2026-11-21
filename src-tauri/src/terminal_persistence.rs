@@ -1,3 +1,4 @@
+use crate::terminal_agent::sessions::SessionRef;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, DirBuilder, OpenOptions};
@@ -15,6 +16,8 @@ pub struct SavedTerminal {
     pub cwd: PathBuf,
     pub title: Option<String>,
     pub history: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session: Option<SessionRef>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -151,6 +154,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn older_tabs_load_and_the_ai_extension_stores_only_tool_and_session_id() {
+        let mut terminal: SavedTerminal = serde_json::from_str(r#"{"slot":1,"cwd":"/tmp/project","title":null,"history":""}"#).unwrap();
+        assert!(terminal.agent_session.is_none());
+        assert!(serde_json::to_value(&terminal).unwrap().get("agent_session").is_none());
+        let id = "383c4fef-fd6e-452a-9130-bdbdea62bc01";
+        terminal.agent_session = SessionRef::new(crate::terminal_agent::AgentKind::Claude, id);
+        assert_eq!(serde_json::to_value(&terminal).unwrap()["agent_session"], serde_json::json!({"tool":"claude","id":id}));
+    }
+
+    #[test]
     fn persists_tabs_active_slot_cwd_and_replays_bounded_read_only_history() {
         let directory = std::env::temp_dir().join(format!("bento-history-{}", std::process::id()));
         let mut writer = Store::new(directory.clone(), true);
@@ -159,6 +172,7 @@ mod tests {
             cwd: PathBuf::from("/tmp/开发"),
             title: Some("终端 2".into()),
             history: bounded_history(&("一行\n".repeat(5050) + "last\x1b]133;D;0\x07")),
+            agent_session: None,
         };
         assert_eq!(terminal.history.lines().count(), 5000);
         let written = BTreeMap::from([(

@@ -17,16 +17,20 @@ export interface SidebarMenuItem {
   separatorBefore?: boolean;
   keepOpen?: boolean;
 }
-export function SidebarMenu({ x, y, items, onClose, label = '侧边栏菜单', className, projectContext = false, keyboard = false }: {
+export function SidebarMenu({ x, y, items, onClose, label = '侧边栏菜单', className, projectContext = false, keyboard = false, anchor, children }: {
   x: number; y: number; items: SidebarMenuItem[]; onClose: () => void; label?: string; className?: string; projectContext?: boolean; keyboard?: boolean;
+  anchor?: HTMLElement; children?: ReactNode;
 }) {
   const onExited = useContext(MotionExit);
   const { panel: menu, attach, present } = usePopupMotion(!onExited, { onExited: onExited ?? undefined });
+  const fitViewport = projectContext || !!anchor;
   useLayoutEffect(() => {
     const node = menu.current;
-    if (!projectContext || !present || !node) return;
+    if (!fitViewport || !present || !node) return;
     const place = () => {
-      const { left, top } = sidebarContextPosition(x, y, node.offsetWidth, node.offsetHeight, window.innerWidth, window.innerHeight);
+      const bounds = anchor?.getBoundingClientRect();
+      const { left, top } = sidebarContextPosition(bounds ? bounds.right - node.offsetWidth : x,
+        bounds ? bounds.bottom + 5 : y, node.offsetWidth, node.offsetHeight, window.innerWidth, window.innerHeight);
       node.style.left = `${left}px`;
       node.style.top = `${top}px`;
     };
@@ -35,17 +39,17 @@ export function SidebarMenu({ x, y, items, onClose, label = '侧边栏菜单', c
     resize.observe(node);
     window.addEventListener('resize', place);
     return () => { resize.disconnect(); window.removeEventListener('resize', place); };
-  }, [menu, present, projectContext, x, y]);
+  }, [menu, present, fitViewport, anchor, x, y]);
 
   useLayoutEffect(() => {
     if (onExited) return;
-    const previous = document.activeElement as HTMLElement | null;
-    if (!projectContext) menu.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus({ preventScroll: true });
+    const previous = anchor ?? document.activeElement as HTMLElement | null;
+    if (!projectContext) (menu.current?.querySelector<HTMLButtonElement>('button:not(:disabled)') ?? (anchor && menu.current))?.focus({ preventScroll: true });
     const outside = (event: PointerEvent) => {
       const contextClick = event.button === 2 || (event.button === 0 && event.ctrlKey);
       if (projectContext && contextClick && event.target instanceof Element &&
         event.target.closest('[data-project-row]')) return;
-      if (!menu.current?.contains(event.target as Node)) onClose();
+      if (!anchor?.contains(event.target as Node) && !menu.current?.contains(event.target as Node)) onClose();
     };
     const scroll = (event: Event) => { if (!menu.current?.contains(event.target as Node)) onClose(); };
     const escape = (event: KeyboardEvent) => {
@@ -56,7 +60,7 @@ export function SidebarMenu({ x, y, items, onClose, label = '侧边栏菜单', c
     };
     document.addEventListener('pointerdown', outside, true);
     window.addEventListener('blur', onClose);
-    if (projectContext) {
+    if (fitViewport) {
       document.addEventListener('scroll', scroll, true);
       document.addEventListener('wheel', scroll, { capture: true, passive: true });
       document.addEventListener('keydown', escape, true);
@@ -64,14 +68,14 @@ export function SidebarMenu({ x, y, items, onClose, label = '侧边栏菜单', c
     return () => {
       document.removeEventListener('pointerdown', outside, true);
       window.removeEventListener('blur', onClose);
-      if (projectContext) {
+      if (fitViewport) {
         document.removeEventListener('scroll', scroll, true);
         document.removeEventListener('wheel', scroll, true);
         document.removeEventListener('keydown', escape, true);
       }
       if (previous?.isConnected) previous.focus({ preventScroll: true });
     };
-  }, [onClose, onExited, menu, projectContext]);
+  }, [onClose, onExited, menu, projectContext, fitViewport, anchor]);
   useLayoutEffect(() => {
     const node = menu.current;
     if (!projectContext || onExited || !node) return;
@@ -84,9 +88,9 @@ export function SidebarMenu({ x, y, items, onClose, label = '侧边栏菜单', c
   if (!present) return null;
   const height = items.length * 32 + items.filter(item => item.separatorBefore).length * 9 + 16;
   return createPortal(<div ref={attach} role="menu" aria-label={label} data-sidebar-menu data-project-context={projectContext || undefined}
-    tabIndex={projectContext ? -1 : undefined} data-tauri-drag-region="false" {...{ inert: onExited ? '' : undefined }}
+    tabIndex={fitViewport ? -1 : undefined} data-tauri-drag-region="false" {...{ inert: onExited ? '' : undefined }}
     className={cn('h1-popup h1-menu-list fixed z-[80] min-w-40', projectContext && 'outline-none', className)}
-    style={projectContext ? { left: x, top: y, maxHeight: 'calc(100vh - 16px)', overflowY: 'auto' } :
+    style={fitViewport ? { left: x, top: y, maxHeight: 'calc(100vh - 16px)', overflowY: 'auto' } :
       { left: Math.max(8, Math.min(x, window.innerWidth - 190)), top: Math.max(8, Math.min(y, window.innerHeight - height)) }}
     onContextMenu={event => event.preventDefault()} onKeyDown={event => {
       if (event.key === 'Escape' || event.key === 'Tab') { event.preventDefault(); event.stopPropagation(); onClose(); }
@@ -109,5 +113,6 @@ export function SidebarMenu({ x, y, items, onClose, label = '侧边栏菜单', c
         aria-haspopup={item.keepOpen || undefined}
         onClick={() => { if (!item.keepOpen) onClose(); item.onSelect(); }}>{item.icon}{item.label}</button>
     </Fragment>)}
+    {children}
   </div>, document.body);
 }

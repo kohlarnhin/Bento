@@ -1,3 +1,5 @@
+pub(crate) mod agent_sessions;
+
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -9,6 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use crate::terminal_agent::{AgentSession, AgentStatus, Probe};
+use crate::terminal_agent::sessions::Catalog as AgentCatalog;
 use crate::terminal_attention::{AttentionManager, Sinks as AttentionSinks};
 use crate::terminal_escape::{osc_cwd, EscapeStream};
 use crate::terminal_persistence::{self as persistence, SavedProject, SavedSessions, SavedTerminal, Store};
@@ -47,6 +50,7 @@ pub struct TerminalSessionInfo {
     pub title: Option<String>,
     pub restored_active: bool,
     pub completion: Option<Completion>,
+    pub has_agent_recovery: bool,
     #[serde(flatten)]
     pub agent_status: AgentStatus,
 }
@@ -217,6 +221,7 @@ struct Session {
     project_dir: PathBuf,
     metadata: Arc<Mutex<ShellMetadata>>,
     restored_active: bool,
+    agent_link: Arc<Mutex<agent_sessions::AgentLink>>,
 }
 
 #[derive(Default)]
@@ -251,6 +256,7 @@ impl Session {
             title: metadata.title.clone(),
             restored_active: self.restored_active,
             completion: metadata.completion.clone(),
+            has_agent_recovery: lock(&self.agent_link).recovery.is_some(),
             agent_status,
         }
     }
@@ -328,6 +334,18 @@ impl Session {
             .filter(|pgid| *pgid > 0);
         shell_group.is_some() && foreground == shell_group
     }
+
+    fn queue_command(&self, command: String, check_idle: bool) -> Result<mpsc::Receiver<Result<(), String>>, String> {
+        let (reply, result) = mpsc::channel();
+        self.writer.send(Input::Run {
+            command, check_idle, reply, deadline: Instant::now() + Duration::from_secs(5),
+        }).map_err(|_| "终端输入已断开".to_string())?;
+        Ok(result)
+    }
+}
+
+fn await_command(result: mpsc::Receiver<Result<(), String>>) -> Result<(), String> {
+    result.recv_timeout(Duration::from_secs(5)).map_err(|_| "终端未及时响应，请稍后重试".to_string())?
 }
 
 type OutputSink = Arc<dyn Fn(TerminalOutput) + Send + Sync>;
@@ -356,6 +374,7 @@ pub struct TerminalManager {
     completion: CompletionSink,
     inactive: Arc<dyn Fn() -> bool + Send + Sync>,
     visible_tabs: Arc<Mutex<HashSet<TerminalKey>>>,
+    agent_catalog: Arc<Mutex<AgentCatalog>>,
 }
 
 impl TerminalManager {
@@ -382,6 +401,7 @@ impl TerminalManager {
             completion: Arc::new(|_, _| {}),
             inactive: Arc::new(|| false),
             visible_tabs: Arc::new(Mutex::new(HashSet::new())),
+            agent_catalog: Arc::new(Mutex::new(AgentCatalog::new(dirs::home_dir()))),
         }
     }
 
@@ -526,6 +546,7 @@ impl TerminalManager {
     }
 
     pub fn save_sessions(&self) {
+        self.prepare_agent_links();
         let _mutation = lock(&self.mutation);
         self.save_sessions_locked();
     }
@@ -556,6 +577,7 @@ impl TerminalManager {
             entry.terminals.push(SavedTerminal {
                 slot: session.key.slot, cwd: session.current_directory(), title: lock(&session.metadata).title.clone(),
                 history: persistence::bounded_history(&raw),
+                agent_session: session.saved_agent_reference(),
             });
         }
         for entry in snapshot.values_mut() {
@@ -693,6 +715,7 @@ impl TerminalManager {
             project_dir: cwd.to_owned(),
             metadata: Arc::new(Mutex::new(ShellMetadata { title: restore.and_then(|(tab, _, _)| tab.title.clone()), ..Default::default() })),
             restored_active: restore.is_some_and(|(_, _, active)| active),
+            agent_link: Arc::new(Mutex::new(agent_sessions::AgentLink::new(restore.and_then(|(tab, _, _)| tab.agent_session.clone())))),
         };
         let master = Arc::downgrade(&session.master);
         let probe = Probe::new(move || {
@@ -896,9 +919,7 @@ impl TerminalManager {
         if command.trim().is_empty() {
             return Err("请输入要运行的命令".into());
         }
-        let (reply, result) = mpsc::channel();
-        let used_slot;
-        {
+        let (used_slot, result) = {
             let _mutation = lock(&self.mutation);
             let mut sessions: Vec<_> = lock(&self.sessions).values()
                 .filter(|session| session.key.project_id == project_id).cloned().collect();
@@ -922,19 +943,10 @@ impl TerminalManager {
             } else {
                 return Err("所有终端都在运行程序，请结束其中一个，或在设置中调高终端数量上限".into());
             };
-            used_slot = session.key.slot;
-            session.writer.send(Input::Run {
-                command,
-                check_idle,
-                reply,
-                deadline: std::time::Instant::now() + Duration::from_secs(5),
-            })
-            .map_err(|_| "终端输入已断开".to_string())?;
-        }
+            (session.key.slot, session.queue_command(command, check_idle)?)
+        };
         // Neither the map nor the mutation lock is held while the PTY writer replies.
-        result
-            .recv_timeout(Duration::from_secs(5))
-            .map_err(|_| "终端未及时响应，请稍后重试".to_string())??;
+        await_command(result)?;
         Ok(RunResult { slot: used_slot })
     }
 

@@ -1,0 +1,7 @@
+{"timestamp":"2026-11-20T13:12:00.000Z","type":"session_meta","payload":{"id":"876c310b-5293-4557-ae09-11c6cb346802","cwd":"/sample/projects/current/nested","timestamp":"2026-11-20T13:12:00.000Z","cli_version":"fixture","source":"cli"}}
+{"timestamp":"2026-11-20T13:12:01.000Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"Developer context"}]}}
+{"timestamp":"2026-11-20T13:12:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>Current directory and shell</environment_context>"}]}}
+{"timestamp":"2026-11-20T13:12:03.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions\n\n<INSTRUCTIONS>Repository instructions</INSTRUCTIONS><environment_context>Environment variables</environment_context>\n\n导出 CSV 加时间范围\n第二行"}]}}
+{"timestamp":"2026-11-20T13:20:00.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"fixture-1","input":"*** Begin Patch\n*** Update File: ./src/export.ts\n@@\n-old\n+new\n*** Add File: src/export.test.ts\n+test\n*** End Patch"}}
+{broken}
+{"timestamp":"2026-11-20T13:34:00.000Z","type":"event_msg","payload":{"type":"patch_apply_end","success":true,"changes":{"/sample/projects/current/nested/src/export.ts":{"type":"update","unified_diff":"","move_path":null},"/sample/projects/current/nested/src/export.test.ts":{"type":"add","content":"test"}}}}

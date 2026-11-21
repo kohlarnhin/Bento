@@ -139,7 +139,12 @@ pub fn request(app: &AppHandle) {
 
 fn finish(app: &AppHandle, confirmed: bool) {
     if confirmed {
-        app.exit(0);
+        let app = app.clone();
+        let terminals = app.state::<crate::terminal::TerminalManager>().inner().clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = tauri::async_runtime::spawn_blocking(move || terminals.prepare_agent_links()).await;
+            app.exit(0);
+        });
     } else {
         app.state::<QuitPending>().0.store(false, Ordering::SeqCst);
     }

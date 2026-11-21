@@ -1,8 +1,10 @@
 import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { FileUp, Loader2, RotateCcw, TriangleAlert } from 'lucide-react';
 import type { ProjectConfig } from '../types';
+import type { AgentRecoveries, OpenAgent } from '../lib/agentSessions';
 import { attachTerminal, fitTerminal, getTerminal, getTerminalSearch, getTerminalSnapshot, restartTerminal, retryTerminal, subscribeTerminals, terminalKey } from '../lib/terminalRegistry';
 import { TerminalFindBar, type TerminalFindControls } from './TerminalFindBar';
+import { AgentRecoveryCard } from './AgentSessionActions';
 import Button from './ui/button';
 
 export interface TerminalDimensions { cols: number; rows: number }
@@ -18,13 +20,19 @@ export const ProjectTerminal = forwardRef<ProjectTerminalControls, {
   project: ProjectConfig;
   activeSlot: number;
   interactive: boolean;
+  agentRecoveries: AgentRecoveries;
+  onOpenAgent: OpenAgent;
+  onDismissAgentRecovery: (sessionId: string) => void;
   onReady?: (slot: number) => void;
   onFocus: () => void;
   onResize: (slot: number, size: TerminalDimensions) => void;
-}>(function ProjectTerminal({ project, activeSlot, interactive, onReady, onFocus, onResize }, ref) {
+}>(function ProjectTerminal({ project, activeSlot, interactive, agentRecoveries, onOpenAgent, onDismissAgentRecovery, onReady, onFocus, onResize }, ref) {
   const host = useRef<HTMLDivElement>(null);
   const terminals = useSyncExternalStore(subscribeTerminals, getTerminalSnapshot);
   const status = terminals[terminalKey(project.id, activeSlot)];
+  const sessionId = status?.sessionId;
+  const recovery = sessionId && agentRecoveries[sessionId];
+  const [resuming, setResuming] = useState<string>();
   const canAttach = activeSlot === 1 || Boolean(status?.sessionId);
   const find = useRef<TerminalFindControls>(null);
   const [findRequest, setFindRequest] = useState<{ key: string; version: number }>();
@@ -78,9 +86,9 @@ export const ProjectTerminal = forwardRef<ProjectTerminalControls, {
   const exited = !!status?.sessionId && !status.alive && !status.opening;
   const overlay = status?.opening || (!status?.alive && status?.error) || exited;
   return (
-    <section className="group/pane relative min-h-0 min-w-0 flex-1 overflow-hidden" data-terminal-pane={project.id} data-terminal-active-slot={activeSlot}
+    <section className="group/pane relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" data-terminal-pane={project.id} data-terminal-active-slot={activeSlot}
       aria-label={`${project.displayName || project.name} 终端 ${activeSlot}`} onFocusCapture={onFocus}>
-      <div className="relative size-full min-h-0 min-w-0" data-terminal-area>
+      <div className="relative min-h-0 min-w-0 flex-1" data-terminal-area>
         <div ref={host} className="size-full min-h-0 min-w-0" />
         {findOpen && getTerminalSearch(project.id, activeSlot) && <TerminalFindBar key={findKey}
           ref={find} search={getTerminalSearch(project.id, activeSlot)!} terminal={getTerminal(project.id, activeSlot)!}
@@ -100,6 +108,14 @@ export const ProjectTerminal = forwardRef<ProjectTerminalControls, {
           <FileUp className="size-8 text-terminal-muted" /><p className="text-sm font-medium">松开以插入文件路径</p>
         </div>
       </div>
+      {sessionId && recovery && <AgentRecoveryCard session={recovery} busy={!!status.opening || resuming === sessionId}
+        onContinue={argv => {
+          setResuming(sessionId);
+          void onOpenAgent(argv, { slot: activeSlot, sessionId }).finally(() => setResuming(previous => previous === sessionId ? undefined : previous));
+        }} onIgnore={() => {
+          onDismissAgentRecovery(sessionId);
+          getTerminal(project.id, activeSlot)?.focus();
+        }} />}
     </section>
   );
 });

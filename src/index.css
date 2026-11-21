@@ -429,7 +429,7 @@
     font-size: 14px;
     font-weight: 400;
   }
-  .sidebar-project-row[data-project-agent] { min-height: 48px; gap: 10px; padding-inline: 8px; }
+  .sidebar-project-row:is([data-project-agent], [data-agent-recovery-count]) { min-height: 48px; gap: 10px; padding-inline: 8px; }
   .sidebar-agent-detail { margin-top: 1px; color: var(--h1-label); font-size: 11px; line-height: 14px; font-weight: 400; }
   .agent-status-chip {
     flex: none;

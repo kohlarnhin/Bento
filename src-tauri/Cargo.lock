@@ -64,6 +64,7 @@ name = "apphub"
 version = "0.3.3"
 dependencies = [
  "block2",
+ "chrono",
  "dirs 5.0.1",
  "libc",
  "objc2",

@@ -2,6 +2,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffec
 import { invoke } from '@tauri-apps/api/core';
 import { dashboardLog, dashboardServices, logTime } from '../lib/dashboard';
 import { getTerminal, terminalKey, type TerminalStatus } from '../lib/terminalRegistry';
+import type { AgentRecoveries, OpenAgent } from '../lib/agentSessions';
 import { agentNames, agentNeedsAttention, agentStateLabels } from '../lib/terminalUsability';
 import { useProjectLogLines } from '../lib/useProjectLogs';
 import type { ProjectConfig, Service, Snippet, SnippetChange } from '../types';
@@ -67,6 +68,9 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
   activeSlot: number;
   slots: number[];
   terminals: Record<string, TerminalStatus>;
+  agentRecoveries: AgentRecoveries;
+  onOpenAgent: OpenAgent;
+  onDismissAgentRecovery: (sessionId: string) => void;
   focused: boolean;
   interactive: boolean;
   ready: boolean;
@@ -77,7 +81,7 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
   onFocusedSlot: (projectId: string, slot: number, left: number, right?: number) => void;
   onJumpToAttention: () => void;
 }>(function TerminalWorkspace({ project, activeSlot, slots, terminals, focused, interactive, ready,
-  snippets, onRunSnippet, onChangeSnippet, onReady, onFocusedSlot, onJumpToAttention }, ref) {
+  agentRecoveries, onOpenAgent, onDismissAgentRecovery, snippets, onRunSnippet, onChangeSnippet, onReady, onFocusedSlot, onJumpToAttention }, ref) {
   const [split, setSplit] = useState(false);
   const [source, setSource] = useState<string>();
   const [splitWidth, setSplitWidth] = useState(50);
@@ -148,6 +152,7 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
       <div className="terminal-pane-frame">
         {split && <div className="terminal-pane-heading">终端 {activeSlot}{inputSlot === activeSlot && context?.shell && ` · ${shell}`}</div>}
         <ProjectTerminal project={project} activeSlot={activeSlot} ref={leftControls} interactive={interactive}
+          agentRecoveries={agentRecoveries} onOpenAgent={onOpenAgent} onDismissAgentRecovery={onDismissAgentRecovery}
           onReady={onReady} onFocus={focusLeft} onResize={resize} />
       </div>
       {split && <>
@@ -175,7 +180,8 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
               onValueChange={sourceChanged} className="terminal-source-select" popupClassName="terminal-chrome" />
           </div>
           {rightSlot === undefined ? <ServiceLogPane key={selected} projectId={project.id} services={services} serviceId={rightService} /> :
-            <ProjectTerminal project={project} activeSlot={rightSlot} ref={rightControls} interactive={interactive} onFocus={focusRight} onResize={resize} />}
+            <ProjectTerminal project={project} activeSlot={rightSlot} ref={rightControls} interactive={interactive} onFocus={focusRight} onResize={resize}
+              agentRecoveries={agentRecoveries} onOpenAgent={onOpenAgent} onDismissAgentRecovery={onDismissAgentRecovery} />}
         </div>
       </>}
     </div>
