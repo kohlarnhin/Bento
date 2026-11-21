@@ -52,6 +52,12 @@ export function SettingsDialog({ settings, updater, onClose, onCheckUpdates }: {
             onCheckedChange={enabled => { void settings.changeAutostart(enabled); }} />
         </div>
         {settings.autostartError && <p role="alert" className="h1-list-note" data-autostart-error>{settings.autostartError}</p>}
+        <div className="h1-list-row">
+          <label htmlFor="settings-show-tray" className="text-sm font-medium">在菜单栏显示</label>
+          <Switch id="settings-show-tray" checked={settings.features['tray.enabled']}
+            disabled={settings.fontLoading || !!settings.featureSaving}
+            onCheckedChange={value => { void settings.changeFeature('tray.enabled', value); }} />
+        </div>
         </div>
       </section>
 
@@ -63,7 +69,7 @@ export function SettingsDialog({ settings, updater, onClose, onCheckUpdates }: {
             <label htmlFor="settings-font-size" className="text-sm font-medium">字号</label>
             <p id="settings-font-help" className="mt-1.5 text-xs text-muted-foreground">立即应用到所有终端，默认 {DEFAULT_TERMINAL_FONT_SIZE} px</p>
           </div>
-          <Select id="settings-font-size" label="字号" value={String(settings.fontSize)} options={fontSizes}
+          <Select id="settings-font-size" label="字号" value={String(settings.fontSize)} options={fontSizes} clearRowsWhenAbove
             disabled={settings.fontLoading || settings.fontSaving} aria-describedby="settings-font-help" data-settings-font-size
             onValueChange={value => { void settings.changeFontSize(Number(value)); }} className="w-24 shrink-0 tabular-nums" />
         </div>
@@ -73,11 +79,20 @@ export function SettingsDialog({ settings, updater, onClose, onCheckUpdates }: {
             <label htmlFor="settings-max-terminals" className="text-sm font-medium">每个项目最多终端数</label>
             <p id="settings-max-terminals-help" className="mt-1.5 text-xs leading-relaxed text-muted-foreground">默认 2 个；调低不会关闭已打开的终端</p>
           </div>
-          <Select id="settings-max-terminals" label="每个项目最多终端数" value={String(settings.maxPerProject)} options={terminalLimits}
+          <Select id="settings-max-terminals" label="每个项目最多终端数" value={String(settings.maxPerProject)} options={terminalLimits} clearRowsWhenAbove
             disabled={settings.fontLoading || settings.maxSaving} aria-describedby="settings-max-terminals-help" data-settings-max-terminals
             onValueChange={value => { void settings.changeMaxPerProject(Number(value)); }} className="w-24 shrink-0 tabular-nums" />
         </div>
         {settings.maxError && <p role="alert" className="h1-list-note" data-max-terminals-error>{settings.maxError}</p>}
+        {([
+          ['terminal.restore', '重启后恢复终端'],
+          ['terminal.commandNotices', '命令完成通知'],
+        ] as const).map(([key, label]) => <div key={key} className="h1-list-row">
+          <label htmlFor={key} className="text-sm font-medium">{label}</label>
+          <Switch id={key} checked={settings.features[key]} disabled={settings.fontLoading || !!settings.featureSaving}
+            onCheckedChange={value => { void settings.changeFeature(key, value); }} />
+        </div>)}
+        {settings.featureError && <p role="alert" className="h1-list-note">{settings.featureError}</p>}
         </div>
       </section>
 

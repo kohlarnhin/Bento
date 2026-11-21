@@ -2,8 +2,8 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExterna
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, RefObject } from 'react';
 import { ArrowDownToLine, Check, ChevronRight, FolderOpen, FolderPlus, GripVertical, ListFilter, MoreHorizontal, Pencil, Pin, Plus, RefreshCw, Search, Settings, Square, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
-import type { PortConflict, ProjectConfig, ProjectGroup, ProjectSelection, ProjectStatus } from '../types';
-import { matchesSidebarFilter, moveProjectOrder, sidebarSections, type SidebarFilter, type SidebarSection } from '../lib/sidebarModel';
+import type { PortConflict, ProjectConfig, ProjectGroup, ProjectSelection, ProjectStatus, Snippet, TerminalCompletion } from '../types';
+import { moveProjectOrder, sidebarSections, type SidebarFilter, type SidebarSection } from '../lib/sidebarModel';
 import { getTerminalSnapshot, subscribeTerminals } from '../lib/terminalRegistry';
 import { cn } from '../lib/utils';
 import { recordRender } from '../lib/renderMetrics';
@@ -12,6 +12,7 @@ import Button from './ui/button';
 import { ActionTooltip } from './ui/tooltip';
 import { SidebarScrollArea } from './SidebarScrollArea';
 import { Input } from './ui/input';
+import { SegmentedControl } from './ui/segmented-control';
 import { ProjectAvatar } from './ProjectAvatar';
 import { StatusDot } from './StatusDot';
 import { SidebarMenu, type SidebarMenuItem } from './SidebarMenu';
@@ -26,7 +27,9 @@ interface Props {
   filter: SidebarFilter;
   onFilterChange: (filter: SidebarFilter) => void;
   attentionProjects: ReadonlySet<string>;
-  changedProjects: ReadonlySet<string>;
+  completions: ReadonlyMap<string, TerminalCompletion>;
+  snippets: Record<string, Snippet[]>;
+  onRunSnippet: (id: string, command: string) => void;
   onQuickSwitch: () => void;
   onUpdateGroup: (id: string, changes: { name?: string; collapsed?: boolean }) => Promise<void>;
   onReorderGroups: (ids: string[]) => Promise<void>;
@@ -79,22 +82,18 @@ interface ProjectDrag {
   frame?: number;
 }
 
-const RUNNING_COLLAPSED_KEY = 'bento.sidebar.runningCollapsed';
 const ARCHIVED_COLLAPSED_KEY = 'bento.sidebar.archivedCollapsed';
-
-function readRunningCollapsed(): boolean {
-  try { return JSON.parse(localStorage.getItem(RUNNING_COLLAPSED_KEY) ?? 'false') === true; }
-  catch { return false; }
-}
 
 function GroupHeadingMarker({ expanded }: { expanded: boolean }) {
   return <ChevronRight aria-hidden="true"
     className={cn('sidebar-heading-disclosure ml-auto size-2.5 shrink-0 motion-safe:transition-transform', expanded && 'rotate-90')} />;
 }
 
-function ProjectRowStatus({ projectId, status, conflict, attention }: {
-  projectId: string; status: ProjectStatus; conflict?: boolean; attention?: boolean;
+function ProjectRowStatus({ projectId, status, conflict, attention, completion }: {
+  projectId: string; status: ProjectStatus; conflict?: boolean; attention?: boolean; completion?: TerminalCompletion;
 }) {
+  if (completion) return <span className="sidebar-completion" data-command-completion={completion.exitCode === 0 ? 'done' : 'failed'}
+    title={completion.command + ' · 退出码 ' + completion.exitCode}>{completion.exitCode === 0 ? '完成' : '× 失败'}</span>;
   if (status === 'stopped' && !conflict && !attention) return null;
   const runtimeLabel = conflict ? '端口冲突' : { running: '运行中', starting: '启动中', error: '运行异常', stopped: '' }[status];
   const label = [runtimeLabel, attention && '终端有新动静'].filter(Boolean).join(' · ');
@@ -102,9 +101,8 @@ function ProjectRowStatus({ projectId, status, conflict, attention }: {
     tone={conflict ? 'error' : status} />;
 }
 
-export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive, folderDropName, groups: projectGroups, filter, onFilterChange, attentionProjects, changedProjects, onQuickSwitch, onUpdateGroup, onReorderGroups, onGroupAction, onProjectFlags, visibleProjects, searchQuery, searchInputRef, onSearchChange, onReorder, reordering, statuses, conflicts, selection, maxPerProject, loading, projectsLoaded, onSelectProject, onCreateTerminal, onOpenProjectLogs, onDeleteProject, onRefresh, onCreate, managedCount, onStopAll, currentVersion, availableVersion, onCheckUpdates, onOpenSettings }: Props) {
+export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive, folderDropName, groups: projectGroups, filter, onFilterChange, attentionProjects, completions, snippets, onRunSnippet, onQuickSwitch, onUpdateGroup, onReorderGroups, onGroupAction, onProjectFlags, visibleProjects, searchQuery, searchInputRef, onSearchChange, onReorder, reordering, statuses, conflicts, selection, maxPerProject, loading, projectsLoaded, onSelectProject, onCreateTerminal, onOpenProjectLogs, onDeleteProject, onRefresh, onCreate, managedCount, onStopAll, currentVersion, availableVersion, onCheckUpdates, onOpenSettings }: Props) {
   recordRender('projectSidebar');
-  const [runningCollapsed, setRunningCollapsed] = useState(readRunningCollapsed);
   const [archivedCollapsed, setArchivedCollapsed] = useState(() => {
     try { return JSON.parse(localStorage.getItem(ARCHIVED_COLLAPSED_KEY) ?? 'true') !== false; } catch { return true; }
   });
@@ -122,7 +120,6 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
   const projectList = useRef<HTMLElement>(null);
   const selectionMarker = useRef<HTMLSpanElement>(null);
   useSidebarMotion(projectList, selectionMarker, projects, projectsLoaded, inactive);
-  const runningSection = useRef<HTMLElement>(null);
   const indicator = useRef<HTMLDivElement>(null);
   const drag = useRef<ProjectDrag | null>(null);
   const suppressClick = useRef(false);
@@ -137,16 +134,9 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
   const visibleIds = useMemo(() => new Set(visibleProjects.map(project => project.id)), [visibleProjects]);
   const sections = useMemo(() => sidebarSections(projects, projectGroups), [projects, projectGroups]);
   const orderedGroups = [...projectGroups].sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
-  const runningProjects = projects.filter(project => matchesSidebarFilter(project, 'running', statuses, attentionProjects, changedProjects));
-  const runningIds = new Set(runningProjects.map(project => project.id));
-  const ungrouped = sections.find(section => section.id === 'ungrouped')?.projects ?? [];
-  const runningUngrouped = !filtering && !runningCollapsed ? ungrouped.filter(project => runningIds.has(project.id)) : [];
-  const runningUngroupedIds = new Set(runningUngrouped.map(project => project.id));
+  const runningCount = projects.filter(project => statuses[project.id] === 'running').length;
   const versionLabel = currentVersion ? `v${currentVersion}` : '检查更新';
   const updateLabel = availableVersion ? `更新到 v${availableVersion}` : '检查更新';
-  useEffect(() => {
-    try { localStorage.setItem(RUNNING_COLLAPSED_KEY, JSON.stringify(runningCollapsed)); } catch { /* In-memory fallback. */ }
-  }, [runningCollapsed]);
   useEffect(() => {
     try { localStorage.setItem(ARCHIVED_COLLAPSED_KEY, JSON.stringify(archivedCollapsed)); } catch { /* In-memory fallback. */ }
   }, [archivedCollapsed]);
@@ -201,25 +191,16 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
       top = before?.rect.top ?? remaining.at(-1)?.rect.bottom ?? area.top;
     } else {
       const project = projects.find(project => project.id === current.id)!;
-      const summary = runningSection.current;
-      const summaryBounds = summary?.getBoundingClientRect();
-      const inSummary = !!summaryBounds && current.y >= summaryBounds.top && current.y <= summaryBounds.bottom;
-      if (inSummary && !runningUngroupedIds.has(current.id)) {
-        current.valid = false;
-        line.style.visibility = 'hidden';
-        return;
-      }
       const available = sections.filter(section => project.archived ? section.id === 'archived' : section.id !== 'archived' && (section.id !== 'pinned' || project.pinned)).flatMap(section => {
         const element = buckets.current.get(section.id);
         return element ? [{ section, element, rect: element.getBoundingClientRect() }] : [];
       });
       const target = available.find(item => current.y >= item.rect.top && current.y <= item.rect.bottom)
         ?? available.find(item => current.y < item.rect.top) ?? available.at(-1);
-      const container = inSummary ? summary : target?.element;
-      if (!container) { current.valid = false; line.style.visibility = 'hidden'; return; }
-      const peers = inSummary ? runningUngrouped : target!.section.projects;
-      current.targetGroupId = inSummary || target!.section.id === 'ungrouped' ? null : target!.section.group?.id ?? project.groupId;
-      const remaining = peers.filter(project => project.id !== current.id).flatMap(project => {
+      if (!target) { current.valid = false; line.style.visibility = 'hidden'; return; }
+      const { element: container, section } = target;
+      current.targetGroupId = section.id === 'ungrouped' ? null : section.group?.id ?? project.groupId;
+      const remaining = section.projects.filter(project => project.id !== current.id).flatMap(project => {
         const element = rows.current.get(project.id);
         return element && container.contains(element) ? [{ id: project.id, rect: element.getBoundingClientRect() }] : [];
       });
@@ -335,7 +316,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
     ] });
   };
 
-  const renderProject = (project: ProjectConfig, peers: ProjectConfig[], inRunning = false) => {
+  const renderProject = (project: ProjectConfig, peers: ProjectConfig[]) => {
     const selected = selection?.projectId === project.id;
     const conflict = conflicts.some(item => item.projectIds.includes(project.id));
     const status = statuses[project.id] || 'stopped';
@@ -369,18 +350,18 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
             onSelectProject(project.id);
           }}
           title={`${name}${shortcutIndex >= 0 && shortcutIndex < 9 ? ` · ⌘${shortcutIndex + 1}` : ''}\n${filtering ? '清除搜索和筛选后可拖动排序' : '拖动排序 · ⌥↑ / ⌥↓'}`}
-          data-project-row={project.id} data-running-project={inRunning ? project.id : undefined} aria-current={selected ? 'page' : undefined}
+          data-project-row={project.id} aria-current={selected ? 'page' : undefined}
           aria-haspopup="menu" data-search-highlighted={searchFocused && highlighted === project.id || undefined} data-reorder-draggable={canReorder || undefined}>
           <ProjectAvatar project={project} status={status} conflict={conflict} />
           <span className="min-w-0 flex-1 truncate">{name}</span>
-          <ProjectRowStatus projectId={project.id} status={status} conflict={conflict} attention={attentionProjects.has(project.id)} />
+          <ProjectRowStatus projectId={project.id} status={status} conflict={conflict} attention={attentionProjects.has(project.id)} completion={completions.get(project.id)} />
         </button>
       </div>
     </div>;
   };
 
   const renderSection = (section: SidebarSection) => {
-    const visible = section.projects.filter(project => visibleIds.has(project.id) && !runningUngroupedIds.has(project.id));
+    const visible = section.projects.filter(project => visibleIds.has(project.id));
     if (filtering && !visible.length) return null;
     if (section.id === 'ungrouped' && !visible.length && projects.length && !draggingId) return null;
     const open = filtering ? !temporaryCollapsed.has(section.id) : section.id === 'archived' ? !archivedCollapsed : !section.group?.collapsed;
@@ -424,38 +405,10 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
       </div>}
     </div>;
   };
-  const renderRunning = () => !filtering && runningProjects.length > 0 && <section ref={runningSection} className="sidebar-group" aria-labelledby="sidebar-running-heading" data-running-section>
-    <button className="sidebar-group-heading flex w-full items-center gap-1.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/25"
-      aria-label={runningCollapsed ? '展开运行中项目' : '收起运行中项目'} aria-expanded={!runningCollapsed} aria-controls="sidebar-running-projects" data-running-toggle onClick={() => setRunningCollapsed(previous => !previous)}>
-      <span id="sidebar-running-heading">运行中</span><span className="sidebar-group-count">{runningProjects.length}</span>
-      <GroupHeadingMarker expanded={!runningCollapsed} />
-    </button>
-    {!runningCollapsed && <SidebarScrollArea className="sidebar-running-scroll">
-      <nav id="sidebar-running-projects" aria-label="运行中的项目" className="sidebar-project-list">
-        {runningProjects.map(project => {
-          if (runningUngroupedIds.has(project.id)) return renderProject(project, runningUngrouped, true);
-          const selected = selection?.projectId === project.id;
-          return <button key={project.id} data-running-project={project.id} data-selected={selected || undefined} aria-current={selected ? 'page' : undefined}
-            aria-haspopup="menu"
-            className="sidebar-project-item sidebar-project-row sidebar-project-surface flex w-full shrink-0 items-center text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/25"
-            onClick={event => { if (!event.ctrlKey) onSelectProject(project.id); }}
-            onKeyDown={event => { projectMenuFromKeyboard(event, project.id); }}
-            onContextMenu={event => { event.preventDefault(); projectMenu(project.id, event.clientX, event.clientY); }}>
-            <ProjectAvatar project={project} status={statuses[project.id]} />
-            <span className="min-w-0 flex-1 truncate">{project.displayName || project.name}</span>
-            <ProjectRowStatus projectId={project.id} status={statuses[project.id] ?? 'stopped'} attention={attentionProjects.has(project.id)} />
-          </button>;
-        })}
-      </nav>
-    </SidebarScrollArea>}
-  </section>;
-
   const sidebarActions = (button: HTMLButtonElement) => {
     closeRowMenu();
     const rect = button.getBoundingClientRect();
     const filters = [
-      { value: 'all', label: '全部项目' },
-      { value: 'running', label: '运行中' },
       { value: 'attention', label: '终端提醒' },
       { value: 'changes', label: '有改动' },
     ] as const;
@@ -500,20 +453,24 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
       {searchQuery ? <Button variant="ghost" size="icon-sm" className="absolute right-1 top-1/2 -translate-y-1/2" aria-label="清除搜索" onClick={() => { onSearchChange(''); setHighlightedId(null); searchInputRef.current?.focus(); }}><X className="size-3.5" /></Button>
         : <button aria-label="快速切换项目 (⌘P)" aria-keyshortcuts="Meta+p" title="快速切换项目 (⌘P)" className="absolute right-3 top-1/2 -translate-y-1/2 rounded py-1 text-[11px] leading-[15px] text-[var(--h1-label)] hover:bg-[var(--h1-hover)]" onClick={onQuickSwitch}>⌘P</button>}
     </div>
+    <SegmentedControl<SidebarFilter> className="sidebar-filters" label="筛选项目" value={filter} onChange={onFilterChange}
+      options={[
+        { value: 'all', label: '全部', attributes: { 'data-sidebar-filter': 'all' } },
+        { value: 'running', label: '运行中 ' + runningCount, attributes: { 'data-sidebar-filter': 'running' } },
+        { value: 'pinned', label: '置顶', attributes: { 'data-sidebar-filter': 'pinned' } },
+      ]} />
     <SidebarScrollArea ref={scrollArea} className="sidebar-scroll min-h-0 flex-1">
       <nav ref={projectList} id="project-list" aria-label="项目列表" className="relative flex min-h-full flex-col">
         <span ref={selectionMarker} className="sidebar-selection-marker" aria-hidden="true" hidden />
-        {projectsLoaded && !loading && projects.length === 0 ? <div className="h1-group mt-4 px-3 py-5 text-center" data-sidebar-empty>
+        {projectsLoaded && !loading && projects.length === 0 && filter === 'all' ? <div className="h1-group mt-4 px-3 py-5 text-center" data-sidebar-empty>
           <p className="text-sm font-medium text-foreground">还没有项目</p>
           <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">把项目文件夹拖到这里</p>
           <p className="mt-0.5 text-[11px] text-muted-foreground">或者</p>
           <Button size="sm" className="mt-3 gap-1 px-2.5 text-[11px]" onClick={onCreate} data-add-first-project><Plus className="!size-3.5" />添加第一个项目</Button>
         </div> : <>
         {filtering && <p className="px-2 pb-1 pt-2 text-[10px] leading-relaxed text-muted-foreground" data-reorder-search-hint>清除搜索和筛选后可拖动排序</p>}
-        {filtering && !visibleProjects.length && <p role="status" className="h1-group mt-2 break-all px-3 py-5 text-xs leading-relaxed text-muted-foreground" data-project-search-empty>{searching ? `没有匹配「${searchQuery.trim()}」的项目` : '没有符合筛选条件的项目'}</p>}
-        {sections.filter(section => section.id === 'pinned').map(renderSection)}
-        {renderRunning()}
-        {sections.filter(section => section.id !== 'pinned').map(renderSection)}
+        {filtering && !visibleProjects.length && <p role="status" className="h1-group mt-2 break-all px-3 py-5 text-xs leading-relaxed text-muted-foreground" data-project-search-empty>{searching ? `没有匹配「${searchQuery.trim()}」的项目` : filter === 'running' ? '没有运行中的项目' : filter === 'pinned' ? '没有置顶项目' : '没有符合筛选条件的项目'}</p>}
+        {sections.map(renderSection)}
         </>}
       </nav>
     </SidebarScrollArea>
@@ -533,6 +490,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
     <div ref={indicator} hidden={!draggingId} aria-hidden="true" data-reorder-indicator className="pointer-events-none fixed z-[70] h-0.5 rounded-full bg-foreground/60" />
     <MotionPresence>{!inactive && menu && <SidebarMenu {...menu} onClose={closeMenu} />}</MotionPresence>
     <MotionPresence>{!inactive && rowMenu && menuProject && <ProjectActionsMenu x={rowMenu.x} y={rowMenu.y} keyboard={rowMenu.keyboard} project={menuProject} onClose={closeRowMenu}
+      snippets={snippets[menuProject.id] ?? []} onRunSnippet={command => onRunSnippet(menuProject.id, command)}
       onOpenLogs={() => onOpenProjectLogs(menuProject)} onDelete={() => onDeleteProject(menuProject)} sidebar={{
         onAddTerminal: () => { void onCreateTerminal(menuProject.id); },
         terminalLimit: menuTerminalCount >= maxPerProject ? maxPerProject : undefined,

@@ -4,12 +4,27 @@ export function projectInitial(name: string) {
   return Array.from(name.trim().normalize('NFC'))[0]?.toLocaleUpperCase() || '?';
 }
 
-export type SidebarFilter = 'all' | 'running' | 'attention' | 'changes';
+export type SidebarFilter = 'all' | 'running' | 'pinned' | 'attention' | 'changes';
+export const SIDEBAR_FILTER_KEY = 'bento.sidebar.filter';
+
+export function savedSidebarFilter(value: string | null): SidebarFilter {
+  return value === 'running' || value === 'pinned' || value === 'attention' || value === 'changes' ? value : 'all';
+}
+
 export function matchesSidebarFilter(project: ProjectConfig, filter: SidebarFilter, statuses: Record<string, ProjectStatus>, attention: ReadonlySet<string>, changes: ReadonlySet<string>) {
-  if (filter === 'running') return ['running', 'starting'].includes(statuses[project.id]);
+  if (filter === 'running') return statuses[project.id] === 'running';
+  if (filter === 'pinned') return !!project.pinned;
   if (filter === 'attention') return attention.has(project.id);
   if (filter === 'changes') return changes.has(project.id);
   return true;
+}
+
+export function filterSidebarProjects(projects: ProjectConfig[], groups: ProjectGroup[], filter: SidebarFilter, query: string,
+  statuses: Record<string, ProjectStatus>, attention: ReadonlySet<string>, changes: ReadonlySet<string>) {
+  const search = query.trim().toLowerCase();
+  return sidebarSections(projects.filter(project => matchesSidebarFilter(project, filter, statuses, attention, changes) &&
+    (!search || [project.displayName, project.name, project.path, project.port?.toString()].some(value =>
+      value?.toLowerCase().includes(search)))), groups).flatMap(section => section.projects);
 }
 
 export interface SidebarSection {

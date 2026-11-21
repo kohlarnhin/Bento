@@ -1,0 +1,3 @@
+typeset -g _bento_rc_dir=$ZDOTDIR
+typeset -g _bento_user_zdot=${BENTO_USER_ZDOTDIR-}
+unset BENTO_USER_ZDOTDIR

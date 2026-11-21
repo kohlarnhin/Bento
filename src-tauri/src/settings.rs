@@ -7,6 +7,9 @@ const FONT_SIZE: &str = "terminal.fontSize";
 const MAX_PER_PROJECT: &str = "terminal.maxPerProject";
 const DEFAULT_APPLIED: &str = "autostart.defaultApplied";
 const APPEARANCE: &str = "appearance.theme";
+pub const RESTORE_TERMINALS: &str = "terminal.restore";
+pub const COMMAND_NOTICES: &str = "terminal.commandNotices";
+pub const SHOW_TRAY: &str = "tray.enabled";
 
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -28,13 +31,21 @@ impl Appearance {
     }
 
     fn apply(self, app: &AppHandle) -> Result<(), String> {
-        let theme = match self {
+        let theme = self.theme();
+        app.get_webview_window("main").ok_or("未找到主窗口")?.set_theme(theme)
+            .map_err(|error| format!("应用窗口外观失败：{error}"))?;
+        if let Some(panel) = app.get_webview_window(crate::tray::PANEL) {
+            panel.set_theme(theme).map_err(|error| format!("应用菜单栏外观失败：{error}"))?;
+        }
+        Ok(())
+    }
+
+    fn theme(self) -> Option<Theme> {
+        match self {
             Self::System => None,
             Self::Light => Some(Theme::Light),
             Self::Dark => Some(Theme::Dark),
-        };
-        app.get_webview_window("main").ok_or("未找到主窗口")?.set_theme(theme)
-            .map_err(|error| format!("应用窗口外观失败：{error}"))
+        }
     }
 }
 
@@ -48,6 +59,19 @@ pub struct Settings {
     pub autostart_default_applied: bool,
     #[serde(rename = "appearance.theme")]
     appearance: Appearance,
+    #[serde(rename = "terminal.restore")]
+    restore_terminals: bool,
+    #[serde(rename = "terminal.commandNotices")]
+    command_notices: bool,
+    #[serde(rename = "tray.enabled")]
+    show_tray: bool,
+}
+
+pub fn enabled(conn: &Connection, key: &str) -> Result<bool, String> {
+    let saved: Option<String> = conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1", [key], |row| row.get(0),
+    ).optional().map_err(|error| error.to_string())?;
+    Ok(saved.as_deref() != Some("false"))
 }
 
 pub fn read(conn: &Connection) -> Result<Settings, String> {
@@ -61,6 +85,9 @@ pub fn read(conn: &Connection) -> Result<Settings, String> {
         terminal_max_per_project: max_per_project(conn)?,
         autostart_default_applied: default_applied(conn)?,
         appearance: read_appearance(conn)?,
+        restore_terminals: enabled(conn, RESTORE_TERMINALS)?,
+        command_notices: enabled(conn, COMMAND_NOTICES)?,
+        show_tray: enabled(conn, SHOW_TRAY)?,
     })
 }
 
@@ -77,6 +104,10 @@ pub fn initialize_appearance(app: &AppHandle) -> Result<(), String> {
         appearance.apply(app)?;
     }
     Ok(())
+}
+
+pub fn saved_window_theme() -> Option<Theme> {
+    read_appearance(&crate::open_project_db().ok()?).ok()?.theme()
 }
 
 pub fn max_per_project(conn: &Connection) -> Result<u8, String> {
@@ -121,6 +152,10 @@ pub fn set(conn: &Connection, key: &str, value: Value) -> Result<(), String> {
                 .ok_or("外观必须是跟随系统、浅色或深色")?;
             save(conn, key, choice)
         }
+        RESTORE_TERMINALS | COMMAND_NOTICES | SHOW_TRAY => {
+            let enabled = value.as_bool().ok_or("该设置只能开启或关闭")?;
+            save(conn, key, if enabled { "true" } else { "false" })
+        }
         DEFAULT_APPLIED => Err("该设置由 Bento 自动管理".into()),
         _ => Err("未知设置".into()),
     }
@@ -134,6 +169,34 @@ pub fn get_settings() -> Result<Settings, String> {
 #[tauri::command]
 pub fn set_setting(app: AppHandle, key: String, value: Value) -> Result<(), String> {
     let mut conn = crate::open_project_db()?;
+    if key == SHOW_TRAY {
+        let transaction = conn.transaction().map_err(|error| error.to_string())?;
+        let previous = enabled(&transaction, SHOW_TRAY)?;
+        set(&transaction, &key, value)?;
+        crate::tray::set_enabled(&app, enabled(&transaction, SHOW_TRAY)?)?;
+        if let Err(error) = transaction.commit() {
+            let _ = crate::tray::set_enabled(&app, previous);
+            return Err(format!("保存菜单栏设置失败：{error}"));
+        }
+        return Ok(());
+    }
+    if key == COMMAND_NOTICES {
+        set(&conn, &key, value)?;
+        app.state::<crate::terminal::TerminalManager>().set_command_notices(enabled(&conn, COMMAND_NOTICES)?);
+        return Ok(());
+    }
+    if key == RESTORE_TERMINALS {
+        let transaction = conn.transaction().map_err(|error| error.to_string())?;
+        let previous = enabled(&transaction, RESTORE_TERMINALS)?;
+        set(&transaction, &key, value)?;
+        let manager = app.state::<crate::terminal::TerminalManager>();
+        manager.set_restore(enabled(&transaction, RESTORE_TERMINALS)?)?;
+        if let Err(error) = transaction.commit() {
+            let _ = manager.set_restore(previous);
+            return Err(format!("保存终端恢复设置失败：{error}"));
+        }
+        return Ok(());
+    }
     if key != APPEARANCE {
         return set(&conn, &key, value);
     }
@@ -174,7 +237,8 @@ mod tests {
         crate::init_db(&conn).unwrap();
         assert_eq!(project_rows(&conn), before);
         assert_eq!(read(&conn).unwrap(), Settings { terminal_font_size: 14, terminal_max_per_project: 2,
-            autostart_default_applied: false, appearance: Appearance::System });
+            autostart_default_applied: false, appearance: Appearance::System, restore_terminals: true,
+            command_notices: true, show_tray: true });
         set(&conn, FONT_SIZE, json!(18)).unwrap();
         assert_eq!(read(&conn).unwrap().terminal_font_size, 18);
         assert_eq!(project_rows(&conn), before);

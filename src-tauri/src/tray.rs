@@ -9,12 +9,15 @@ use std::sync::{
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
-    tray::TrayIconBuilder,
-    AppHandle, Emitter, Manager,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Rect, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 pub const ID: &str = "apphub-tray";
+pub const PANEL: &str = "bento-tray-panel";
+const RECENT_KEY: &str = "tray.recentProjects";
+const PANEL_WIDTH: f64 = 320.0;
 const PROJECT_PREFIX: &str = "apphub-tray-project-";
 const STOP_ALL: &str = "apphub-tray-stop-all";
 const SHOW: &str = "apphub-tray-show";
@@ -27,6 +30,24 @@ pub struct TrayProject {
     name: String,
     port: Option<u16>,
     starting: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelProject {
+    id: String,
+    name: String,
+    port: Option<u16>,
+    status: &'static str,
+    started_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelView {
+    running: usize,
+    can_stop: bool,
+    rows: Vec<PanelProject>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -43,6 +64,7 @@ pub struct TrayView {
     pub tooltip: String,
     pub projects: Vec<TrayProject>,
     pub items: Vec<TrayItem>,
+    pub panel: PanelView,
 }
 
 impl TrayView {
@@ -62,7 +84,7 @@ impl TrayView {
                         .filter(|name| !name.is_empty())
                         .unwrap_or(&project.name)
                         .clone(),
-                    port: if project.services.is_empty() { info.port } else { project.port },
+                    port: info.port,
                     starting: info.phase == Phase::Starting,
                 });
             }
@@ -80,7 +102,7 @@ impl TrayView {
                 starting: info.phase == Phase::Starting,
             });
         }
-        let count = entries.len();
+        let count = managed.iter().filter(|info| info.phase == Phase::Running).count();
         let item = |id: &str, text: String, enabled| TrayItem {
             id: id.into(),
             text,
@@ -120,7 +142,7 @@ impl TrayView {
         }
         items.extend([
             separator(1),
-            item(STOP_ALL, "全部停止…".into(), count > 0),
+            item(STOP_ALL, "全部停止…".into(), !managed.is_empty()),
             item(SHOW, "显示 Bento".into(), true),
             separator(2),
             item(QUIT, "退出 Bento".into(), true),
@@ -134,6 +156,7 @@ impl TrayView {
             tooltip: format!("Bento · {count} 个项目运行中"),
             projects: entries,
             items,
+            panel: PanelView::default(),
         }
     }
 
@@ -149,11 +172,33 @@ impl TrayView {
     }
 }
 
+fn panel_view(projects: &[ProjectConfig], managed: &[ManagedProject], recent: &[String]) -> PanelView {
+    let mut active: Vec<_> = managed.iter().collect();
+    active.sort_by_key(|info| info.phase != Phase::Running);
+    let name = |id: &str| {
+        projects.iter().find(|project| project.id == id).map(|project| {
+            project.display_name.as_ref().filter(|name| !name.is_empty()).unwrap_or(&project.name).clone()
+        })
+    };
+    let rows = active.into_iter().map(|info| PanelProject {
+        id: info.id.clone(), name: name(&info.id).unwrap_or_else(|| info.id.clone()), port: info.port,
+        status: match info.phase { Phase::Running => "running", Phase::Starting => "starting", Phase::PortTimeout => "error" },
+        started_at: Some(info.started_at),
+    }).chain(recent.iter().filter_map(|id| {
+        if managed.iter().any(|project| project.id == *id) { return None; }
+        Some(PanelProject { id: id.clone(), name: name(id)?, port: None, status: "stopped", started_at: None })
+    })).take(8).collect();
+    PanelView { running: managed.iter().filter(|info| info.phase == Phase::Running).count(),
+        can_stop: !managed.is_empty(), rows }
+}
+
 #[derive(Default)]
 pub struct TrayState {
     generation: AtomicU64,
     stop_pending: AtomicBool,
     applied: Mutex<Option<(TrayView, Menu<tauri::Wry>)>>,
+    recent: Mutex<Vec<String>>,
+    enabled: AtomicBool,
 }
 
 fn menu(app: &AppHandle, view: &TrayView) -> tauri::Result<Menu<tauri::Wry>> {
@@ -178,16 +223,33 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let view = TrayView::from_snapshot(&[], &[]);
     let menu = menu(app, &view)?;
     // tray-icon scales the 36px image to 18pt on macOS, preserving Retina detail.
-    TrayIconBuilder::with_id(ID)
+    let tray = TrayIconBuilder::with_id(ID)
         .icon(Image::from_bytes(include_bytes!(
             "../icons/tray-icon@2x.png"
         ))?)
         .icon_as_template(true)
         .title(&view.title)
         .tooltip(&view.tooltip)
-        .show_menu_on_left_click(true)
+        .show_menu_on_left_click(false)
         .menu(&menu)
+        .on_tray_icon_event(|icon, event| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, rect, .. } = event {
+                toggle_panel(icon.app_handle(), rect);
+            }
+        })
         .build(app)?;
+    let state = app.state::<TrayState>();
+    let mut enabled = true;
+    if let Ok(database) = crate::open_project_db() {
+        enabled = crate::settings::enabled(&database, crate::settings::SHOW_TRAY).unwrap_or(true);
+        if let Ok(value) = database.query_row("SELECT value FROM settings WHERE key=?1", [RECENT_KEY], |row| row.get::<_, String>(0)) {
+            if let Ok(recent) = serde_json::from_str::<Vec<String>>(&value) {
+                *state.recent.lock().unwrap_or_else(|err| err.into_inner()) = recent.into_iter().take(8).collect();
+            }
+        }
+    }
+    state.enabled.store(enabled, Ordering::SeqCst);
+    tray.set_visible(enabled)?;
     *app.state::<TrayState>()
         .applied
         .lock()
@@ -200,7 +262,131 @@ async fn current(app: &AppHandle) -> Result<TrayView, String> {
     let projects = tauri::async_runtime::spawn_blocking(crate::get_projects_sync)
         .await
         .map_err(|error| error.to_string())??;
-    Ok(TrayView::from_snapshot(&projects.projects, &managed))
+    let recent = app.state::<TrayState>().recent.lock().unwrap_or_else(|err| err.into_inner()).clone();
+    let mut view = TrayView::from_snapshot(&projects.projects, &managed);
+    view.panel = panel_view(&projects.projects, &managed, &recent);
+    Ok(view)
+}
+
+#[tauri::command]
+pub async fn get_tray_panel(app: AppHandle) -> Result<PanelView, String> {
+    Ok(current(&app).await?.panel)
+}
+
+pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    let tray = app.tray_by_id(ID).ok_or("菜单栏图标不可用")?;
+    tray.set_visible(enabled).map_err(|error| error.to_string())?;
+    app.state::<TrayState>().enabled.store(enabled, Ordering::SeqCst);
+    if !enabled {
+        if let Some(panel) = app.get_webview_window(PANEL) { let _ = panel.hide(); }
+    } else {
+        refresh(app);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn note_tray_project(app: AppHandle, project_id: String) -> Result<(), String> {
+    let state = app.state::<TrayState>();
+    let mut recent = state.recent.lock().unwrap_or_else(|err| err.into_inner());
+    if recent.first() == Some(&project_id) { return Ok(()); }
+    let conn = crate::open_project_db()?;
+    let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)", [&project_id], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    if !exists { return Ok(()); }
+    let mut next = vec![project_id.clone()];
+    next.extend(recent.iter().filter(|id| **id != project_id).take(7).cloned());
+    let json = serde_json::to_string(&next).map_err(|error| error.to_string())?;
+    conn.execute("INSERT INTO settings(key,value) VALUES(?1,?2)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP", [RECENT_KEY, &json])
+        .map_err(|error| error.to_string())?;
+    *recent = next;
+    drop(recent);
+    refresh(&app);
+    Ok(())
+}
+
+fn resize_panel(window: &WebviewWindow, rows: usize) -> tauri::Result<()> {
+    window.set_size(LogicalSize::new(PANEL_WIDTH, 104.0 + rows.max(1) as f64 * 44.0))
+}
+
+pub fn toggle_panel(app: &AppHandle, icon: Rect) {
+    let state = app.state::<TrayState>();
+    if !state.enabled.load(Ordering::SeqCst) { return; }
+    if let Some(window) = app.get_webview_window(PANEL) {
+        if window.is_visible().unwrap_or(false) {
+            let _ = window.hide();
+            return;
+        }
+    }
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let rows = current(&handle).await.map_or(0, |view| view.panel.rows.len());
+        let app = handle.clone();
+        let _ = handle.run_on_main_thread(move || {
+            if !app.state::<TrayState>().enabled.load(Ordering::SeqCst) { return; }
+            if let Err(error) = show_panel(&app, icon, rows) {
+                eprintln!("Bento tray panel: {error}");
+            }
+        });
+    });
+}
+
+fn show_panel(app: &AppHandle, icon: Rect, rows: usize) -> tauri::Result<()> {
+    let Some(main) = app.get_webview_window("main") else { return Ok(()); };
+    let main_scale = main.scale_factor()?;
+    let position = icon.position.to_physical::<f64>(main_scale);
+    let monitor = main.monitor_from_point(position.x, position.y)?.or(main.primary_monitor()?);
+    let scale = monitor.as_ref().map_or(main_scale, |display| display.scale_factor());
+    let size = icon.size.to_physical::<f64>(scale);
+    let mut x = position.x + size.width / 2.0 - PANEL_WIDTH * scale / 2.0;
+    let mut y = position.y + size.height + 6.0 * scale;
+    if let Some(display) = monitor {
+        let area = display.work_area();
+        let left = f64::from(area.position.x);
+        let top = f64::from(area.position.y);
+        let right = left + f64::from(area.size.width) - (PANEL_WIDTH + 6.0) * scale;
+        x = x.clamp(left + 6.0 * scale, right.max(left + 6.0 * scale));
+        y = y.max(top + 4.0 * scale);
+    }
+    let window = match app.get_webview_window(PANEL) {
+        Some(window) => window,
+        None => WebviewWindowBuilder::new(app, PANEL, WebviewUrl::App("index.html".into()))
+            .title("Bento")
+            .decorations(false)
+            .transparent(true)
+            .shadow(true)
+            .resizable(false)
+            .skip_taskbar(true)
+            .always_on_top(true)
+            .visible_on_all_workspaces(true)
+            .accept_first_mouse(true)
+            .theme(crate::settings::saved_window_theme())
+            .visible(false)
+            .build()?,
+    };
+    resize_panel(&window, rows)?;
+    window.set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32))?;
+    let _ = app.emit_to(PANEL, "tray-panel-refresh", ());
+    window.show()?;
+    window.set_focus()
+}
+
+#[tauri::command]
+pub fn tray_panel_action(app: AppHandle, action: String, project_id: Option<String>) -> Result<(), String> {
+    match action.as_str() {
+        "show" => {
+            if let Some(panel) = app.get_webview_window(PANEL) { let _ = panel.hide(); }
+            if let Some(id) = project_id { handle_menu(&app, &format!("{PROJECT_PREFIX}{id}")); }
+            else { handle_menu(&app, SHOW); }
+        }
+        "stop-all" => request_stop_all(&app),
+        "hide" => {
+            if let Some(window) = app.get_webview_window(PANEL) { window.hide().map_err(|err| err.to_string())?; }
+        }
+        _ => return Err("未知的菜单栏操作".into()),
+    }
+    Ok(())
 }
 
 pub fn refresh(app: &AppHandle) {
@@ -230,6 +416,10 @@ pub fn refresh(app: &AppHandle) {
                 || state.generation.load(Ordering::SeqCst) != generation
             {
                 return;
+            }
+            if let Some(panel) = handle.get_webview_window(PANEL).filter(|panel| panel.is_visible().unwrap_or(false)) {
+                let _ = resize_panel(&panel, view.panel.rows.len());
+                let _ = handle.emit_to(PANEL, "tray-panel-refresh", ());
             }
             if state
                 .applied
@@ -395,6 +585,25 @@ mod tests {
     }
 
     #[test]
+    fn panel_caps_rows_and_puts_running_before_recent_stopped_projects() {
+        let projects: Vec<_> = (0..10).map(|index| config(&format!("p{index}"), None)).collect();
+        let managed = [
+            ManagedProject { id: "p2".into(), phase: Phase::Starting, port: None, started_at: 2000 },
+            ManagedProject { id: "p5".into(), phase: Phase::Running, port: Some(5411), started_at: 1000 },
+        ];
+        let recent: Vec<_> = ["p5", "p7", "p2", "p3", "missing", "p8", "p9", "p4", "p0", "p1", "p6"]
+            .into_iter().map(String::from).collect();
+        let panel = panel_view(&projects, &managed, &recent);
+        assert_eq!(panel.running, 1);
+        assert!(panel.can_stop);
+        assert_eq!(panel.rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["p5", "p2", "p7", "p3", "p8", "p9", "p4", "p0"]);
+        assert_eq!(panel.rows[0].port, Some(5411));
+        assert_eq!(panel.rows[0].started_at, Some(1000));
+        assert_eq!(panel.rows[2].status, "stopped");
+    }
+
+    #[test]
     fn derives_managed_names_ports_and_starting_suffix_only() {
         let projects = [
             config("running", Some("正在运行")),
@@ -406,17 +615,19 @@ mod tests {
                 id: "starting".into(),
                 port: Some(5301),
                 phase: Phase::Starting,
+                started_at: 1000,
             },
             ManagedProject {
                 id: "running".into(),
                 port: None,
                 phase: Phase::Running,
+                started_at: 2000,
             },
         ];
         let view = TrayView::from_snapshot(&projects, &snapshot);
-        assert_eq!(view.title, "2");
-        assert_eq!(view.tooltip, "Bento · 2 个项目运行中");
-        assert_eq!(view.items[0].text, "Bento 启动的项目 · 2 个运行中");
+        assert_eq!(view.title, "1");
+        assert_eq!(view.tooltip, "Bento · 1 个项目运行中");
+        assert_eq!(view.items[0].text, "Bento 启动的项目 · 1 个运行中");
         assert_eq!(view.items[1].text, "正在运行");
         assert_eq!(view.items[2].text, "starting  :5301（启动中）");
         assert!(

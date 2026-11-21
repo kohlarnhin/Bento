@@ -75,7 +75,7 @@ export function injectedPortVariables(project: Pick<ProjectConfig, 'env' | 'port
 export function sameServiceStatuses(previous: ServiceRuntimeStatus[] = [], next: ServiceRuntimeStatus[] = []) {
   return previous.length === next.length && next.every((service, index) => {
     const old = previous[index];
-    return old.serviceId === service.serviceId && old.port === service.port && old.listening === service.listening &&
+    return old.serviceId === service.serviceId && old.port === service.port && old.actualPort === service.actualPort && old.listening === service.listening &&
       old.owner?.pid === service.owner?.pid && old.owner?.inProject === service.owner?.inProject;
   });
 }

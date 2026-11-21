@@ -8,6 +8,10 @@ use tokio::sync::Mutex;
 
 mod terminal;
 mod terminal_attention;
+mod terminal_escape;
+mod terminal_persistence;
+mod terminal_shell;
+mod terminal_notifications;
 mod shell_env;
 mod projects;
 mod processes;
@@ -18,6 +22,7 @@ mod quit;
 mod tray;
 mod git;
 mod settings;
+mod snippets;
 mod sidebar;
 mod autostart;
 mod traffic_lights;
@@ -194,6 +199,7 @@ pub fn init_db(conn: &Connection) -> Result<(), rusqlite::Error> {
     }
     projects::migrate_service_keys(&transaction)?;
     dashboard::migrate(&transaction)?;
+    snippets::create_table(&transaction)?;
     transaction.commit()
 }
 
@@ -371,6 +377,7 @@ async fn delete_project(
         let mut delete = || -> rusqlite::Result<()> {
             let tx = conn.transaction()?;
             tx.execute("DELETE FROM project_last_runs WHERE project_id = ?1", params![id])?;
+            tx.execute("DELETE FROM project_snippets WHERE project_id = ?1", params![id])?;
             tx.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
             tx.commit()
         };
@@ -528,8 +535,11 @@ pub fn run() {
         .manage(dashboard::ExternalRuns::default())
         .manage(quit::QuitPending::default())
         .manage(tray::TrayState::default())
+        .manage(terminal_notifications::PendingNotification::default())
         .setup(|app| {
             app.manage(terminal::TerminalManager::for_app(app.handle().clone()));
+            app.state::<terminal::TerminalManager>().restore();
+            terminal_notifications::install(app.handle());
             quit::install_menu(app.handle())?;
             tray::install(app.handle())?;
             if let Err(error) = autostart::initialize(app.handle()) {
@@ -548,6 +558,16 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if window.label() == tray::PANEL {
+                match event {
+                    tauri::WindowEvent::Focused(false) => { let _ = window.hide(); }
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                    _ => (),
+                }
+            }
             if window.label() == "main" {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
@@ -600,6 +620,13 @@ pub fn run() {
         terminal::terminal_create,
         terminal::terminal_close,
         terminal::terminal_list,
+        terminal_notifications::take_terminal_notification,
+        snippets::get_snippets,
+        snippets::change_snippet,
+        snippets::suggest_snippets,
+        tray::get_tray_panel,
+        tray::note_tray_project,
+        tray::tray_panel_action,
         terminal::terminal_context,
         terminal::terminal_focus,
         terminal::terminal_write,
@@ -684,6 +711,7 @@ fn handle_run_event(app: &AppHandle, event: tauri::RunEvent) {
     match event {
         tauri::RunEvent::Reopen { .. } => reopen_main_window(app),
         tauri::RunEvent::Exit => {
+            app.state::<terminal::TerminalManager>().save_before_exit();
             let terminal_roots = app.state::<terminal::TerminalManager>().list().into_iter()
                 .filter(|session| session.alive).filter_map(|session| session.pid)
                 .map(|pid| processes::ManagedRoot { pid, pgid: unsafe { libc::getpgid(pid as i32) }, identity: processes::identity(pid) })

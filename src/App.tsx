@@ -27,12 +27,12 @@ import Button from './components/ui/button';
 import { Toaster } from './components/ui/sonner';
 import { MotionPresence } from './components/ui/motion-presence';
 import { Empty, EmptyTitle, EmptyDescription } from './components/ui/empty';
-import { createTerminal, getProjectTerminalSlots, getTerminalSnapshot, initTerminalRegistry, subscribeTerminals, terminalKey } from './lib/terminalRegistry';
+import { createTerminal, getProjectTerminalSlots, getTerminalSnapshot, initTerminalRegistry, subscribeTerminals, takeRestoredSlot, terminalKey } from './lib/terminalRegistry';
 import { projectLogs } from './lib/useProjectLogs';
 import { recordRender } from './lib/renderMetrics';
 import { DEFAULT_TERMINAL_FONT_SIZE, TERMINAL_THEME } from './lib/terminalAppearance';
 import { clampTerminalFontSize, firstOpenedTerminalSlot, terminalsNeedingAttention } from './lib/terminalUsability';
-import { matchesSidebarFilter, sidebarNavigation, sidebarSections, type SidebarFilter } from './lib/sidebarModel';
+import { filterSidebarProjects, savedSidebarFilter, sidebarNavigation, SIDEBAR_FILTER_KEY } from './lib/sidebarModel';
 import { useProjectGitInfos } from './lib/useGitInfo';
 import { sameServiceStatuses } from './lib/projectServices';
 import {
@@ -46,6 +46,9 @@ import {
   ProjectDirInspection,
   PortOwner,
   DashboardConflict,
+  TerminalCompletion,
+  Snippet,
+  SnippetChange,
 } from './types';
 import './components/terminal.css';
 
@@ -56,6 +59,7 @@ let sidebarDropContext: {
 } | undefined;
 let sidebarDragPaths: string[] = [];
 let sidebarDropPending = false;
+const noSnippets: Snippet[] = [];
 
 export async function handleSidebarDragDrop(event: DragDropEvent) {
   const sidebar = document.querySelector<HTMLElement>('aside.app-sidebar');
@@ -130,13 +134,30 @@ export function App() {
   const terminalCount = Object.values(terminals).filter(terminal => terminal.alive).length;
   const [projects, setProjects] = useState<ProjectConfig[]>([]);
   const [groups, setGroups] = useState<ProjectGroup[]>([]);
-  const [filter, setFilter] = useState<SidebarFilter>('all');
+  const [snippets, setSnippets] = useState<Record<string, Snippet[]>>({});
+  const [filter, setFilter] = useState(() => {
+    try { return savedSidebarFilter(localStorage.getItem(SIDEBAR_FILTER_KEY)); }
+    catch { return 'all' as const; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(SIDEBAR_FILTER_KEY, filter); } catch { /* In-memory fallback. */ }
+  }, [filter]);
   const [quickOpen, setQuickOpen] = useState(false);
   const quickOpenRef = useRef(quickOpen);
   quickOpenRef.current = quickOpen;
   const [groupForm, setGroupForm] = useState<{ action: 'create' | 'rename' | 'delete'; group?: ProjectGroup } | null>(null);
   const gitInfos = useProjectGitInfos(projects);
   const attentionProjects = useMemo(() => new Set(Object.values(terminals).filter(terminal => terminal.attention).map(terminal => terminal.projectId)), [terminals]);
+  const completions = useMemo(() => {
+    const result = new Map<string, TerminalCompletion>();
+    for (const terminal of Object.values(terminals)) {
+      const completion = terminal.completion;
+      if (completion && (result.get(terminal.projectId)?.endedAt ?? -1) < completion.endedAt) {
+        result.set(terminal.projectId, completion);
+      }
+    }
+    return result;
+  }, [terminals]);
   const changedProjects = useMemo(() => new Set(projects.filter(project => (gitInfos[project.id]?.changes ?? 0) > 0).map(project => project.id)), [projects, gitInfos]);
   const [conflicts, setConflicts] = useState<PortConflict[]>([]);
   const [runtimes, setRuntimes] = useState<Record<string, ProjectRuntimeStatus>>({});
@@ -179,7 +200,7 @@ export function App() {
   }, []);
   const selectProject = useCallback((projectId: string) => {
     setActiveLogProject(null);
-    const slot = firstOpenedTerminalSlot(projectId, Object.values(getTerminalSnapshot()));
+    const slot = takeRestoredSlot(projectId) ?? firstOpenedTerminalSlot(projectId, Object.values(getTerminalSnapshot()));
     if (slot === undefined) setSelection({ projectId, view: 'overview' });
     else selectTerminalSlot(projectId, slot);
   }, [selectTerminalSlot, setSelection]);
@@ -210,26 +231,31 @@ export function App() {
         { ...previous, activeSlots: { ...previous.activeSlots, [projectId]: replacement } };
     });
   }, []);
-  const [focusedTerminal, setFocusedTerminal] = useState<{ projectId: string; slot: number }>();
-  const onFocusedTerminal = useCallback((projectId: string, slot: number) => {
-    setFocusedTerminal(previous => previous?.projectId === projectId && previous.slot === slot ? previous : { projectId, slot });
+  const [focusedTerminal, setFocusedTerminal] = useState<{ projectId: string; slot: number; left: number; right?: number }>();
+  const onFocusedTerminal = useCallback((projectId: string, slot: number, left: number, right?: number) => {
+    setFocusedTerminal(previous => previous?.projectId === projectId && previous.slot === slot && previous.left === left &&
+      previous.right === right ? previous : { projectId, slot, left, right });
   }, []);
   const watchedProjectId = selection?.view === 'terminal' && !quickOpen ? selection.projectId : null;
   const watchedSlot = watchedProjectId ? (focusedTerminal?.projectId === watchedProjectId ? focusedTerminal.slot : activeSlots[watchedProjectId] ?? 1) : null;
+  const watchedLeft = watchedProjectId && focusedTerminal?.projectId === watchedProjectId ? focusedTerminal.left : watchedSlot;
+  const watchedRight = watchedProjectId && focusedTerminal?.projectId === watchedProjectId ? focusedTerminal.right : undefined;
   const reportedTerminal = useRef<string | null>();
   const focusRequests = useRef(Promise.resolve());
   useEffect(() => {
-    const report = (projectId: string | null, slot: number | null) => {
-      const key = projectId && slot ? terminalKey(projectId, slot) : null;
+    const report = (projectId: string | null, slot: number | null, visibleSlots: number[] = []) => {
+      const key = projectId && slot ? terminalKey(projectId, slot) + ':' + visibleSlots.join(',') : null;
       if (reportedTerminal.current === key) return;
       reportedTerminal.current = key;
       focusRequests.current = focusRequests.current.catch(() => {}).then(() =>
-        invoke<void>('terminal_focus', { projectId, slot }),
+        invoke<void>('terminal_focus', { projectId, slot, visibleSlots }),
       );
       void focusRequests.current.catch(error => toast.error(`更新终端关注状态失败：${error}`));
     };
     const update = () => {
-      if (document.visibilityState === 'visible' && document.hasFocus()) report(watchedProjectId, watchedSlot);
+      if (document.visibilityState === 'visible' && document.hasFocus()) {
+        report(watchedProjectId, watchedSlot, [watchedLeft, watchedRight].filter((slot): slot is number => slot != null));
+      }
       else report(null, null);
     };
     const blur = () => report(null, null);
@@ -244,25 +270,22 @@ export function App() {
       window.removeEventListener('pagehide', blur);
       document.removeEventListener('visibilitychange', update);
     };
-  }, [watchedProjectId, watchedSlot]);
+  }, [watchedProjectId, watchedSlot, watchedLeft, watchedRight]);
   const [searchQuery, setSearchQuery] = useState('');
   const searchInput = useRef<HTMLInputElement>(null);
-  const searchText = searchQuery.trim().toLowerCase();
-  const visibleProjects = useMemo(() => sidebarSections(projects.filter(project =>
-    matchesSidebarFilter(project, filter, projectStatuses, attentionProjects, changedProjects) && (!searchText ||
-    [project.displayName, project.name, project.path, project.port?.toString()].some(value => value?.toLowerCase().includes(searchText)))), groups).flatMap(section => section.projects),
-    [projects, groups, searchText, filter, projectStatuses, attentionProjects, changedProjects]);
+  const visibleProjects = useMemo(() => filterSidebarProjects(projects, groups, filter, searchQuery, projectStatuses, attentionProjects, changedProjects),
+    [projects, groups, searchQuery, filter, projectStatuses, attentionProjects, changedProjects]);
   const shortcutProjects = useMemo(() => visibleProjects.filter(project => !project.archived), [visibleProjects]);
   const selectedProject = projects.find(project => project.id === selection?.projectId);
   const navigation = useRef({ projects: shortcutProjects, project: selectedProject, view: selection?.view || 'overview', selection, activeSlots });
   navigation.current = { projects: shortcutProjects, project: selectedProject, view: selection?.view || 'overview', selection, activeSlots };
   const [reordering, setReordering] = useState(false);
   const reorderPending = useRef(false);
-  const [projectForm, setProjectForm] = useState<{ project?: ProjectConfig; inspection?: ProjectDirInspection; focusPort?: DashboardConflict } | null>(null);
+  const [projectForm, setProjectForm] = useState<{ project?: ProjectConfig; inspection?: ProjectDirInspection; focusPort?: DashboardConflict; scanOnOpen?: boolean } | null>(null);
   const [deleteProject, setDeleteProject] = useState<ProjectConfig | null>(null);
   const [externalStop, setExternalStop] = useState<{ project: ProjectConfig; owners: PortOwner[]; restart: boolean } | null>(null);
   const [stopAllOpen, setStopAllOpen] = useState(false);
-  const managedProjects = projects.filter(project => runtimes[project.id]?.isManaged && ['starting', 'running'].includes(runtimes[project.id].status));
+  const managedProjects = projects.filter(project => runtimes[project.id]?.isManaged);
   const externalRequest = useRef(false);
   const dialogOpen = useRef(false);
   dialogOpen.current = !!(projectForm || deleteProject || activeLogProject || externalStop || stopAllOpen || settingsOpen || quickOpen || groupForm || externalRequest.current || updater.isModalOpen);
@@ -278,10 +301,10 @@ export function App() {
     dialogOpen.current = true;
     setSettingsOpen(true);
   }, []);
-  const openProjectConfig = useCallback((project: ProjectConfig, focusPort?: DashboardConflict) => {
+  const openProjectConfig = useCallback((project: ProjectConfig, focusPort?: DashboardConflict, scanOnOpen = false) => {
     if (dialogOpen.current) return;
     dialogOpen.current = true;
-    setProjectForm({ project, focusPort });
+    setProjectForm({ project, focusPort, scanOnOpen });
   }, []);
   const openProjectEditor = useCallback((id: string) => {
     void invoke('dashboard_open_editor', { id }).catch(error => toast.error(String(error)));
@@ -442,9 +465,39 @@ export function App() {
     return () => { void unlisten.then(stop => stop()); };
   }, [selectProject]);
 
+  useEffect(() => {
+    if (!projectsLoaded) return;
+    let active = true;
+    const reveal = async () => {
+      if (!active) return;
+      const target = await invoke<{ projectId: string; slot: number } | null>('take_terminal_notification');
+      if (!active || !target) return;
+      if (!navigation.current.projects.some(project => project.id === target.projectId)) { setSearchQuery(''); setFilter('all'); }
+      if (getTerminalSnapshot()[terminalKey(target.projectId, target.slot)]?.sessionId) selectTerminalSlot(target.projectId, target.slot);
+      else selectProject(target.projectId);
+    };
+    const reportError = (error: unknown) => toast.error(String(error));
+    const unsubscribe = listen('terminal-notification-open', () => { void reveal().catch(reportError); });
+    void unsubscribe.then(reveal).catch(reportError);
+    return () => { active = false; void unsubscribe.then(stop => stop()); };
+  }, [projectsLoaded, selectProject, selectTerminalSlot]);
+
+  const selectedProjectId = selection?.projectId;
+  useEffect(() => {
+    if (selectedProjectId) void invoke('note_tray_project', { projectId: selectedProjectId }).catch(console.error);
+  }, [selectedProjectId]);
+
   const showToast = useCallback((msg: string) => {
     toast.error(msg);
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    void invoke<Record<string, Snippet[]>>('get_snippets').then(result => {
+      if (active) setSnippets(result);
+    }).catch(error => { if (active) showToast(`读取常用命令失败：${error}`); });
+    return () => { active = false; };
+  }, [showToast]);
 
   // Fetch projects and current status
   const loadProjects = useCallback(async () => {
@@ -459,7 +512,8 @@ export function App() {
       setProjectsLoaded(true);
       setConflicts(res.conflicts);
       const first = sidebarNavigation(res.projects, res.groups)[0] ?? res.projects[0];
-      const slot = first && firstOpenedTerminalSlot(first.id, Object.values(getTerminalSnapshot()));
+      const preserved = res.projects.some(project => project.id === navigation.current.selection?.projectId);
+      const slot = !preserved && first ? takeRestoredSlot(first.id) ?? firstOpenedTerminalSlot(first.id, Object.values(getTerminalSnapshot())) : undefined;
       setProjectNavigation(previous => {
         if (res.projects.some(project => project.id === previous.selection?.projectId)) return previous;
         return {
@@ -582,14 +636,23 @@ export function App() {
     }
   };
 
-  const handleRunCommand = async (id: string, command: string) => {
+  const handleRunCommand = async (id: string, command: string, snippet = false) => {
     if (dialogOpen.current) return;
     try {
-      const result = await invoke<{ slot: number }>('terminal_run', { projectId: id, slot: activeSlots[id] ?? 1, command });
-      selectTerminalSlot(id, result.slot);
+      const inActivePane = snippet && selection?.projectId === id && selection.view === 'terminal' && focusedTerminal?.projectId === id;
+      const slot = (inActivePane ? focusedTerminal?.slot : activeSlots[id])
+        ?? firstOpenedTerminalSlot(id, Object.values(getTerminalSnapshot())) ?? 1;
+      const result = await invoke<{ slot: number }>('terminal_run', { projectId: id, slot, command, currentOnly: snippet });
+      if (inActivePane && result.slot === slot) terminalControls.current?.focusInput();
+      else selectTerminalSlot(id, result.slot);
     } catch (error) {
       toast.error(String(error));
     }
+  };
+
+  const changeSnippet = async (projectId: string, operation: SnippetChange) => {
+    const entries = await invoke<Snippet[]>('change_snippet', { projectId, operation });
+    setSnippets(current => ({ ...current, [projectId]: entries }));
   };
 
   const stopOrRestart = async (id: string, restart: boolean) => {
@@ -689,7 +752,9 @@ export function App() {
             filter={filter}
             onFilterChange={setFilter}
             attentionProjects={attentionProjects}
-            changedProjects={changedProjects}
+            completions={completions}
+            snippets={snippets}
+            onRunSnippet={(id, command) => { void handleRunCommand(id, command, true); }}
             onQuickSwitch={openQuickSwitcher}
             onUpdateGroup={updateGroup}
             onReorderGroups={reorderGroups}
@@ -738,6 +803,9 @@ export function App() {
                   activeSlot={activeSlot}
                   terminals={terminals}
                   maxTerminals={settings.maxPerProject}
+                  snippets={snippets[selectedProject.id] ?? noSnippets}
+                  onRunSnippet={command => { void handleRunCommand(selectedProject.id, command, true); }}
+                  onChangeSnippet={change => changeSnippet(selectedProject.id, change)}
                   focused={focusActive}
                   onToggleFocus={toggleFocusMode}
                   onNewTerminal={() => openTerminal(selectedProject.id)}
@@ -766,11 +834,15 @@ export function App() {
 
         <UpdateDialog updater={updater} projects={managedProjects} terminalCount={terminalCount} />
         <MotionPresence>{quickOpen && <QuickSwitcher projects={[...projectOrder, ...projects.filter(project => project.archived)]} statuses={projectStatuses}
+          snippets={snippets} onRunSnippet={(project, command) => {
+            closeQuickSwitcher(); void handleRunCommand(project.id, command, true);
+          }}
           terminalActions={inTerminal ? {
             focused: focusActive,
             onFocus: () => { closeQuickSwitcher(); toggleFocusMode(); },
             onSplit: () => { closeQuickSwitcher(); toggleSplit(); },
           } : undefined}
+          onRescan={selectedProject ? () => { closeQuickSwitcher(); openProjectConfig(selectedProject, undefined, true); } : undefined}
           onClose={closeQuickSwitcher}
           onCreate={() => { closeQuickSwitcher(); openCreate(); }}
           onCreateGroup={() => { closeQuickSwitcher(); dialogOpen.current = true; setGroupForm({ action: 'create' }); }}
@@ -792,6 +864,7 @@ export function App() {
           project={projectForm.project}
           initialInspection={projectForm.inspection}
           focusPort={projectForm.focusPort}
+          scanOnOpen={projectForm.scanOnOpen}
           projects={projects}
           groups={groups}
           onCreateGroup={addGroup}

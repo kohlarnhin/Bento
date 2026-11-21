@@ -1,0 +1,45 @@
+# This private rc file supplies the startup sequence of an interactive login shell.
+[[ -r /etc/profile ]] && source /etc/profile
+for _bento_profile in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+  if [[ -r $_bento_profile ]]; then source "$_bento_profile"; break; fi
+done
+unset _bento_profile
+source "${BASH_SOURCE[0]%/*}/common.sh"
+_bento_running=0
+_bento_armed=0
+
+_bento_bash_preexec() {
+  [[ $_bento_armed == 1 ]] || return 0
+  [[ $1 != _bento_bash_precmd ]] || return 0
+  _bento_armed=0
+  _bento_running=1
+  _bento_command_start "$1"
+}
+
+_bento_bash_precmd() {
+  local code=$?
+  _bento_armed=0
+  if [[ $_bento_running == 1 ]]; then _bento_command_end "$code"; fi
+  _bento_running=0
+  _bento_prompt
+  return "$code"
+}
+
+_bento_bash_arm() { _bento_armed=1; }
+
+if [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == 'declare -a '* ]]; then
+  PROMPT_COMMAND=(_bento_bash_precmd "${PROMPT_COMMAND[@]}" _bento_bash_arm)
+else
+  PROMPT_COMMAND="_bento_bash_precmd${PROMPT_COMMAND:+; $PROMPT_COMMAND}; _bento_bash_arm"
+fi
+
+_bento_install_debug() {
+  local previous=$1
+  local hook='_bento_bash_preexec "$BASH_COMMAND"'
+  if [[ -n $previous ]]; then
+    eval "set -- ${previous#trap -- }"
+    hook="$hook; $1"
+  fi
+  trap "$hook" DEBUG
+}
+_bento_install_debug "$(trap -p DEBUG)"

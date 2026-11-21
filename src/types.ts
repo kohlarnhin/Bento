@@ -120,6 +120,7 @@ export interface RunningProjectInfo {
 export interface ProjectRuntimeStatus {
   projectId: string;
   port?: number | null;
+  actualPort?: number | null;
   status: ProjectStatus;
   isPortInUse: boolean;
   isManaged: boolean;
@@ -135,6 +136,7 @@ export interface ProjectRuntimeStatus {
 export interface ServiceRuntimeStatus {
   serviceId: string;
   port: number | null;
+  actualPort?: number | null;
   listening: boolean;
   owner?: { pid: number | null; inProject: boolean } | null;
 }
@@ -167,11 +169,32 @@ export interface TerminalSessionInfo {
   sessionId: string;
   alive: boolean;
   attention: boolean;
+  title?: string;
+  restoredActive?: boolean;
+  completion?: TerminalCompletion | null;
   exitCode?: number | null;
   pid?: number | null;
 }
 
+export interface TerminalCompletion {
+  command: string;
+  elapsedMs: number;
+  exitCode: number;
+  endedAt: number;
+}
+
 export type TerminalAttention = Pick<TerminalSessionInfo, 'projectId' | 'slot' | 'sessionId' | 'attention'>;
+export type TerminalCompletionEvent = Pick<TerminalSessionInfo, 'projectId' | 'slot' | 'sessionId' | 'completion'>;
+
+export interface Snippet {
+  id: number;
+  name: string;
+  command: string;
+}
+
+export type SnippetChange = { action: 'add'; name: string; command: string }
+  | ({ action: 'edit' } & Snippet)
+  | { action: 'delete'; id: number };
 
 export interface TerminalOutput {
   projectId: string;
@@ -209,6 +232,7 @@ export type DashboardListener = 'idle' | 'listening' | 'occupied';
 export interface DashboardServiceSample {
   id: string;
   port: number | null;
+  actualPort?: number | null;
   state: DashboardListener;
   usage: DashboardUsage | null;
   unexpectedPorts?: number[];

@@ -169,9 +169,10 @@ impl Run {
         for service in services {
             if let Some(usage) = &service.usage {
                 let last = data.services.entry(service.id.clone()).or_default();
-                if last.port != service.port {
+                let port = service.actual_port.or(service.port);
+                if last.port != port {
                     *last = LastService {
-                        port: service.port,
+                        port,
                         ..Default::default()
                     };
                 }
@@ -380,6 +381,7 @@ fn listener_state(owned: &[u32], foreign: bool) -> ListenerState {
 struct ServiceSample {
     id: String,
     port: Option<u16>,
+    actual_port: Option<u16>,
     state: ListenerState,
     usage: Option<Usage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -460,7 +462,8 @@ fn detect_unexpected_ports(
     }
     let waiting: Vec<_> = services.iter().enumerate().filter_map(|(index, service)| {
         let port = service.port?;
-        (service.state == ListenerState::Idle && info.checks_injected_port(&service.id, port)).then_some(index)
+        ((service.state == ListenerState::Idle || service.actual_port != Some(port)) &&
+            info.checks_injected_port(&service.id, port)).then_some(index)
     }).collect();
     if waiting.is_empty() {
         return;
@@ -507,8 +510,8 @@ fn sample_project(project: &ProjectConfig, info: Option<&ProcessInfo>) -> Snapsh
     let mut services = Vec::new();
     let config = services_for(project);
     for service in &config {
-        let (owned, foreign) = service
-            .port
+        let port = info.and_then(|info| info.actual_service_port(&service.id)).or(service.port);
+        let (owned, foreign) = port
             .map(|port| owned_listeners(port, &listeners, directory.as_deref(), managed.as_ref()))
             .unwrap_or_default();
         let state = listener_state(&owned, foreign);
@@ -517,6 +520,7 @@ fn sample_project(project: &ProjectConfig, info: Option<&ProcessInfo>) -> Snapsh
         services.push(ServiceSample {
             id: service.id.clone(),
             port: service.port,
+            actual_port: (state != ListenerState::Idle).then_some(port).flatten(),
             state,
             usage,
             unexpected_ports: Vec::new(),
@@ -737,7 +741,7 @@ pub async fn dashboard_health(
     let active = tauri::async_runtime::spawn_blocking(move || {
         let project = get_project(&id)?;
         let listeners = processes::listening_ports();
-        let managed = info.map(|info| info.metrics_pids(&processes::process_table(), &listeners));
+        let managed = info.as_ref().map(|info| info.metrics_pids(&processes::process_table(), &listeners));
         let directory = Path::new(&crate::expand_tilde(&project.path))
             .canonicalize()
             .ok();
@@ -745,7 +749,7 @@ pub async fn dashboard_health(
             services_for(&project)
                 .into_iter()
                 .filter_map(|service| {
-                    let port = service.port?;
+                    let port = info.as_ref().and_then(|info| info.actual_service_port(&service.id)).or(service.port)?;
                     let (owned, foreign) =
                         owned_listeners(port, &listeners, directory.as_deref(), managed.as_ref());
                     (listener_state(&owned, foreign) == ListenerState::Listening).then_some((

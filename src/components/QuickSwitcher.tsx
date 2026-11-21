@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Columns2, Focus, FolderPlus, Play, Plus, Search, Square, Terminal } from 'lucide-react';
-import type { ProjectConfig, ProjectStatus } from '../types';
-import { searchCreationActions, searchProjects } from '../lib/sidebarModel';
+import { Columns2, Focus, FolderPlus, Play, Plus, RefreshCw, Search, Square, Terminal } from 'lucide-react';
+import type { ProjectConfig, ProjectStatus, Snippet } from '../types';
+import { searchCreationActions, searchProjects, substringMatch } from '../lib/sidebarModel';
 import { ProjectAvatar } from './ProjectAvatar';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
 import { Input } from './ui/input';
@@ -19,10 +19,13 @@ function Highlight({ text, indices }: { text: string; indices: number[] }) {
     ? <mark key={run.start} className="bg-transparent font-semibold text-foreground">{run.text}</mark> : run.text)}</>;
 }
 
-export function QuickSwitcher({ projects, statuses, terminalActions, onClose, onCreate, onCreateGroup, onSelect, onToggle, onNewTerminal, onRunCommand }: {
+export function QuickSwitcher({ projects, statuses, snippets, onRunSnippet, terminalActions, onRescan, onClose, onCreate, onCreateGroup, onSelect, onToggle, onNewTerminal, onRunCommand }: {
   projects: ProjectConfig[];
   statuses: Record<string, ProjectStatus>;
+  snippets: Record<string, Snippet[]>;
+  onRunSnippet: (project: ProjectConfig, command: string) => void;
   terminalActions?: { focused: boolean; onFocus: () => void; onSplit: () => void };
+  onRescan?: () => void;
   onClose: () => void;
   onCreate: () => void;
   onCreateGroup: () => void;
@@ -43,10 +46,20 @@ export function QuickSwitcher({ projects, statuses, terminalActions, onClose, on
   const running = target && ['running', 'starting'].includes(statuses[target.id]);
   const name = target?.displayName || target?.name;
   const search = query.trim().toLowerCase();
-  const workspaceActions = terminalActions ? [
-    { id: 'terminal-focus', label: terminalActions.focused ? '退出专注' : '专注模式', icon: Focus, key: '⌘⇧↩', run: terminalActions.onFocus, keywords: '专注 focus' },
-    { id: 'terminal-split', label: '切换终端分屏', icon: Columns2, key: '⌘D', run: terminalActions.onSplit, keywords: '分屏 split' },
-  ].filter(action => !search || action.label.includes(search) || action.keywords.includes(search)) : [];
+  const snippetActions = (search ? projects : target ? [target] : []).flatMap(project => (snippets[project.id] ?? []).flatMap(snippet => {
+    const label = (project.displayName || project.name) + ' · ' + (snippet.name || snippet.command);
+    const match = search ? substringMatch(label, search) ?? substringMatch(snippet.command, search) : undefined;
+    if (search && !match) return [];
+    return [{ id: 'snippet-' + snippet.id, label, icon: Terminal, key: '', run: () => onRunSnippet(project, snippet.command),
+      indices: substringMatch(label, search)?.indices ?? [] }];
+  }));
+  const workspaceActions = [
+    ...(onRescan ? [{ id: 'rescan-project', label: '重新扫描当前项目', icon: RefreshCw, key: '', run: onRescan, keywords: 'rescan scan 重新识别' }] : []),
+    ...(terminalActions ? [
+      { id: 'terminal-focus', label: terminalActions.focused ? '退出专注' : '专注模式', icon: Focus, key: '⌘⇧↩', run: terminalActions.onFocus, keywords: '专注 focus' },
+      { id: 'terminal-split', label: '切换终端分屏', icon: Columns2, key: '⌘D', run: terminalActions.onSplit, keywords: '分屏 split' },
+    ] : []),
+  ].filter(action => !search || action.label.includes(search) || action.keywords.includes(search));
   const actions = [
     ...(target && !creationFirst ? [
       { id: 'toggle', label: `${running ? '停止' : '启动'} ${name}`, icon: running ? Square : Play, key: '⌘↵', run: () => onToggle(target), indices: [] as number[] },
@@ -55,6 +68,7 @@ export function QuickSwitcher({ projects, statuses, terminalActions, onClose, on
         id: `command-${index}`, label: `运行 ${entry.name}`, icon: Terminal, key: '', run: () => onRunCommand(target, entry.command), indices: [],
       })),
     ] : []),
+    ...snippetActions,
     ...workspaceActions.map(action => ({ ...action, indices: [] as number[] })),
     ...creationActions.map(action => ({ ...action, icon: action.id === 'add-project' ? Plus : FolderPlus, key: action.id === 'add-project' ? '⌘N' : '', run: action.id === 'add-project' ? onCreate : onCreateGroup })),
   ];

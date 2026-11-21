@@ -161,3 +161,34 @@
   .terminal-pane-frame, .terminal-panes[data-split] .terminal-pane-frame { padding-inline: 16px; }
   .terminal-status { gap: 10px; padding-inline: 16px; }
 }
+
+.terminal-snippets {
+  display: flex;
+  flex: none;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  margin-inline: 26px;
+  min-height: 33px;
+  border-top: 1px solid var(--hairline-divider);
+  color: var(--h1-label);
+  font-size: 11px;
+}
+
+.terminal-snippets > span { flex: none; }
+.terminal-snippet-scroll { display: flex; min-width: 0; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+.terminal-snippet {
+  overflow: hidden;
+  flex: none;
+  max-width: 190px;
+  border: 1px solid var(--hairline-control);
+  border-radius: 8px;
+  padding: 2px 8px;
+  color: hsl(var(--terminal-foreground));
+  font: 11px/17px var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.terminal-snippet:enabled:hover { background: var(--h1-hover); }
+.terminal-snippet-add { display: grid; min-width: 26px; place-items: center; border-style: dashed; color: var(--h1-label); }
+.terminal-snippet:disabled { opacity: .45; }

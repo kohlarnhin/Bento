@@ -70,6 +70,24 @@ pub fn probe_loopback(port: u16) -> bool {
     .any(|address| TcpStream::connect_timeout(address, Duration::from_millis(100)).is_ok())
 }
 
+pub fn speaks_http(port: u16) -> bool {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
+    let timeout = Duration::from_millis(80);
+    [SocketAddr::from((Ipv4Addr::LOCALHOST, port)), SocketAddr::from((Ipv6Addr::LOCALHOST, port))]
+        .into_iter()
+        .any(|address| {
+            let Ok(mut stream) = TcpStream::connect_timeout(&address, timeout) else { return false; };
+            let _ = stream.set_read_timeout(Some(timeout));
+            let _ = stream.set_write_timeout(Some(timeout));
+            if write!(stream, "HEAD / HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n").is_err() {
+                return false;
+            }
+            let mut line = Vec::new();
+            BufReader::new(stream).take(128).read_until(b'\n', &mut line).is_ok() && line.starts_with(b"HTTP/")
+        })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProcessIdentity {
     seconds: u64,

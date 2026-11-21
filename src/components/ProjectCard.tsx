@@ -4,9 +4,9 @@ import { invoke } from '@tauri-apps/api/core';
 import { ArrowUpRight, CodeXml, Folder, GitBranch, Globe2, Maximize2, Minimize2, Pencil, Play, Square, SquareTerminal } from 'lucide-react';
 import type {
   DashboardConflict, DashboardCpuPoint, DashboardGit, DashboardHealth, DashboardRun, DashboardServiceSample, DashboardUsage,
-  PortConflict, ProjectConfig, ProjectRuntimeStatus, ProjectStatus, ProjectView, Service,
+  PortConflict, ProjectConfig, ProjectRuntimeStatus, ProjectStatus, ProjectView, Service, Snippet, SnippetChange,
 } from '../types';
-import { cpuChart, dashboardPortListening, dashboardServices, dashboardStatus, durationText, relativeTime, runInterval } from '../lib/dashboard';
+import { cpuChart, dashboardListeningPort, dashboardServices, dashboardStatus, durationText, relativeTime, runInterval } from '../lib/dashboard';
 import { useDashboard } from '../lib/useDashboard';
 import { useProjectLaunch } from '../lib/useProjectLaunch';
 import { usePortStandard } from '../lib/usePortStandard';
@@ -33,12 +33,15 @@ interface ProjectCardProps {
   activeSlot: number;
   terminals: Record<string, TerminalStatus>;
   maxTerminals: number;
+  snippets: Snippet[];
+  onRunSnippet: (command: string) => void;
+  onChangeSnippet: (change: SnippetChange) => Promise<void>;
   focused: boolean;
   onToggleFocus: () => void;
   onNewTerminal: () => Promise<void>;
   onTerminalClosed: (slot: number) => void;
   terminalControls: RefObject<TerminalWorkspaceControls>;
-  onFocusedTerminal: (projectId: string, slot: number) => void;
+  onFocusedTerminal: (projectId: string, slot: number, left: number, right?: number) => void;
   onSelectView: (view: 'overview' | 'git') => void;
   onSelectTerminal: (slot: number) => void;
   status: ProjectStatus;
@@ -89,8 +92,9 @@ function ServiceRow({ service, sample, health, last, history, active, framework,
   const serviceSample = sample?.port === service.port ? sample : undefined;
   const state = serviceSample?.state ?? 'idle';
   const live = state === 'listening' && active;
+  const port = serviceSample?.actualPort ?? service.port;
   const previous = last?.port === service.port ? last : undefined;
-  const check = live ? (health?.port === service.port ? health : undefined) : previous?.health;
+  const check = live ? (health?.port === port ? health : undefined) : previous?.health;
   const usage = live ? serviceSample?.usage : undefined;
   const unexpected = serviceSample?.unexpectedPorts ?? [];
   const placeholder = service.key === 'PORT' ? '{port}' : '{port:' + service.key + '}';
@@ -120,10 +124,10 @@ function ServiceRow({ service, sample, health, last, history, active, framework,
         </div>
       </details>
       <div className="dash-service-address">
-        <code>{service.port == null ? '—' : 'localhost:' + service.port}</code>
+        <code>{port == null ? '—' : 'localhost:' + port}</code>
         <span className="h1-status-dot" data-tone={state === 'listening' ? 'running' : state === 'occupied' ? 'warning' : undefined}
           aria-label={statusLabel} title={statusLabel} />
-        {service.port != null && <OpenServiceButton port={service.port} listening={state !== 'idle'} onOpen={onOpen}
+        {port != null && <OpenServiceButton port={port} listening={state !== 'idle'} onOpen={onOpen}
           className="h1-tag" aria-label={`打开 ${service.name}`} data-service-open={service.id}><ArrowUpRight size={14} aria-hidden="true" /></OpenServiceButton>}
       </div>
     </div>
@@ -242,7 +246,7 @@ function ConflictDialog({ conflict, onClose, onConfirm }: {
 }
 
 export function ProjectCard({ project, view, slots, activeSlot, terminals, terminalControls, onFocusedTerminal, onSelectView, onSelectTerminal,
-  focused, maxTerminals, onToggleFocus, onNewTerminal, onTerminalClosed,
+  focused, maxTerminals, snippets, onRunSnippet, onChangeSnippet, onToggleFocus, onNewTerminal, onTerminalClosed,
   status: runtimeStatus, runtime, conflicts, onStart, onStop, onRestart, onOpenBrowser,
   onSetDefaultService, onRevealPath, onOpenEditor, onOpenTerminal, onOpenLogs, onClearLogs, onEdit }: ProjectCardProps) {
   const { snapshot, snapshotError, git, health, now, refresh } = useDashboard(project, runtime, view);
@@ -252,7 +256,7 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
   const unconfigured = (!project.startCommand.trim() && !project.services.some(service => service.startCommand?.trim())) ||
     !!launch?.error || !!standard?.data?.services.some(service => !service.references.length);
   const status = dashboardStatus(runtimeStatus, runtime, snapshot);
-  const active = status === 'running' || status === 'starting';
+  const active = !!runtime?.isManaged || status === 'running' || status === 'starting';
   const running = status === 'running';
   const services = useMemo(() => dashboardServices(project), [project.services, project.port]);
   const blocked = !active && (conflicts.length > 0 || !!snapshot?.conflicts.length);
@@ -351,7 +355,10 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
     setOccupied(undefined);
     refresh();
   };
-  const showWeb = (service: Service) => dashboardPortListening(service, snapshot?.services);
+  const listeningPort = (service: Service) => dashboardListeningPort(service, snapshot?.services)
+    ?? (project.services.length === 0 ? runtime?.actualPort : runtime?.services.find(item => item.serviceId === service.id)?.actualPort)
+    ?? null;
+  const openPort = runtime?.actualPort ?? listeningPort(defaultService);
   const name = project.displayName || project.name;
   const focusLabel = focused ? '退出专注' : '专注';
   const FocusIcon = focused ? Minimize2 : Maximize2;
@@ -368,13 +375,13 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
         maxTerminals={maxTerminals} onSelectView={onSelectView} onSelectTerminal={onSelectTerminal}
         onNewTerminal={onNewTerminal} onTerminalClosed={onTerminalClosed} />
       <div className="dash-actions">
-        {services.length > 1 ? <ProjectWebMenu project={project} canOpen={showWeb} terminal={terminalView}
+        {services.length > 1 ? <ProjectWebMenu project={project} listeningPort={listeningPort} actualPort={openPort} terminal={terminalView}
           onOpenBrowser={onOpenBrowser} onSetDefault={onSetDefaultService} />
-          : <OpenServiceButton className="h1-button" port={defaultService.port} listening={showWeb(defaultService)}
-              onOpen={onOpenBrowser} data-project-action="open" title={defaultService.port == null ? undefined : 'localhost:' + defaultService.port}>
+          : <OpenServiceButton className="h1-button" port={openPort ?? defaultService.port} listening={openPort != null}
+              onOpen={onOpenBrowser} data-project-action="open" title={openPort == null ? undefined : 'localhost:' + openPort}>
               打开网页 <ArrowUpRight size={13} aria-hidden="true" />
             </OpenServiceButton>}
-        {active && <button type="button" className="h1-button" disabled={pending || !running} onClick={() => act('restart')}
+        {active && <button type="button" className="h1-button" disabled={pending || status === 'starting'} onClick={() => act('restart')}
           aria-keyshortcuts="Meta+R" title="重启 ⌘R" data-project-action="restart">重启</button>}
         <ActionTooltip label={focusLabel + ' ⌘⇧↩'}>
           <button type="button" className="h1-button terminal-focus-toggle" aria-label={focusLabel} aria-keyshortcuts="Meta+Shift+Enter"
@@ -449,6 +456,7 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
       </div>
       <div className="workspace-view terminal-chrome" data-workspace-view="terminal" {...{ inert: !terminalInteractive ? '' : undefined }}>
         {mountTerminal && <TerminalWorkspace ref={terminalControls} project={project} activeSlot={activeSlot} slots={slots} terminals={terminals}
+          snippets={snippets} onRunSnippet={onRunSnippet} onChangeSnippet={onChangeSnippet}
           focused={focused} interactive={terminalInteractive} ready={terminalReady} onReady={setReadySlot} onFocusedSlot={onFocusedTerminal} />}
       </div>
     </div>

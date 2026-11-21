@@ -22,6 +22,7 @@ interface Props {
   disabled?: boolean;
   className?: string;
   popupClassName?: string;
+  clearRowsWhenAbove?: boolean;
   'aria-describedby'?: string;
   search?: {
     placeholder: string;
@@ -34,7 +35,7 @@ function Dot({ color }: { color: string }) {
   return <span aria-hidden="true" className="size-2 shrink-0 rounded-full" style={{ backgroundColor: color }} />;
 }
 
-export function Select({ id, label, value, options, onValueChange, disabled, className, popupClassName, search, ...props }: Props) {
+export function Select({ id, label, value, options, onValueChange, disabled, className, popupClassName, clearRowsWhenAbove, search, ...props }: Props) {
   const trigger = useRef<HTMLButtonElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLDivElement>(null);
@@ -90,12 +91,22 @@ export function Select({ id, label, value, options, onValueChange, disabled, cla
       const below = doc.documentElement.clientHeight - rect.bottom - 14;
       const desired = Math.min(288, panel.offsetHeight + choices.scrollHeight - choices.clientHeight) * scale;
       const up = below < desired && above > below;
+      const gap = 6;
+      let left = rect.left;
+      if (up && clearRowsWhenAbove && container) {
+        const right = container.right + gap;
+        const leftOfDialog = container.left - gap - rect.width;
+        if (right + rect.width <= doc.documentElement.clientWidth - 8) left = right;
+        else if (leftOfDialog >= 8) left = leftOfDialog;
+      }
       panel.style.width = `${rect.width / scale}px`;
-      panel.style.left = `${(rect.left - (container?.left ?? 0)) / scale - (container ? host.clientLeft : 0)}px`;
-      panel.style.top = `${((up ? rect.top : rect.bottom) - (container?.top ?? 0)) / scale - (container ? host.clientTop : 0) + (up ? -6 : 6)}px`;
+      panel.style.left = `${(left - (container?.left ?? 0)) / scale - (container ? host.clientLeft : 0)}px`;
+      const edge = up ? rect.top - gap : rect.bottom + gap;
+      panel.style.top = `${(edge - (container?.top ?? 0)) / scale - (container ? host.clientTop : 0)}px`;
       panel.style.maxHeight = `${Math.min(288, Math.max(0, up ? above : below) / scale)}px`;
       panel.style.translate = up ? '0 -100%' : '';
       panel.style.transformOrigin = up ? 'bottom left' : 'top left';
+      panel.dataset.placement = up ? 'above' : 'below';
     };
     position();
     win.addEventListener('resize', position);
@@ -106,7 +117,7 @@ export function Select({ id, label, value, options, onValueChange, disabled, cla
       win.removeEventListener('scroll', position, true);
       host.removeEventListener('animationend', position);
     };
-  }, [host, filtered.length, createIndex, error]);
+  }, [host, filtered.length, createIndex, error, clearRowsWhenAbove]);
 
   useLayoutEffect(() => {
     if (host) input.current?.focus({ preventScroll: true });

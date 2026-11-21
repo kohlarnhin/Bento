@@ -17,8 +17,12 @@ export function dashboardStatus(status: ProjectStatus, runtime?: ProjectRuntimeS
 }
 
 export function dashboardPortListening(service: Pick<Service, 'id' | 'port'>, samples?: DashboardServiceSample[]) {
-  return service.port != null && !!samples?.some(sample => sample.id === service.id &&
-    sample.port === service.port && sample.state !== 'idle');
+  return dashboardListeningPort(service, samples) != null;
+}
+
+export function dashboardListeningPort(service: Pick<Service, 'id' | 'port'>, samples?: DashboardServiceSample[]) {
+  const sample = samples?.find(sample => sample.id === service.id && sample.port === service.port && sample.state !== 'idle');
+  return sample ? sample.actualPort ?? sample.port : null;
 }
 
 export function cleanTerminalText(line: string) {

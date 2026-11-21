@@ -3,8 +3,9 @@ import { invoke } from '@tauri-apps/api/core';
 import { dashboardLog, dashboardServices, logTime } from '../lib/dashboard';
 import { getTerminal, terminalKey, type TerminalStatus } from '../lib/terminalRegistry';
 import { useProjectLogLines } from '../lib/useProjectLogs';
-import type { ProjectConfig, Service } from '../types';
+import type { ProjectConfig, Service, Snippet, SnippetChange } from '../types';
 import { ProjectTerminal, type ProjectTerminalControls, type TerminalDimensions } from './ProjectTerminal';
+import { TerminalSnippets } from './TerminalSnippets';
 import { LogText } from './LogText';
 import { Select } from './ui/select';
 
@@ -67,9 +68,13 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
   focused: boolean;
   interactive: boolean;
   ready: boolean;
+  snippets: Snippet[];
+  onRunSnippet: (command: string) => void;
+  onChangeSnippet: (change: SnippetChange) => Promise<void>;
   onReady: (slot: number) => void;
-  onFocusedSlot: (projectId: string, slot: number) => void;
-}>(function TerminalWorkspace({ project, activeSlot, slots, terminals, focused, interactive, ready, onReady, onFocusedSlot }, ref) {
+  onFocusedSlot: (projectId: string, slot: number, left: number, right?: number) => void;
+}>(function TerminalWorkspace({ project, activeSlot, slots, terminals, focused, interactive, ready,
+  snippets, onRunSnippet, onChangeSnippet, onReady, onFocusedSlot }, ref) {
   const [split, setSplit] = useState(false);
   const [source, setSource] = useState<string>();
   const [splitWidth, setSplitWidth] = useState(50);
@@ -99,7 +104,8 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
     setDimensions(previous => previous[slot]?.rows === next.rows && previous[slot]?.cols === next.cols
       ? previous : { ...previous, [slot]: next });
   }, []);
-  useEffect(() => { onFocusedSlot(project.id, inputSlot); }, [project.id, inputSlot, onFocusedSlot]);
+  useEffect(() => { onFocusedSlot(project.id, inputSlot, activeSlot, rightSlot); },
+    [project.id, inputSlot, activeSlot, rightSlot, onFocusedSlot]);
   useLayoutEffect(() => {
     if (!interactive || !ready) return;
     const frame = requestAnimationFrame(() => getTerminal(project.id, currentInputSlot.current)?.focus());
@@ -167,6 +173,7 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
         </div>
       </>}
     </div>
+    <TerminalSnippets projectId={project.id} entries={snippets} onRun={onRunSnippet} onChange={onChangeSnippet} />
     <footer className="terminal-status" data-terminal-status>
       <span data-terminal-status-shell>{shell}</span>
       <span className="truncate" title={cwd} data-terminal-status-cwd>{cwd}</span>

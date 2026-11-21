@@ -24,6 +24,7 @@ export function SegmentedControl<T extends string>({ options, value, onChange, l
   const track = useRef<HTMLDivElement>(null);
   const indicator = useRef<HTMLSpanElement>(null);
   const reduced = useReducedMotion();
+  const selectedIndex = options.findIndex(option => option.value === value);
   const last = useRef<{ x: number; width: number; height: number }>();
   useLayoutEffect(() => {
     const thumb = indicator.current;
@@ -33,7 +34,9 @@ export function SegmentedControl<T extends string>({ options, value, onChange, l
     const group = track.current;
     const thumb = indicator.current;
     const active = group?.querySelector<HTMLButtonElement>('[aria-checked="true"]');
-    if (!group || !thumb || !active) return;
+    if (!group || !thumb) return;
+    thumb.hidden = !active;
+    if (!active) { last.current = undefined; return; }
     if (group.scrollWidth > group.clientWidth) active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     const measure = (animate: boolean) => {
       const { x, width } = boxIn(active, group);
@@ -56,17 +59,17 @@ export function SegmentedControl<T extends string>({ options, value, onChange, l
       const keys = ['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'Home', 'End'];
       if (disabled || !keys.includes(event.key) || !(event.target instanceof HTMLButtonElement) || event.target.getAttribute('role') !== 'radio') return;
       event.preventDefault();
-      const current = options.findIndex(option => option.value === value);
       const step = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1;
       const next = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1
-        : (current + step + options.length) % options.length;
+        : selectedIndex < 0 ? (step > 0 ? 0 : options.length - 1)
+          : (selectedIndex + step + options.length) % options.length;
       onChange(options[next].value);
       track.current?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[next]?.focus();
     }}>
     <span ref={indicator} aria-hidden="true" className="segmented-indicator" data-segmented-indicator />
-    {options.map(option => {
+    {options.map((option, index) => {
       const button = <button type="button" role="radio" aria-checked={value === option.value}
-        tabIndex={value === option.value ? 0 : -1} disabled={disabled} onClick={() => onChange(option.value)}
+        tabIndex={index === Math.max(0, selectedIndex) ? 0 : -1} disabled={disabled} onClick={() => onChange(option.value)}
         title={option.title} onContextMenu={option.onContextMenu}
         className="segmented-option outline-none focus-visible:ring-2 focus-visible:ring-ring/25" {...option.attributes}>
         {option.label}

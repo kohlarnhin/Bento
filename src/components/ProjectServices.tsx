@@ -26,8 +26,9 @@ export function OpenServiceButton({ port, listening, onOpen, wrapperClassName, .
   </ActionTooltip>;
 }
 
-export function ProjectWebMenu({ project, onOpenBrowser, onSetDefault, canOpen, terminal }: WebActions & {
-  canOpen: (service: Service) => boolean;
+export function ProjectWebMenu({ project, onOpenBrowser, onSetDefault, listeningPort, actualPort, terminal }: WebActions & {
+  listeningPort: (service: Service) => number | null;
+  actualPort: number | null;
   terminal: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -35,9 +36,9 @@ export function ProjectWebMenu({ project, onOpenBrowser, onSetDefault, canOpen, 
   const anchor = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const { panel, attach, present } = usePopupMotion(open);
-  const port = project.port;
-  const services = project.services.filter(service => service.port != null);
-  const defaultService = services.find(service => service.openWeb);
+  const port = actualPort ?? project.port;
+  const services = project.services.map(service => ({ service, listening: listeningPort(service) }))
+    .filter(({ service, listening }) => service.port != null || listening != null);
 
   const close = (restoreFocus: boolean) => {
     setOpen(false);
@@ -60,7 +61,7 @@ export function ProjectWebMenu({ project, onOpenBrowser, onSetDefault, canOpen, 
     if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) setOpen(false);
   }}>
     <div className="project-web-split">
-      <OpenServiceButton data-project-action="open" port={port} listening={!!defaultService && canOpen(defaultService)} onOpen={onOpenBrowser}
+      <OpenServiceButton data-project-action="open" port={port} listening={actualPort != null} onOpen={onOpenBrowser}
         className="project-web-main" title={port == null ? undefined : 'localhost:' + port}>
         打开网页 <ArrowUpRight size={13} aria-hidden="true" />
       </OpenServiceButton>
@@ -87,12 +88,12 @@ export function ProjectWebMenu({ project, onOpenBrowser, onSetDefault, canOpen, 
         options[next]?.focus();
       }}>
       <div className="px-2.5 pb-1 pt-1.5 text-[11px] text-muted-foreground">打开哪个端口</div>
-      {services.map(service => <div key={service.id} className="project-web-option" data-default={service.openWeb || undefined}>
-        <OpenServiceButton role="menuitem" port={service.port} listening={canOpen(service)} aria-current={service.openWeb || undefined} data-open-service={service.id}
+      {services.map(({ service, listening }) => <div key={service.id} className="project-web-option" data-default={service.openWeb || undefined}>
+        <OpenServiceButton role="menuitem" port={listening ?? service.port} listening={listening != null} aria-current={service.openWeb || undefined} data-open-service={service.id}
           wrapperClassName="min-w-0 flex-1" className="choice-row flex w-full min-w-0 items-center justify-between gap-2 rounded-md px-2.5 py-[7px] text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/25 disabled:opacity-50"
           onOpen={port => { close(true); onOpenBrowser(port); }}>
           <span className="truncate" title={service.name}>{service.name}{service.kind && <span className="font-normal opacity-75"> · {service.kind}</span>}</span>
-          <span className="flex shrink-0 items-center gap-1 font-mono">{service.port}{service.openWeb && <Check className="size-3" aria-label="默认" />}</span>
+          <span className="flex shrink-0 items-center gap-1 font-mono">{listening ?? service.port}{service.openWeb && <Check className="size-3" aria-label="默认" />}</span>
         </OpenServiceButton>
         {!service.openWeb && <button type="button" role="menuitem" aria-label={'设为默认：' + service.name} data-default-service={service.id}
           className="h1-tag shrink-0 !text-[10px]"

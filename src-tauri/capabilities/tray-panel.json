@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "tray-panel",
+  "description": "Event subscription for the Bento menu bar panel",
+  "windows": ["bento-tray-panel"],
+  "permissions": ["core:event:default"]
+}

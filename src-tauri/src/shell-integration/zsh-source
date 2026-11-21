@@ -1,0 +1,7 @@
+if [[ -n $_bento_user_zdot ]]; then export ZDOTDIR=$_bento_user_zdot; else unset ZDOTDIR; fi
+if [[ -r ${ZDOTDIR:-$HOME}/$_bento_rc_file ]]; then
+  source "${ZDOTDIR:-$HOME}/$_bento_rc_file"
+fi
+_bento_user_zdot=${ZDOTDIR-}
+if [[ -o rcs ]]; then ZDOTDIR=$_bento_rc_dir; fi
+unset _bento_rc_file

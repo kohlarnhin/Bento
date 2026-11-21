@@ -2,13 +2,16 @@ use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, Pt
 use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
-use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 use crate::terminal_attention::{AttentionManager, Sinks as AttentionSinks};
+use crate::terminal_escape::{osc_cwd, EscapeStream};
+use crate::terminal_persistence::{self as persistence, SavedProject, SavedSessions, SavedTerminal, Store};
+use crate::terminal_shell::{self, Boundaries, Completion};
 
 const SCROLLBACK_BYTES: usize = 2 * 1024 * 1024;
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
@@ -40,6 +43,18 @@ pub struct TerminalSessionInfo {
     pub exit_code: Option<u32>,
     pub pid: Option<u32>,
     pub attention: bool,
+    pub title: Option<String>,
+    pub restored_active: bool,
+    pub completion: Option<Completion>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionEvent {
+    pub project_id: String,
+    pub slot: u8,
+    pub session_id: String,
+    pub completion: Option<Completion>,
 }
 
 #[derive(Serialize)]
@@ -196,11 +211,31 @@ struct Session {
     killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
     scrollback: Arc<Mutex<Scrollback>>,
     attention: Arc<AttentionManager>,
+    project_dir: PathBuf,
+    metadata: Arc<Mutex<ShellMetadata>>,
+    restored_active: bool,
+}
+
+#[derive(Default)]
+struct ShellMetadata {
+    title: Option<String>,
+    cwd: Option<PathBuf>,
+    completion: Option<Completion>,
 }
 
 impl Session {
+    fn completion_event(&self, completion: Option<Completion>) -> CompletionEvent {
+        CompletionEvent {
+            project_id: self.key.project_id.clone(),
+            slot: self.key.slot,
+            session_id: self.session_id.clone(),
+            completion,
+        }
+    }
+
     fn info(&self) -> TerminalSessionInfo {
         let state = lock(&self.state.0);
+        let metadata = lock(&self.metadata);
         TerminalSessionInfo {
             project_id: self.key.project_id.clone(),
             slot: self.key.slot,
@@ -209,6 +244,9 @@ impl Session {
             exit_code: state.exit_code,
             pid: self.pid,
             attention: self.attention.raised(&self.key, &self.session_id),
+            title: metadata.title.clone(),
+            restored_active: self.restored_active,
+            completion: metadata.completion.clone(),
         }
     }
 
@@ -227,7 +265,7 @@ impl Session {
             let path = String::from_utf8_lossy(std::ffi::CStr::from_bytes_until_nul(&executable).ok()?.to_bytes());
             Path::new(path.as_ref()).file_name().map(|name| name.to_string_lossy().into_owned())
         }).flatten();
-        let cwd = crate::processes::process_cwd(pid).map(|path| {
+        let cwd = Some(self.current_directory()).map(|path| {
             if let Some(home) = dirs::home_dir() {
                 if let Ok(relative) = path.strip_prefix(home) {
                     return Path::new("~").join(relative).to_string_lossy().into_owned();
@@ -236,6 +274,13 @@ impl Session {
             path.to_string_lossy().into_owned()
         });
         Some(TerminalContext { shell, cwd })
+    }
+
+    fn current_directory(&self) -> PathBuf {
+        let cwd = lock(&self.metadata).cwd.clone();
+        cwd.filter(|path| path.is_dir())
+            .or_else(|| self.pid.filter(|_| lock(&self.state.0).alive).and_then(crate::processes::process_cwd))
+            .unwrap_or_else(|| self.project_dir.clone())
     }
 
     fn terminate(&self) {
@@ -285,6 +330,7 @@ type ExitSink = Arc<dyn Fn(TerminalExit) + Send + Sync>;
 type OpenedSink = Arc<dyn Fn(TerminalSessionInfo) + Send + Sync>;
 type ClosedSink = Arc<dyn Fn(TerminalClosed) + Send + Sync>;
 type LimitSource = Arc<dyn Fn() -> Result<u8, String> + Send + Sync>;
+type CompletionSink = Arc<dyn Fn(CompletionEvent, bool) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct TerminalManager {
@@ -297,6 +343,13 @@ pub struct TerminalManager {
     closed: ClosedSink,
     limit: LimitSource,
     attention: Arc<AttentionManager>,
+    store: Option<Arc<Mutex<Store>>>,
+    active_slots: Arc<Mutex<HashMap<String, u8>>>,
+    integration: Option<PathBuf>,
+    completion_enabled: Arc<AtomicBool>,
+    completion: CompletionSink,
+    inactive: Arc<dyn Fn() -> bool + Send + Sync>,
+    visible_tabs: Arc<Mutex<HashSet<TerminalKey>>>,
 }
 
 impl TerminalManager {
@@ -315,6 +368,13 @@ impl TerminalManager {
             closed,
             limit,
             attention: AttentionManager::new(sinks),
+            store: None,
+            active_slots: Arc::new(Mutex::new(HashMap::new())),
+            integration: None,
+            completion_enabled: Arc::new(AtomicBool::new(true)),
+            completion: Arc::new(|_, _| {}),
+            inactive: Arc::new(|| false),
+            visible_tabs: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -326,7 +386,15 @@ impl TerminalManager {
         let change_app = app.clone();
         let badge_app = app.clone();
         let inactive_app = app.clone();
-        Self::with_attention(
+        let inactive = Arc::new(move || {
+            inactive_app.get_webview_window("main").is_none_or(|window| {
+                !window.is_visible().unwrap_or(false) || !window.is_focused().unwrap_or(false)
+            })
+        });
+        let notification_app = app.clone();
+        let directory = terminal_data_dir(&app);
+        let restore = crate::open_project_db().and_then(|db| crate::settings::enabled(&db, crate::settings::RESTORE_TERMINALS)).unwrap_or(true);
+        let mut manager = Self::with_attention(
             Arc::new(move |event| {
                 let _ = output_app.emit("terminal-output", event);
             }),
@@ -345,11 +413,7 @@ impl TerminalManager {
                     #[cfg(debug_assertions)]
                     crate::debug_e2e::record_terminal_badge(count);
                 }),
-                inactive: Arc::new(move || {
-                    inactive_app.get_webview_window("main").is_none_or(|window| {
-                        !window.is_visible().unwrap_or(false) || !window.is_focused().unwrap_or(false)
-                    })
-                }),
+                inactive: inactive.clone(),
                 bounce: Arc::new(move || {
                     if let Some(window) = app.get_webview_window("main") {
                         let _ = window.request_user_attention(Some(tauri::UserAttentionType::Informational));
@@ -358,7 +422,122 @@ impl TerminalManager {
                     crate::debug_e2e::record_terminal_bounce();
                 }),
             },
-        )
+        );
+        manager.integration = directory.as_ref().and_then(|path| match terminal_shell::install(path) {
+            Ok(integration) => Some(integration),
+            Err(error) => { eprintln!("初始化终端 shell 集成失败：{error}"); None }
+        });
+        manager.store = directory.map(|path| Arc::new(Mutex::new(Store::new(path.join("terminals"), restore))));
+        manager.inactive = inactive;
+        let enabled = crate::open_project_db().and_then(|db| crate::settings::enabled(&db, crate::settings::COMMAND_NOTICES)).unwrap_or(true);
+        manager.completion_enabled.store(enabled, Ordering::Relaxed);
+        manager.completion = Arc::new(move |event, background| {
+            let _ = notification_app.emit("terminal-completion", &event);
+            if background && event.completion.is_some() {
+                crate::terminal_notifications::post(&notification_app, event);
+            }
+        });
+        manager
+    }
+
+    pub fn restore(&self) {
+        let Some(store) = &self.store else { return; };
+        let sessions = {
+            let mut store = lock(store);
+            if store.enabled { store.load() } else { Ok(SavedSessions::new()) }
+        };
+        match (sessions, crate::get_projects_sync()) {
+            (Ok(mut saved), Ok(projects)) => {
+                for project in projects.projects {
+                    let Some(saved) = saved.remove(&project.id) else { continue; };
+                    let root = PathBuf::from(crate::expand_tilde(&project.path));
+                    if !root.is_dir() { continue; }
+                    for tab in saved.terminals {
+                        if validate_slot(tab.slot).is_err() || self.get(&project.id, tab.slot).is_ok() { continue; }
+                        let cwd = if tab.cwd.is_absolute() && tab.cwd.is_dir() { &tab.cwd } else { &root };
+                        let active = saved.active == Some(tab.slot);
+                        match self.spawn(&project.id, tab.slot, cwd, 80, 24, &project.env, Some((&tab, saved.saved_at, active))) {
+                            Ok(session) => {
+                                if active { lock(&self.active_slots).insert(project.id.clone(), tab.slot); }
+                                lock(&self.sessions).insert(session.key.clone(), session);
+                            }
+                            Err(error) => eprintln!("恢复终端失败 ({} #{})：{error}", project.id, tab.slot),
+                        }
+                    }
+                }
+            }
+            (Err(error), _) => eprintln!("读取终端历史失败：{error}"),
+            (_, Err(error)) => eprintln!("读取待恢复的项目失败：{error}"),
+        }
+        let manager = self.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                let manager = manager.clone();
+                let _ = tauri::async_runtime::spawn_blocking(move || manager.save_sessions()).await;
+            }
+        });
+    }
+
+    pub fn set_restore(&self, enabled: bool) -> Result<(), String> {
+        let Some(store) = &self.store else { return Ok(()); };
+        let mut store = lock(store);
+        if !enabled { store.clear().map_err(|error| format!("清除终端历史失败：{error}"))?; }
+        store.enabled = enabled;
+        Ok(())
+    }
+
+    pub fn set_command_notices(&self, enabled: bool) {
+        self.completion_enabled.store(enabled, Ordering::Relaxed);
+        if !enabled {
+            for session in lock(&self.sessions).values() {
+                if lock(&session.metadata).completion.take().is_some() {
+                    (self.completion)(session.completion_event(None), false);
+                }
+            }
+        }
+    }
+
+    pub fn save_sessions(&self) {
+        let _mutation = lock(&self.mutation);
+        self.save_sessions_locked();
+    }
+
+    pub fn save_before_exit(&self) {
+        let _mutation = lock(&self.mutation);
+        self.save_sessions_locked();
+        if let Some(store) = &self.store {
+            // A periodic write must not replace the final snapshot after PTY cleanup.
+            lock(store).enabled = false;
+        }
+    }
+
+    fn save_sessions_locked(&self) {
+        let Some(store) = &self.store else { return; };
+        let mut store = lock(store);
+        if !store.enabled { return; }
+        let mut snapshot = SavedSessions::new();
+        let sessions: Vec<_> = lock(&self.sessions).values().cloned().collect();
+        let active = lock(&self.active_slots).clone();
+        for session in sessions {
+            let entry = snapshot.entry(session.key.project_id.clone()).or_insert_with(|| SavedProject {
+                active: active.get(&session.key.project_id).copied(),
+                saved_at: persistence::now_secs(),
+                terminals: Vec::new(),
+            });
+            let raw = lock(&session.scrollback).snapshot().data;
+            entry.terminals.push(SavedTerminal {
+                slot: session.key.slot, cwd: session.current_directory(), title: lock(&session.metadata).title.clone(),
+                history: persistence::bounded_history(&raw),
+            });
+        }
+        for entry in snapshot.values_mut() {
+            entry.terminals.sort_by_key(|tab| tab.slot);
+            entry.active = entry.active.filter(|slot| entry.terminals.iter().any(|tab| tab.slot == *slot));
+        }
+        if let Err(error) = store.save(snapshot) {
+            eprintln!("保存终端历史失败：{error}");
+        }
     }
 
     fn get(&self, project_id: &str, slot: u8) -> Result<Session, String> {
@@ -407,7 +586,7 @@ impl TerminalManager {
         if !cwd.is_dir() {
             return Err(format!("项目目录不存在：{}", cwd.display()));
         }
-        let session = self.spawn(project_id, slot, cwd, cols.max(1), rows.max(1), env)?;
+        let session = self.spawn(project_id, slot, cwd, cols.max(1), rows.max(1), env, None)?;
         let result = session.result();
         lock(&self.sessions).insert(session.key.clone(), session);
         (self.opened)(result.session.clone());
@@ -437,6 +616,7 @@ impl TerminalManager {
         cols: u16,
         rows: u16,
         env: &[crate::projects::EnvVar],
+        restore: Option<(&SavedTerminal, u64, bool)>,
     ) -> Result<Session, String> {
         crate::projects::validate_env(env)?;
         let pair = native_pty_system()
@@ -450,12 +630,7 @@ impl TerminalManager {
             .master
             .take_writer()
             .map_err(|err| format!("写入终端失败：{err}"))?;
-        let mut command = CommandBuilder::new_default_prog(); // Login shell: loads .zprofile and .zshrc.
-        command.cwd(cwd);
-        configure_environment(&mut command);
-        for entry in env {
-            command.env(&entry.key, &entry.value);
-        }
+        let command = terminal_shell::command(self.integration.as_deref(), cwd, env);
         let child = pair
             .slave
             .spawn_command(command)
@@ -464,6 +639,10 @@ impl TerminalManager {
         let pid = child.process_id();
         let killer = child.clone_killer();
         let (sender, receiver) = mpsc::channel::<Input>();
+        let mut history = Scrollback::new(SCROLLBACK_BYTES);
+        if let Some((tab, timestamp, _)) = restore {
+            history.append(persistence::replay(tab, timestamp));
+        }
         let session = Session {
             session_id: format!(
                 "{}-{}",
@@ -482,8 +661,11 @@ impl TerminalManager {
             master: Arc::new(Mutex::new(Some(pair.master))),
             writer: sender,
             killer: Arc::new(Mutex::new(killer)),
-            scrollback: Arc::new(Mutex::new(Scrollback::new(SCROLLBACK_BYTES))),
+            scrollback: Arc::new(Mutex::new(history)),
             attention: self.attention.clone(),
+            project_dir: cwd.to_owned(),
+            metadata: Arc::new(Mutex::new(ShellMetadata { title: restore.and_then(|(tab, _, _)| tab.title.clone()), ..Default::default() })),
+            restored_active: restore.is_some_and(|(_, _, active)| active),
         };
         self.attention.register(&session.key, &session.session_id);
 
@@ -575,11 +757,18 @@ impl TerminalManager {
         let output_key = session.key.clone();
         let output_session = session.session_id.clone();
         let attention = self.attention.clone();
+        let metadata = session.metadata.clone();
+        let completion_sink = self.completion.clone();
+        let completion_enabled = self.completion_enabled.clone();
+        let visible_tabs = self.visible_tabs.clone();
+        let inactive = self.inactive.clone();
         let reader_result =
             thread::Builder::new()
                 .name("terminal-reader".into())
                 .spawn(move || {
                     let mut decoder = Utf8Decoder::default();
+                let mut escapes = EscapeStream::default();
+                let mut boundaries = Boundaries::default();
                     let mut buffer = [0; 32 * 1024];
                     let emit = |data: String| {
                         if data.is_empty() {
@@ -598,8 +787,39 @@ impl TerminalManager {
                         match reader.read(&mut buffer) {
                             Ok(0) => break,
                             Ok(len) => {
+                                let mut consumed = 0;
+                                for (index, &byte) in buffer[..len].iter().enumerate() {
+                                    if let (_, Some(osc)) = escapes.push(byte) {
+                                        let text = String::from_utf8_lossy(&osc);
+                                        match text.split_once(';') {
+                                            Some(("7", value)) => lock(&metadata).cwd = osc_cwd(value),
+                                            Some(("0" | "2", value)) => lock(&metadata).title =
+                                                Some(value.chars().filter(|char| !char.is_control()).take(160).collect()),
+                                            Some(("133", value)) => {
+                                                let result = boundaries.observe(value, Instant::now());
+                                                if let Some(result) = result.filter(|_| completion_enabled.load(Ordering::Relaxed)) {
+                                                    emit(decoder.decode(&buffer[consumed..=index], false));
+                                                    emit(result.divider());
+                                                    consumed = index + 1;
+                                                    let background = inactive();
+                                                    let visible = lock(&visible_tabs);
+                                                    if background || !visible.contains(&output_key) {
+                                                        lock(&metadata).completion = Some(result.clone());
+                                                        completion_sink(CompletionEvent {
+                                                            project_id: output_key.project_id.clone(),
+                                                            slot: output_key.slot,
+                                                            session_id: output_session.clone(),
+                                                            completion: Some(result),
+                                                        }, background);
+                                                    }
+                                                }
+                                            }
+                                            _ => (),
+                                        }
+                                    }
+                                }
                                 attention.output(&output_key, &output_session, &buffer[..len]);
-                                emit(decoder.decode(&buffer[..len], false));
+                                emit(decoder.decode(&buffer[consumed..len], false));
                             }
                             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
                             Err(_) => break, // macOS/Linux may report EIO at the end of a PTY.
@@ -631,7 +851,7 @@ impl TerminalManager {
             .map_err(|_| "终端输入已断开".to_string())
     }
 
-    fn run(&self, project_id: &str, slot: u8, cwd: &Path, command: String, env: &[crate::projects::EnvVar]) -> Result<RunResult, String> {
+    fn run(&self, project_id: &str, slot: u8, cwd: &Path, command: String, env: &[crate::projects::EnvVar], current_only: bool) -> Result<RunResult, String> {
         validate_slot(slot)?;
         if command.trim().is_empty() {
             return Err("请输入要运行的命令".into());
@@ -643,6 +863,14 @@ impl TerminalManager {
             let mut sessions: Vec<_> = lock(&self.sessions).values()
                 .filter(|session| session.key.project_id == project_id).cloned().collect();
             sessions.sort_by_key(|session| (session.key.slot != slot, session.key.slot));
+            if current_only {
+                if let Some(current) = sessions.first().filter(|session| session.key.slot == slot) {
+                    if current.info().alive && !current.idle() {
+                        return Err("当前终端中有程序正在运行".into());
+                    }
+                    sessions.truncate(1);
+                }
+            }
             let (session, check_idle) = if let Some(session) = sessions.iter().find(|session| session.idle()) {
                 (session.clone(), true)
             } else if let Some(session) = sessions.iter().find(|session| !session.info().alive) {
@@ -688,12 +916,15 @@ impl TerminalManager {
     pub fn close(&self, project_id: &str) {
         let _mutation = lock(&self.mutation);
         self.remove_matching(|key| key.project_id == project_id);
+        lock(&self.active_slots).remove(project_id);
+        self.save_sessions_locked();
     }
 
     fn close_terminal(&self, project_id: &str, slot: u8) -> Result<(), String> {
         validate_slot(slot)?;
         let _mutation = lock(&self.mutation);
         self.remove_matching(|key| key.project_id == project_id && key.slot == slot);
+        self.save_sessions_locked();
         Ok(())
     }
 
@@ -727,8 +958,38 @@ impl TerminalManager {
     }
 
     pub fn focus(&self, key: Option<TerminalKey>) {
+        self.focus_visible(key, None);
+    }
+
+    fn focus_visible(&self, key: Option<TerminalKey>, visible_slots: Option<Vec<u8>>) {
+        let mut visible = lock(&self.visible_tabs);
+        visible.clear();
+        if let Some(key) = &key {
+            lock(&self.active_slots).insert(key.project_id.clone(), key.slot);
+            visible.insert(key.clone());
+            if let Some(slots) = visible_slots {
+                visible.extend(slots.into_iter().filter(|slot| validate_slot(*slot).is_ok())
+                    .map(|slot| TerminalKey::new(&key.project_id, slot)));
+            }
+        }
+        let sessions = lock(&self.sessions);
+        for session in visible.iter().filter_map(|key| sessions.get(key)) {
+            if lock(&session.metadata).completion.take().is_some() {
+                (self.completion)(session.completion_event(None), false);
+            }
+        }
+        drop(sessions);
+        drop(visible);
         self.attention.focus(key);
     }
+}
+
+fn terminal_data_dir(app: &AppHandle) -> Option<PathBuf> {
+    #[cfg(debug_assertions)]
+    if let Some(database) = crate::debug_e2e::database_path() {
+        return database.parent().map(Path::to_owned);
+    }
+    app.path().app_data_dir().ok()
 }
 
 fn validate_slot(slot: u8) -> Result<(), String> {
@@ -860,11 +1121,11 @@ pub fn terminal_context(
 }
 
 #[tauri::command]
-pub fn terminal_focus(state: State<'_, TerminalManager>, project_id: Option<String>, slot: Option<u8>) {
+pub fn terminal_focus(state: State<'_, TerminalManager>, project_id: Option<String>, slot: Option<u8>, visible_slots: Option<Vec<u8>>) {
     let key = project_id.zip(slot).map(|(project_id, slot)| TerminalKey { project_id, slot });
     #[cfg(debug_assertions)]
     crate::debug_e2e::record_terminal_focus(key.as_ref());
-    state.focus(key);
+    state.focus_visible(key, visible_slots);
 }
 
 #[tauri::command]
@@ -873,11 +1134,12 @@ pub async fn terminal_run(
     project_id: String,
     slot: u8,
     command: String,
+    current_only: Option<bool>,
 ) -> Result<RunResult, String> {
     let manager = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let project = project_config(&project_id)?;
-        manager.run(&project_id, slot, Path::new(&crate::expand_tilde(&project.path)), command, &project.env)
+        manager.run(&project_id, slot, Path::new(&crate::expand_tilde(&project.path)), command, &project.env, current_only.unwrap_or(false))
     })
         .await
         .map_err(|err| format!("运行命令失败：{err}"))?
@@ -1040,7 +1302,7 @@ mod tests {
         }
 
         fn run(&self, id: &str, slot: u8, command: &str) -> RunResult {
-            self.manager.run(id, slot, &self.dir, command.into(), &self.env).unwrap()
+            self.manager.run(id, slot, &self.dir, command.into(), &self.env, false).unwrap()
         }
     }
 
@@ -1148,7 +1410,7 @@ mod tests {
         assert_eq!(fixture.run("a", 3, "printf 'other-idle\\n'").slot, 2);
         fixture.wait_for_slot("a", 2, "\r\nother-idle\r\n");
         fixture.busy("a", 2);
-        let error = fixture.manager.run("a", 1, &fixture.dir, "FORBIDDEN".into(), &fixture.env).unwrap_err();
+        let error = fixture.manager.run("a", 1, &fixture.dir, "FORBIDDEN".into(), &fixture.env, false).unwrap_err();
         assert_eq!(error, "所有终端都在运行程序，请结束其中一个，或在设置中调高终端数量上限");
         assert!(fixture.manager.list().iter().all(|s| !fixture.manager.get("a", s.slot).unwrap().result().snapshot.data.contains("FORBIDDEN")));
         fixture.exit("a", 2);

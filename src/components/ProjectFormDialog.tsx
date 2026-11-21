@@ -32,6 +32,7 @@ interface Props {
   project?: ProjectConfig;
   initialInspection?: ProjectDirInspection;
   focusPort?: DashboardConflict;
+  scanOnOpen?: boolean;
   projects: ProjectConfig[];
   groups: ProjectGroup[];
   onCreateGroup: (name: string) => Promise<ProjectGroup>;
@@ -86,7 +87,7 @@ function UpdatedBadge() {
   return <span className="service-primary-label ml-1.5">已更新</span>;
 }
 
-export function ProjectFormDialog({ project, initialInspection, focusPort, projects, groups, onCreateGroup, status, onClose, onSaved }: Props) {
+export function ProjectFormDialog({ project, initialInspection, focusPort, scanOnOpen, projects, groups, onCreateGroup, status, onClose, onSaved }: Props) {
   const [groupId, setGroupId] = useState(project?.groupId ?? '');
   const [groupSaving, setGroupSaving] = useState(false);
   const createGroup = async (name: string) => {
@@ -259,6 +260,11 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, proje
       if (isCurrent()) setRescan({ status: 'error', message: `重新扫描失败：${error}` });
     }
   };
+  useEffect(() => {
+    if (!scanOnOpen) return;
+    const frame = requestAnimationFrame(() => { void scanAgain(); });
+    return () => cancelAnimationFrame(frame);
+  }, [scanOnOpen]);
   const dismissRescan = () => {
     setRescan(undefined);
     rescanButton.current?.focus({ preventScroll: true });

@@ -8,8 +8,13 @@ interface Settings {
   'terminal.maxPerProject': number;
   'autostart.defaultApplied': boolean;
   'appearance.theme': Appearance;
+  'terminal.restore': boolean;
+  'terminal.commandNotices': boolean;
+  'tray.enabled': boolean;
 }
 
+const defaults = { 'terminal.restore': true, 'terminal.commandNotices': true, 'tray.enabled': true };
+type Feature = keyof typeof defaults;
 type Appearance = 'system' | 'light' | 'dark';
 
 interface AutostartStatus {
@@ -46,6 +51,10 @@ export function useSettings() {
   const [maxPerProject, setMaxPerProject] = useState(2);
   const [maxSaving, setMaxSaving] = useState(false);
   const [maxError, setMaxError] = useState<string | null>(null);
+  const [features, setFeatures] = useState(defaults);
+  const [featureSaving, setFeatureSaving] = useState<Feature>();
+  const [featureError, setFeatureError] = useState('');
+  const featurePending = useRef(false);
   const [autostart, setAutostart] = useState<AutostartStatus | null>(null);
   const [autostartSaving, setAutostartSaving] = useState(false);
   const [autostartError, setAutostartError] = useState<string | null>(null);
@@ -70,6 +79,11 @@ export function useSettings() {
       }
       setMaxPerProject(settings['terminal.maxPerProject']);
       setAppearance(settings['appearance.theme'] ?? 'system');
+      setFeatures({
+        'terminal.restore': settings['terminal.restore'] ?? true,
+        'terminal.commandNotices': settings['terminal.commandNotices'] ?? true,
+        'tray.enabled': settings['tray.enabled'] ?? true,
+      });
     }).catch(error => { if (active) setFontError(`读取设置失败：${error}`); })
       .finally(() => { if (active) setFontLoading(false); });
     void initialAutostart.then(status => { if (active) setAutostart(status); })
@@ -159,8 +173,25 @@ export function useSettings() {
     }
   }, [autostart]);
 
+  const changeFeature = async (key: Feature, value: boolean) => {
+    if (featurePending.current) return;
+    featurePending.current = true;
+    setFeatureSaving(key);
+    setFeatureError('');
+    try {
+      await invoke('set_setting', { key, value });
+      setFeatures(previous => ({ ...previous, [key]: value }));
+    } catch (error) {
+      setFeatureError(String(error));
+    } finally {
+      featurePending.current = false;
+      setFeatureSaving(undefined);
+    }
+  };
+
   return { fontSize, fontLoading, fontSaving, fontError, changeFontSize,
     maxPerProject, maxSaving, maxError, changeMaxPerProject,
+    features, featureSaving, featureError, changeFeature,
     appearance, colorScheme, appearanceSaving, appearanceError, changeAppearance,
     autostart, autostartSaving, autostartError, changeAutostart };
 }

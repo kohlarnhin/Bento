@@ -6,6 +6,7 @@ import { sidebarContextPosition } from '../lib/sidebarLayout';
 import { MotionExit, usePopupMotion } from './ui/motion-presence';
 
 export interface SidebarMenuItem {
+  id?: string | number;
   label: string;
   title?: string;
   icon?: ReactNode;
@@ -14,6 +15,7 @@ export interface SidebarMenuItem {
   current?: boolean;
   disabled?: boolean;
   separatorBefore?: boolean;
+  keepOpen?: boolean;
 }
 export function SidebarMenu({ x, y, items, onClose, label = '侧边栏菜单', className, projectContext = false, keyboard = false }: {
   x: number; y: number; items: SidebarMenuItem[]; onClose: () => void; label?: string; className?: string; projectContext?: boolean; keyboard?: boolean;
@@ -42,7 +44,7 @@ export function SidebarMenu({ x, y, items, onClose, label = '侧边栏菜单', c
     const outside = (event: PointerEvent) => {
       const contextClick = event.button === 2 || (event.button === 0 && event.ctrlKey);
       if (projectContext && contextClick && event.target instanceof Element &&
-        event.target.closest('[data-project-row], [data-running-project]')) return;
+        event.target.closest('[data-project-row]')) return;
       if (!menu.current?.contains(event.target as Node)) onClose();
     };
     const scroll = (event: Event) => { if (!menu.current?.contains(event.target as Node)) onClose(); };
@@ -98,13 +100,14 @@ export function SidebarMenu({ x, y, items, onClose, label = '侧边栏菜单', c
         buttons[index]?.focus();
       }
     }}>
-    {items.map(item => <Fragment key={item.label}>
+    {items.map(item => <Fragment key={item.id ?? item.label}>
       {item.separatorBefore && <div role="separator" className="h1-menu-divider" />}
       <button type="button" role="menuitem" title={item.title} aria-current={item.current || undefined} disabled={item.disabled}
         className={cn(item.destructive && 'text-destructive')} data-destructive={item.destructive || undefined}
         onBlur={event => { event.currentTarget.removeAttribute('data-keyboard-focus'); }}
         onPointerDown={event => { event.currentTarget.removeAttribute('data-keyboard-focus'); }}
-        onClick={() => { onClose(); item.onSelect(); }}>{item.icon}{item.label}</button>
+        aria-haspopup={item.keepOpen || undefined}
+        onClick={() => { if (!item.keepOpen) onClose(); item.onSelect(); }}>{item.icon}{item.label}</button>
     </Fragment>)}
   </div>, document.body);
 }

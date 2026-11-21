@@ -14,10 +14,11 @@ type TerminalAction = 'restart' | 'close';
 type Request = { action: TerminalAction; slot: number; sessionId: string };
 const actionLabel = { restart: '重启', close: '关闭' };
 
-function TabLabel({ label, attention }: { label: string; attention?: boolean }) {
+function TabLabel({ label, attention, completion }: { label: string; attention?: boolean; completion?: boolean }) {
   return <span className="workspace-tab-label" data-tab-label={label}>
     <span>{label}</span>
-    {attention && <span className="h1-status-dot terminal-tab-attention" data-tone="warning" aria-label="终端有新动静" />}
+    {completion ? <span className="h1-status-dot terminal-tab-attention" aria-label="命令已结束" data-terminal-completion-dot />
+      : attention && <span className="h1-status-dot terminal-tab-attention" data-tone="warning" aria-label="终端有新动静" />}
   </span>;
 }
 
@@ -94,7 +95,7 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
       const status = terminals[terminalKey(projectId, slot)];
       return {
         value: `terminal:${slot}`, title: status?.title || `终端 ${slot}`,
-        label: <TabLabel label={`终端 ${slot}`} attention={status?.attention} />,
+        label: <TabLabel label={`终端 ${slot}`} attention={status?.attention} completion={!!status?.completion} />,
         onContextMenu: (event: React.MouseEvent<HTMLButtonElement>) => {
           event.preventDefault();
           const bounds = event.currentTarget.getBoundingClientRect();

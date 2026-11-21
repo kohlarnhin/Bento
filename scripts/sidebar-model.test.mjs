@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { focusRailSections, fuzzyMatch, matchesSidebarFilter, moveProjectOrder, projectInitial, searchCreationActions, searchProjects, sidebarNavigation, sidebarSections, substringMatch } from '../src/lib/sidebarModel.ts';
+import { filterSidebarProjects, savedSidebarFilter, focusRailSections, fuzzyMatch, matchesSidebarFilter, moveProjectOrder, projectInitial, searchCreationActions, searchProjects, sidebarNavigation, sidebarSections, substringMatch } from '../src/lib/sidebarModel.ts';
 import { sidebarContextPosition, sidebarThumb } from '../src/lib/sidebarLayout.ts';
 
 const project = (id, extra = {}) => ({ id, name: id, path: '~/work/' + id, port: null, groupId: null, pinned: false, archived: false, ...extra });
@@ -115,12 +115,13 @@ test('Monochrome project initials preserve Unicode and ignore leading whitespace
   assert.equal(projectInitial('  '), '?');
 });
 
-test('Filters count projects, include starting services and combine with search upstream', () => {
+test('Filters distinguish running from starting and preserve auxiliary filters', () => {
   const p = project('a');
   const attention = new Set(['a']);
   const changes = new Set(['b']);
   assert.ok(matchesSidebarFilter(p, 'all', {}, attention, changes));
-  assert.ok(matchesSidebarFilter(p, 'running', { a: 'starting' }, attention, changes));
+  assert.ok(matchesSidebarFilter(p, 'running', { a: 'running' }, attention, changes));
+  assert.equal(matchesSidebarFilter(p, 'running', { a: 'starting' }, attention, changes), false);
   assert.ok(matchesSidebarFilter(p, 'attention', {}, attention, changes));
   assert.equal(matchesSidebarFilter(p, 'changes', {}, attention, changes), false);
   assert.equal(matchesSidebarFilter(p, 'running', { a: 'error' }, attention, changes), false);
@@ -146,4 +147,18 @@ test('Sidebar context menu opens at the cursor and flips inside both window edge
   assert.deepEqual(sidebarContextPosition(100, 120, 180, 210, 850, 600), { left: 100, top: 120 });
   assert.deepEqual(sidebarContextPosition(840, 570, 180, 210, 850, 600), { left: 660, top: 360 });
   assert.deepEqual(sidebarContextPosition(0, 0, 180, 210, 850, 600), { left: 8, top: 8 });
+});
+
+test('Sidebar filters retain group order, combine with search and produce one row per project', () => {
+  const projects = [project('web', { groupId: 'work' }), project('api', { groupId: 'work', pinned: true }), project('admin')];
+  const groups = [{ id: 'work', name: '工作', sortOrder: 0, collapsed: false }];
+  const statuses = { web: 'running', api: 'running', admin: 'starting' };
+  const list = (filter, query = '') => filterSidebarProjects(projects, groups, filter, query, statuses, new Set(), new Set()).map(p => p.id);
+  assert.deepEqual(list('all'), ['api', 'web', 'admin']);
+  assert.deepEqual(list('running'), ['api', 'web']);
+  assert.deepEqual(list('running', ' WEB '), ['web']);
+  assert.deepEqual(list('pinned'), ['api']);
+  assert.deepEqual(list('pinned', 'web'), []);
+  assert.equal(savedSidebarFilter('pinned'), 'pinned');
+  assert.equal(savedSidebarFilter('legacy'), 'all');
 });

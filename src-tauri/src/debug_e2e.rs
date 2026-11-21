@@ -199,7 +199,7 @@ pub fn record_command(command: &str) {
     }
 }
 
-fn enabled() -> bool {
+pub(crate) fn enabled() -> bool {
     std::env::var_os("APPHUB_E2E_SCRIPT").is_some() && std::env::var_os("APPHUB_E2E_OUT").is_some()
 }
 

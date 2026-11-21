@@ -8,7 +8,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { SearchAddon } from '@xterm/addon-search';
 import '@xterm/xterm/css/xterm.css';
-import type { TerminalAttention, TerminalOpenResult, TerminalOutput, TerminalSessionInfo } from '../types';
+import type { TerminalAttention, TerminalCompletionEvent, TerminalOpenResult, TerminalOutput, TerminalSessionInfo } from '../types';
 import { formatDroppedPaths, recoverShiftedImeInput, trackBareShift, transformTypedInput, type TerminalImeState } from './terminalInput';
 import { DEFAULT_TERMINAL_FONT_SIZE, TERMINAL_FALLBACK_FONT_FAMILY, TERMINAL_FONT_FAMILY, TERMINAL_LINE_HEIGHT, TERMINAL_THEME } from './terminalAppearance';
 import { createTitlePublisher } from './terminalUsability';
@@ -48,6 +48,7 @@ interface Entry {
   buffered: TerminalOutput[];
   exits: TerminalExit[];
   attentions: TerminalAttention[];
+  completions: TerminalCompletionEvent[];
   opening?: Promise<void>;
   input: InputChunk[];
   writing: boolean;
@@ -63,6 +64,7 @@ interface Entry {
 interface Registry {
   entries: Map<string, Entry>;
   inactiveHost?: HTMLDivElement;
+  restoredSlots: Map<string, number>;
   snapshot: Record<string, TerminalStatus>;
   subscribers: Set<() => void>;
   initialized?: Promise<void>;
@@ -74,7 +76,8 @@ interface Registry {
 
 // Retain instances and listeners through module HMR as well as React StrictMode remounts.
 const registry: Registry = import.meta.hot?.data.terminalRegistry ?? {
-  entries: new Map(), snapshot: {}, subscribers: new Set(), closedSessions: new Set(), exits: new Map(), fontSize: DEFAULT_TERMINAL_FONT_SIZE, showError: () => {},
+  entries: new Map(), snapshot: {}, subscribers: new Set(), closedSessions: new Set(), exits: new Map(), restoredSlots: new Map(),
+  fontSize: DEFAULT_TERMINAL_FONT_SIZE, showError: () => {},
 };
 if (import.meta.hot) {
   import.meta.hot.data.terminalRegistry = registry;
@@ -100,6 +103,12 @@ export function subscribeTerminals(subscriber: () => void) {
 export const getTerminalSnapshot = () => registry.snapshot;
 export const getTerminal = (projectId: string, slot: number) => registry.entries.get(terminalKey(projectId, slot))?.terminal;
 export const getTerminalSearch = (projectId: string, slot: number) => registry.entries.get(terminalKey(projectId, slot))?.search;
+
+export function takeRestoredSlot(projectId: string) {
+  const slot = registry.restoredSlots.get(projectId);
+  registry.restoredSlots.delete(projectId);
+  return slot !== undefined && registry.snapshot[terminalKey(projectId, slot)]?.sessionId ? slot : undefined;
+}
 
 let lastAttentionAt = 0;
 function attentionTime(attention: boolean, previous?: TerminalStatus) {
@@ -165,6 +174,11 @@ function receiveAttention(event: TerminalAttention) {
   publish({ ...current, ...event, attentionAt: attentionTime(event.attention, current) });
 }
 
+function receiveCompletion(event: TerminalCompletionEvent) {
+  const current = registry.snapshot[terminalKey(event.projectId, event.slot)];
+  if (current?.sessionId === event.sessionId) publish({ ...current, completion: event.completion });
+}
+
 function receiveOpened(session: TerminalSessionInfo) {
   if (registry.closedSessions.has(session.sessionId)) return;
   const key = terminalKey(session.projectId, session.slot);
@@ -176,7 +190,7 @@ function receiveOpened(session: TerminalSessionInfo) {
   const exited = registry.exits.get(session.sessionId);
   const attention = !exited && session.attention;
   publish({ ...session, ...(exited ? { ...exited, alive: false, attention: false } : {}),
-    title: sameSession ? current?.title : undefined,
+    title: sameSession ? current?.title ?? session.title : session.title,
     attentionAt: attentionTime(attention, sameSession ? current : undefined), opening: entry?.hydrating });
   if (entry && entry.sessionId !== session.sessionId && !entry.hydrating) startHydrate(entry, false);
 }
@@ -237,10 +251,18 @@ export function initTerminalRegistry(showError: (message: string) => void): Prom
           if (entry?.hydrating) entry.attentions.push(payload);
           else receiveAttention(payload);
         })));
+        unlisteners.push(await listen<TerminalCompletionEvent>('terminal-completion', ({ payload }) => dispatch(() => {
+          const entry = registry.entries.get(terminalKey(payload.projectId, payload.slot));
+          if (entry?.hydrating) entry.completions.push(payload);
+          else receiveCompletion(payload);
+        })));
         unlisteners.push(await listen<TerminalSessionInfo>('terminal-opened', ({ payload }) => dispatch(() => receiveOpened(payload))));
         unlisteners.push(await listen<TerminalClosed>('terminal-closed', ({ payload }) => dispatch(() => receiveClosed(payload))));
         const sessions = await invoke<TerminalSessionInfo[]>('terminal_list');
-        sessions.forEach(receiveOpened);
+        for (const session of sessions) {
+          if (session.restoredActive) registry.restoredSlots.set(session.projectId, session.slot);
+          receiveOpened(session);
+        }
         listing = false;
         pending.forEach(apply => apply());
         unlisteners.push(await getCurrentWebview().onDragDropEvent(({ payload }) => handleTerminalDragDrop(payload)));
@@ -322,7 +344,7 @@ function createEntry(projectId: string, slot: number): Entry {
       if (entry.disposed || !current || current.sessionId !== entry.sessionId || current.title === (title || undefined)) return;
       publish({ ...current, title: title || undefined });
     }),
-    hydrating: false, buffered: [], exits: [], attentions: [], input: [], writing: false, resizing: false,
+    hydrating: false, buffered: [], exits: [], attentions: [], completions: [], input: [], writing: false, resizing: false,
     lastPrintable: '', pasting: false,
     ime: { shiftDown: false, composing: false, pendingSend: false },
   };
@@ -492,6 +514,7 @@ function startHydrate(entry: Entry, restart: boolean): Promise<void> {
   entry.buffered = [];
   entry.exits = [];
   entry.attentions = [];
+  entry.completions = [];
   entry.input = [];
   entry.resize = undefined;
   entry.lastPrintable = '';
@@ -537,9 +560,11 @@ async function hydrate(entry: Entry, restart: boolean) {
     const exited = registry.exits.get(entry.sessionId);
     if (exited) receiveExit(entry, exited);
     entry.attentions.forEach(receiveAttention);
+    entry.completions.forEach(receiveCompletion);
     entry.buffered = [];
     entry.exits = [];
     entry.attentions = [];
+    entry.completions = [];
   } catch (error) {
     if (entry.disposed) return;
     const message = `打开终端失败：${error}`;
@@ -555,6 +580,7 @@ async function hydrate(entry: Entry, restart: boolean) {
     entry.exits.forEach(event => receiveExit(entry, event));
     publish({ ...(sessions ? session : registry.snapshot[key]), projectId: entry.projectId, slot: entry.slot, opening: false, error: message });
     entry.attentions.forEach(receiveAttention);
+    entry.completions.forEach(receiveCompletion);
     registry.showError(message);
   }
 }

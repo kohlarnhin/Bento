@@ -22,6 +22,7 @@ pub static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 pub enum Phase {
     Starting,
     Running,
+    PortTimeout,
 }
 
 #[derive(Clone)]
@@ -29,6 +30,13 @@ pub struct ManagedProject {
     pub id: String,
     pub port: Option<u16>,
     pub phase: Phase,
+    pub started_at: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ActualPorts {
+    primary: Option<u16>,
+    services: HashMap<String, u16>,
 }
 
 #[derive(Clone)]
@@ -41,6 +49,7 @@ pub struct ProcessInfo {
     services: Vec<projects::Service>,
     inject_ports: bool,
     tree: Option<Arc<processes::TrackedTree>>,
+    actual_ports: ActualPorts,
     pub run: dashboard::Run,
 }
 impl ProcessInfo {
@@ -86,6 +95,28 @@ impl ProcessInfo {
             self.services.iter().any(|service| service.id == id && service.port == Some(port))
         }
     }
+
+    pub fn actual_service_port(&self, id: &str) -> Option<u16> {
+        if self.services.is_empty() && id == "legacy:root" {
+            self.actual_ports.primary
+        } else {
+            self.actual_ports.services.get(id).copied()
+        }
+    }
+
+    fn observe_ports(&mut self, actual_ports: ActualPorts, timed_out: bool) -> bool {
+        let phase = if actual_ports.primary.is_some() || self.configured_ports().next().is_none() {
+            Phase::Running
+        } else if timed_out && self.phase == Phase::Starting {
+            Phase::PortTimeout
+        } else {
+            self.phase
+        };
+        let changed = self.phase != phase || self.actual_ports != actual_ports;
+        self.phase = phase;
+        self.actual_ports = actual_ports;
+        changed
+    }
 }
 
 fn pids_on_ports(
@@ -124,8 +155,9 @@ impl RuntimeState {
             .iter()
             .map(|(id, info)| ManagedProject {
                 id: id.clone(),
-                port: info.port,
+                port: info.actual_ports.primary,
                 phase: info.phase,
+                started_at: info.run.started_at,
             })
             .collect();
         projects.sort_by(|left, right| left.id.cmp(&right.id));
@@ -176,6 +208,7 @@ impl RuntimeState {
 pub struct ProjectRuntimeStatus {
     project_id: String,
     port: Option<u16>,
+    actual_port: Option<u16>,
     status: String,
     is_port_in_use: bool,
     is_managed: bool,
@@ -193,6 +226,7 @@ pub struct ProjectRuntimeStatus {
 struct ServiceRuntimeStatus {
     service_id: String,
     port: Option<u16>,
+    actual_port: Option<u16>,
     listening: bool,
     owner: Option<ServicePortOwner>,
 }
@@ -213,10 +247,10 @@ fn compute_status(
     revision: u64,
 ) -> ProjectRuntimeStatus {
     let status = if let Some(info) = managed {
-        if info.phase == Phase::Starting {
-            "starting"
-        } else {
-            "running"
+        match info.phase {
+            Phase::Starting => "starting",
+            Phase::Running => "running",
+            Phase::PortTimeout => "error",
         }
     } else if listener.0 {
         "running"
@@ -229,8 +263,9 @@ fn compute_status(
     ProjectRuntimeStatus {
         project_id: id.into(),
         port,
+        actual_port: managed.map_or_else(|| listener.0.then_some(port).flatten(), |info| info.actual_ports.primary),
         status: status.into(),
-        is_port_in_use: managed.map_or(listener.0, |info| info.phase == Phase::Running),
+        is_port_in_use: managed.map_or(listener.0, |info| info.actual_ports.primary.is_some()),
         is_managed: managed.is_some(),
         external: managed.is_none() && listener.0,
         pid: managed.map(|info| info.pid).or(listener.1),
@@ -244,16 +279,18 @@ fn compute_status(
 
 fn service_status(
     service: &projects::Service,
+    actual_port: Option<u16>,
     listeners: &HashMap<u16, Vec<u32>>,
     owns: impl Fn(u32) -> bool,
 ) -> (ServiceRuntimeStatus, Option<u32>) {
     let mut state = ServiceRuntimeStatus {
         service_id: service.id.clone(),
         port: service.port,
+        actual_port,
         listening: false,
         owner: None,
     };
-    let Some(port) = service.port else {
+    let Some(port) = actual_port.or(service.port) else {
         return (state, None);
     };
     let pids = listeners.get(&port).map_or(&[][..], Vec::as_slice);
@@ -278,6 +315,7 @@ fn service_status(
         });
     }
     state.listening = state.owner.is_some();
+    state.actual_port = state.listening.then_some(port);
     (state, owned)
 }
 
@@ -301,17 +339,22 @@ fn emit_status(
     services: &[projects::Service],
 ) {
     let mut status = data.status(id, port, (false, None));
+    let info = data.managed.get(id);
     status.services = services
         .iter()
-        .map(|service| ServiceRuntimeStatus {
-            service_id: service.id.clone(),
-            port: service.port,
-            listening: false,
-            owner: None,
+        .map(|service| {
+            let actual_port = info.and_then(|info| info.actual_service_port(&service.id));
+            ServiceRuntimeStatus {
+                service_id: service.id.clone(),
+                port: service.port,
+                actual_port,
+                listening: actual_port.is_some(),
+                owner: None,
+            }
         })
         .collect();
     if !status.services.is_empty() {
-        status.is_port_in_use = false;
+        status.is_port_in_use = status.services.iter().any(|service| service.listening) || status.actual_port.is_some();
     }
     let _ = app.emit("project-status", status);
     crate::tray::refresh(app);
@@ -339,7 +382,7 @@ pub async fn get_running_projects(
         .map(|(id, info)| RunningProjectInfo {
             project_id: id.clone(),
             pid: info.pid,
-            port: info.port,
+            port: info.actual_ports.primary,
         })
         .collect())
 }
@@ -388,7 +431,8 @@ pub async fn get_projects_runtime_status(
                         .services
                         .iter()
                         .map(|service| {
-                            let (status, owned) = service_status(service, &listeners, |pid| {
+                            let actual = info.and_then(|info| info.actual_service_port(&service.id));
+                            let (status, owned) = service_status(service, actual, &listeners, |pid| {
                                 if let Some(owner) = managed_by_pid.get(&pid) {
                                     return *owner == project.id;
                                 }
@@ -412,17 +456,15 @@ pub async fn get_projects_runtime_status(
                         (owned_pid.is_some(), owned_pid),
                         revision,
                     );
-                    status.status = if root_alive || owned_pid.is_some() {
-                        "running".into()
-                    } else if info.is_some() {
-                        "starting".into()
-                    } else {
-                        status.status
-                    };
                     if !root_alive {
                         status.pid = owned_pid.or(status.pid);
                     }
-                    status.is_port_in_use = services.iter().any(|service| service.listening);
+                    if info.is_none() {
+                        status.actual_port = services.iter().filter_map(|service| service.actual_port)
+                            .find(|port| Some(*port) == project.port)
+                            .or_else(|| services.iter().filter_map(|service| service.actual_port).min());
+                    }
+                    status.is_port_in_use = services.iter().any(|service| service.listening) || status.actual_port.is_some();
                     status.services = services;
                     return status;
                 }
@@ -699,15 +741,16 @@ async fn start(app: &AppHandle, id: &str, state: &ProcessMap) -> Result<(), Stri
                 pid,
                 pgid: pid as i32,
                 port: project.port,
-                phase: if multi_service {
-                    Phase::Running
-                } else {
+                phase: if project.ports().next().is_some() {
                     Phase::Starting
+                } else {
+                    Phase::Running
                 },
                 identity: root.identity,
                 services: project.services.clone(),
                 inject_ports: project.inject_ports,
                 tree: tree.clone(),
+                actual_ports: ActualPorts::default(),
                 run: run.clone(),
             },
         );
@@ -733,82 +776,7 @@ async fn start(app: &AppHandle, id: &str, state: &ProcessMap) -> Result<(), Stri
             );
         }));
     watch_resources(state.clone(), id.into(), pid, project.clone());
-    if let Some(tree) = &tree {
-        watch_service_tree(
-            app.clone(),
-            state.clone(),
-            id.into(),
-            pid,
-            tree.clone(),
-            project.clone(),
-        );
-    } else if let Some(port) = project.port {
-        let auto_open = project.auto_open && project.project_type.as_deref() == Some("web");
-        let app = app.clone();
-        let state = state.clone();
-        let id = id.to_string();
-        tauri::async_runtime::spawn(async move {
-            let started = Instant::now();
-            let mut warned = false;
-            let mut attempts = 0;
-            loop {
-                if !state.lock().await.owns(&id, pid) {
-                    break;
-                }
-                attempts += 1;
-                let check_lsof = attempts % 4 == 0;
-                let ready = tauri::async_runtime::spawn_blocking(move || {
-                    processes::probe_loopback(port)
-                        || (check_lsof && !processes::port_pids(port).is_empty())
-                })
-                .await
-                .unwrap_or(false);
-                let mut data = state.lock().await;
-                if !data.owns(&id, pid) {
-                    break;
-                }
-                if ready {
-                    data.managed.get_mut(&id).unwrap().phase = Phase::Running;
-                    data.changed(&id);
-                    log(&app, &id, format!("[Bento] 端口 {port} 已就绪"));
-                    emit_status(&app, &data, &id, Some(port), &[]);
-                    // Still under the pid-match lock: a stopped/replaced start cannot open a URL.
-                    if auto_open {
-                        if let Err(error) =
-                            crate::open_url(format!("http://localhost:{port}")).await
-                        {
-                            log(&app, &id, format!("[Bento] 自动打开网页失败：{error}"));
-                        }
-                    }
-                    break;
-                }
-                if !warned && started.elapsed() >= Duration::from_secs(60) {
-                    warned = true;
-                    log(
-                        &app,
-                        &id,
-                        format!(
-                            "[Bento] 端口 {port} 仍未监听，请确认配置端口与项目实际监听端口一致"
-                        ),
-                    );
-                }
-                drop(data);
-                tokio::time::sleep(if warned {
-                    Duration::from_secs(3)
-                } else {
-                    Duration::from_millis(500)
-                })
-                .await;
-            }
-        });
-    } else {
-        let mut data = state.lock().await;
-        if data.owns(id, pid) {
-            data.managed.get_mut(id).unwrap().phase = Phase::Running;
-            data.changed(id);
-            emit_status(app, &data, id, None, &[]);
-        }
-    }
+    watch_ports(app.clone(), state.clone(), id.into(), pid, project.clone());
     let app = app.clone();
     let state = state.clone();
     let id = id.to_string();
@@ -917,74 +885,104 @@ async fn persist_run(app: &AppHandle, id: &str, run: dashboard::Run, ports: Vec<
     }
 }
 
-fn watch_service_tree(
-    app: AppHandle,
-    state: ProcessMap,
-    id: String,
-    pid: u32,
-    tree: Arc<processes::TrackedTree>,
-    project: ProjectConfig,
-) {
+fn preferred_listener(ports: &[u16], mut http: impl FnMut(u16) -> bool) -> Option<u16> {
+    let mut ports = ports.iter().copied().collect::<Vec<_>>();
+    ports.sort_unstable();
+    ports.dedup();
+    if ports.len() > 1 {
+        if let Some(port) = ports.iter().copied().find(|port| http(*port)) {
+            return Some(port);
+        }
+    }
+    ports.first().copied()
+}
+
+fn detect_actual_ports(info: &ProcessInfo, project_dir: &std::path::Path) -> ActualPorts {
+    let listeners = processes::listening_ports();
+    let owned = info.metrics_pids(&processes::process_table(), &listeners);
+    let configured = |port: u16| {
+        listeners.get(&port).map_or_else(
+            || processes::probe_loopback(port),
+            |pids| pids.iter().any(|pid| owned.contains(pid)),
+        )
+    };
+    let candidates: Vec<_> = listeners.iter().filter(|(_, pids)| pids.iter().any(|pid| owned.contains(pid)))
+        .map(|(&port, _)| port).collect();
+    let mut http = HashMap::new();
+    let mut preferred = |ports: &[u16]| preferred_listener(ports, |port| *http.entry(port)
+        .or_insert_with(|| processes::speaks_http(port)));
+    let mut services = HashMap::new();
+    for service in &info.services {
+        if let Some(port) = service.port.filter(|port| configured(*port)) {
+            services.insert(service.id.clone(), port);
+        }
+    }
+    let claimed: HashSet<_> = services.values().copied().collect();
+    let remaining: Vec<_> = info.services.iter().filter(|service| !services.contains_key(&service.id))
+        .map(|service| (service, project_dir.join(&service.dir).canonicalize().ok())).collect();
+    let mut per_service: HashMap<&str, Vec<u16>> = HashMap::new();
+    for &port in &candidates {
+        if claimed.contains(&port) { continue; }
+        let pids = listeners.get(&port).into_iter().flatten().filter(|pid| owned.contains(pid));
+        let matches = pids.flat_map(|&pid| remaining.iter().filter_map(move |(service, path)| {
+            let path = path.as_ref()?;
+            processes::cwd_matches(pid, path).then_some((service.id.as_str(), path.components().count()))
+        }));
+        let service = matches.max_by_key(|(_, depth)| *depth).map(|(id, _)| id)
+            .or_else(|| (remaining.len() == 1).then(|| remaining[0].0.id.as_str()));
+        if let Some(id) = service {
+            per_service.entry(id).or_default().push(port);
+        }
+    }
+    for (id, ports) in per_service {
+        if let Some(port) = preferred(&ports) { services.insert(id.into(), port); }
+    }
+    let primary = info.port.filter(|port| configured(*port)).or_else(|| preferred(&candidates))
+        .or_else(|| services.values().copied().min());
+    ActualPorts { primary, services }
+}
+
+fn browser_url(port: u16) -> String {
+    format!("http://localhost:{port}")
+}
+
+fn watch_ports(app: AppHandle, state: ProcessMap, id: String, pid: u32, project: ProjectConfig) {
     let auto_open = project.auto_open && project.project_type.as_deref() == Some("web");
-    let ports: Vec<_> = project.ports().collect();
+    let project_dir = std::path::PathBuf::from(crate::expand_tilde(&project.path));
     tauri::async_runtime::spawn(async move {
         let started = Instant::now();
-        let mut warned = false;
-        let mut pending_port = project.port;
-        while state.lock().await.owns(&id, pid) {
-            let tree = tree.clone();
-            let port = pending_port;
-            let ports = ports.clone();
-            let ready = tauri::async_runtime::spawn_blocking(move || {
-                let listeners = if port.is_some() {
-                    processes::listening_ports()
-                } else {
-                    HashMap::new()
-                };
-                let tree = tree.capture(
-                    &processes::process_table(),
-                    pids_on_ports(ports, &listeners),
-                );
-                port.and_then(|port| listeners.get(&port))
-                    .is_some_and(|pids| pids.iter().any(|&pid| tree.owns(pid)))
-            })
-            .await
-            .unwrap_or(false);
-            let data = state.lock().await;
-            if !data.owns(&id, pid) {
-                break;
+        let mut opened = false;
+        loop {
+            let info = state.lock().await.managed.get(&id).filter(|info| info.pid == pid).cloned();
+            let Some(info) = info else { break; };
+            let directory = project_dir.clone();
+            let Ok(actual) = tauri::async_runtime::spawn_blocking(move || detect_actual_ports(&info, &directory)).await else { break; };
+            let mut data = state.lock().await;
+            let Some(info) = data.managed.get_mut(&id).filter(|info| info.pid == pid) else { break; };
+            let old_phase = info.phase;
+            let old_port = info.actual_ports.primary;
+            let changed = info.observe_ports(actual, started.elapsed() >= Duration::from_secs(60));
+            let phase = info.phase;
+            let ready = info.actual_ports.primary;
+            if changed {
+                data.changed(&id);
+                emit_status(&app, &data, &id, project.port, &project.services);
             }
-            if let Some(port) = pending_port {
-                if ready {
-                    pending_port = None;
-                    log(&app, &id, format!("[Bento] 端口 {port} 已就绪"));
-                    if auto_open {
-                        if let Err(error) =
-                            crate::open_url(format!("http://localhost:{port}")).await
-                        {
-                            log(&app, &id, format!("[Bento] 自动打开网页失败：{error}"));
-                        }
+            if old_phase != Phase::PortTimeout && phase == Phase::PortTimeout {
+                log(&app, &id, "[Bento] 等待监听端口超时，进程仍在运行。可停止或重启项目".into());
+            }
+            if let Some(port) = ready.filter(|port| Some(*port) != old_port) {
+                log(&app, &id, format!("[Bento] 端口 {port} 已就绪"));
+                // Keep the PID match valid through auto-open.
+                if auto_open && !opened {
+                    opened = true;
+                    if let Err(error) = crate::open_url(browser_url(port)).await {
+                        log(&app, &id, format!("[Bento] 自动打开网页失败：{error}"));
                     }
-                } else if !warned && started.elapsed() >= Duration::from_secs(60) {
-                    warned = true;
-                    log(
-                        &app,
-                        &id,
-                        format!(
-                            "[Bento] 端口 {port} 仍未监听，请确认配置端口与项目实际监听端口一致"
-                        ),
-                    );
                 }
             }
             drop(data);
-            tokio::time::sleep(Duration::from_millis(
-                if pending_port.is_some() && !warned {
-                    400
-                } else {
-                    1000
-                },
-            ))
-            .await;
+            tokio::time::sleep(if phase == Phase::Starting { Duration::from_millis(450) } else { Duration::from_secs(3) }).await;
         }
     });
 }
@@ -1347,6 +1345,7 @@ mod tests {
             services: Vec::new(),
             inject_ports: true,
             tree: None,
+            actual_ports: ActualPorts::default(),
             run: dashboard::Run::new(),
         }
     }
@@ -1384,6 +1383,28 @@ mod tests {
         state.managed.clear();
         assert!(state.managed_snapshot().is_empty());
     }
+    #[test]
+    fn listener_on_a_different_port_makes_project_ready_and_sets_browser_url() {
+        let mut info = info(10, Phase::Starting);
+        let primary = preferred_listener(&[5210, 5201, 5199], |port| port > 5200);
+        assert_eq!(primary, Some(5201));
+        assert!(info.observe_ports(ActualPorts { primary, ..Default::default() }, false));
+        let status = compute_status("fixture", Some(5301), Some(&info), None, (false, None), 1);
+        assert_eq!(status.status, "running");
+        assert_eq!(status.port, Some(5301));
+        assert_eq!(status.actual_port.map(browser_url).as_deref(), Some("http://localhost:5201"));
+        assert!(status.is_port_in_use);
+    }
+
+    #[test]
+    fn configured_project_can_recover_from_port_timeout() {
+        let mut info = info(10, Phase::Starting);
+        assert!(info.observe_ports(ActualPorts::default(), true));
+        assert_eq!(info.phase, Phase::PortTimeout);
+        assert!(info.observe_ports(ActualPorts { primary: Some(5301), ..Default::default() }, true));
+        assert_eq!(info.phase, Phase::Running);
+    }
+
     #[test]
     fn runtime_rules_and_failure_clearing() {
         let mut state = RuntimeState::default();

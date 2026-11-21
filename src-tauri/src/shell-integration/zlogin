@@ -1,0 +1,21 @@
+if [[ -n $_bento_user_zdot ]]; then export ZDOTDIR=$_bento_user_zdot; else unset ZDOTDIR; fi
+source "$_bento_rc_dir/common.sh"
+autoload -Uz add-zsh-hook
+_bento_running=0
+
+_bento_preexec() {
+  _bento_running=1
+  _bento_command_start "$1"
+}
+
+_bento_precmd() {
+  local code=$?
+  if (( _bento_running )); then _bento_command_end "$code"; fi
+  _bento_running=0
+  _bento_prompt
+  return 0
+}
+
+# Run before user precmd hooks can overwrite the actual exit status.
+precmd_functions=(_bento_precmd "${precmd_functions[@]}")
+add-zsh-hook preexec _bento_preexec
