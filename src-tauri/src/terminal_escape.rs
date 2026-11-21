@@ -17,10 +17,27 @@ pub struct EscapeStream {
     state: State,
     osc: Vec<u8>,
     too_long: bool,
+    csi: Vec<u8>,
+}
+
+pub enum EscapeEvent<'a> {
+    Text,
+    Control,
+    Osc(Vec<u8>),
+    Csi(&'a [u8]),
+    Other,
 }
 
 impl EscapeStream {
     pub fn push(&mut self, byte: u8) -> (bool, Option<Vec<u8>>) {
+        match self.event(byte) {
+            EscapeEvent::Text => (true, None),
+            EscapeEvent::Osc(osc) => (false, Some(osc)),
+            _ => (false, None),
+        }
+    }
+
+    pub fn event(&mut self, byte: u8) -> EscapeEvent<'_> {
         use State::*;
         let text = matches!(self.state, Text)
             && (byte >= 32 && byte != 127 || byte == b'\n' || byte == b'\t');
@@ -31,15 +48,24 @@ impl EscapeStream {
         };
         if done {
             self.state = Text;
-            return (
-                false,
-                (!self.too_long).then(|| std::mem::take(&mut self.osc)),
-            );
+            return if self.too_long {
+                EscapeEvent::Other
+            } else {
+                EscapeEvent::Osc(std::mem::take(&mut self.osc))
+            };
+        }
+        if matches!(self.state, Csi) && (0x40..=0x7e).contains(&byte) {
+            self.state = Text;
+            return EscapeEvent::Csi(&self.csi);
         }
 
+        let ground = matches!(self.state, Text);
         self.state = match (self.state, byte) {
             (Text, 27) => Escape,
-            (Escape, b'[') => Csi,
+            (Escape, b'[') => {
+                self.csi.clear();
+                Csi
+            }
             (Escape, b']') => {
                 self.osc.clear();
                 self.too_long = false;
@@ -48,7 +74,13 @@ impl EscapeStream {
             (Escape, b'P' | b'X' | b'^' | b'_') => String,
             (Escape | Intermediate, 0x20..=0x2f) => Intermediate,
             (Escape | Intermediate | Csi, 27) => Escape,
-            (Escape | Intermediate, _) | (Csi, 0x40..=0x7e) => Text,
+            (Escape | Intermediate, _) => Text,
+            (Csi, _) => {
+                if self.csi.len() < 40 {
+                    self.csi.push(byte);
+                }
+                Csi
+            }
             (Osc, 27) => OscEscape,
             (Osc, _) => {
                 if self.osc.len() < 8192 {
@@ -67,7 +99,13 @@ impl EscapeStream {
             (StringEscape, _) => String,
             (state, _) => state,
         };
-        (text, None)
+        if text {
+            EscapeEvent::Text
+        } else if ground && byte != 27 {
+            EscapeEvent::Control
+        } else {
+            EscapeEvent::Other
+        }
     }
 }
 

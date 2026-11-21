@@ -169,12 +169,30 @@ export interface TerminalSessionInfo {
   sessionId: string;
   alive: boolean;
   attention: boolean;
+  agent?: TerminalAgent | null;
+  agentRevision?: number;
   title?: string;
   restoredActive?: boolean;
   completion?: TerminalCompletion | null;
   exitCode?: number | null;
   pid?: number | null;
 }
+
+export type TerminalAgentKind = 'claude' | 'codex';
+export type TerminalAgentState = 'thinking' | 'waiting' | 'done';
+
+export interface TerminalAgent {
+  kind: TerminalAgentKind;
+  state: TerminalAgentState;
+  stateStartedAt: number;
+  roundStartedAt: number | null;
+  acknowledged: boolean;
+}
+
+export type TerminalAgentEvent = Pick<TerminalSessionInfo, 'projectId' | 'slot' | 'sessionId'> & {
+  agent: TerminalAgent | null;
+  agentRevision: number;
+};
 
 export interface TerminalCompletion {
   command: string;

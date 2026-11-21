@@ -1,8 +1,9 @@
 import { useCallback, useRef, useState } from 'react';
-import { Plus, RotateCcw, X } from 'lucide-react';
+import { Plus, RotateCcw, Sparkle, X } from 'lucide-react';
 import { toast } from 'sonner';
-import type { ProjectView } from '../types';
+import type { ProjectView, TerminalAgent } from '../types';
 import { closeTerminal, getTerminalSnapshot, restartTerminal, terminalKey, type TerminalStatus } from '../lib/terminalRegistry';
+import { agentNames } from '../lib/terminalUsability';
 import { SidebarMenu } from './SidebarMenu';
 import Button from './ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog';
@@ -14,11 +15,12 @@ type TerminalAction = 'restart' | 'close';
 type Request = { action: TerminalAction; slot: number; sessionId: string };
 const actionLabel = { restart: '重启', close: '关闭' };
 
-function TabLabel({ label, attention, completion }: { label: string; attention?: boolean; completion?: boolean }) {
-  return <span className="workspace-tab-label" data-tab-label={label}>
-    <span>{label}</span>
-    {completion ? <span className="h1-status-dot terminal-tab-attention" aria-label="命令已结束" data-terminal-completion-dot />
-      : attention && <span className="h1-status-dot terminal-tab-attention" data-tone="warning" aria-label="终端有新动静" />}
+function TabLabel({ label, agent, attention, completion }: { label: string; agent?: TerminalAgent | null; attention?: boolean; completion?: boolean }) {
+  return <span className="workspace-tab-label" data-tab-label={label} data-terminal-agent-kind={agent?.kind}>
+    <span>{agent && <Sparkle className="terminal-agent-sparkle" size={12} strokeWidth={1.5} aria-hidden="true" />}
+      {label}{agent?.state === 'waiting' && <span className="terminal-agent-waiting-dot" role="img" aria-label="等你确认" />}</span>
+    {!agent && (completion ? <span className="h1-status-dot terminal-tab-attention" aria-label="命令已结束" data-terminal-completion-dot />
+      : attention && <span className="h1-status-dot terminal-tab-attention" data-tone="warning" aria-label="终端有新动静" />)}
   </span>;
 }
 
@@ -89,13 +91,18 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
     </span>
   </ActionTooltip>;
 
+  const agentCounts = { claude: 0, codex: 0 };
   const tabs = [
     { value: 'overview', label: <TabLabel label="概览" /> },
     ...slots.map(slot => {
       const status = terminals[terminalKey(projectId, slot)];
+      const agent = status?.agent;
+      const number = agent ? ++agentCounts[agent.kind] : 0;
+      const slotName = `终端 ${slot}`;
+      const label = agent ? agentNames[agent.kind] + (number > 1 ? ` ${number}` : '') : slotName;
       return {
-        value: `terminal:${slot}`, title: status?.title || `终端 ${slot}`,
-        label: <TabLabel label={`终端 ${slot}`} attention={status?.attention} completion={!!status?.completion} />,
+        value: `terminal:${slot}`, title: agent && status?.title ? `${slotName} · ${status.title}` : status?.title || slotName,
+        label: <TabLabel label={label} agent={agent} attention={status?.attention} completion={!!status?.completion} />,
         onContextMenu: (event: React.MouseEvent<HTMLButtonElement>) => {
           event.preventDefault();
           const bounds = event.currentTarget.getBoundingClientRect();

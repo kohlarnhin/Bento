@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { clampTerminalFontSize, createTitlePublisher, firstOpenedTerminalSlot, normalizeTerminalTitle, terminalsNeedingAttention } from '../src/lib/terminalUsability.ts';
+import { agentDurationRefreshDelay, agentsByProject, clampTerminalFontSize, createTitlePublisher, firstOpenedTerminalSlot, formatAgentDuration, nextAttentionTarget, normalizeTerminalTitle, terminalsNeedingAttention } from '../src/lib/terminalUsability.ts';
 
 test('project navigation takes the earliest opened label, including an exited session', () => {
   const other = { projectId: 'other', slot: 1, sessionId: 'other' };
@@ -101,6 +101,67 @@ test('Attention ties and restored timestamps have a stable order', () => {
     { projectId: 'a', slot: 1, attention: true },
   ];
   assert.deepEqual(terminalsNeedingAttention(targets).map(t => t.projectId + t.slot), ['a1', 'a2', 'b1']);
+});
+
+const agent = (projectId, slot, state, stateStartedAt, acknowledged = false) => ({
+  projectId, slot, agent: { kind: 'claude', state, stateStartedAt, roundStartedAt: null, acknowledged },
+});
+
+test('Sidebar chooses waiting, then unread completion, then working for each project', () => {
+  const thinking = agent('a', 1, 'thinking', 5);
+  const done = agent('a', 2, 'done', 10);
+  const waiting = agent('a', 3, 'waiting', 20);
+  const acknowledged = agent('b', 1, 'done', 15, true);
+  let rows = agentsByProject([thinking, done, waiting, acknowledged]);
+  assert.deepEqual(rows.get('a'), { agent: waiting.agent, slot: 3, multiple: true });
+  assert.equal(rows.has('b'), false);
+  rows = agentsByProject([thinking, done]);
+  assert.equal(rows.get('a').slot, 2);
+  rows = agentsByProject([thinking, { ...done, agent: { ...done.agent, acknowledged: true } }]);
+  assert.deepEqual(rows.get('a'), { agent: thinking.agent, slot: 1, multiple: true });
+});
+
+test('Cmd+Shift+U visits oldest approvals, unread completions and existing reminders in order', () => {
+  const ordinary = { projectId: 'shell', slot: 1, attention: true, attentionAt: 100 };
+  const olderOrdinary = { projectId: 'older-shell', slot: 1, attention: true, attentionAt: 90 };
+  const later = agent('a', 3, 'waiting', 40);
+  const earlier = agent('z', 2, 'waiting', 30);
+  const tied = agent('z', 3, 'waiting', 30);
+  const done = agent('a', 2, 'done', 5);
+  const acknowledged = { ...agent('a', 1, 'done', 3, true), attention: true };
+  const thinking = agent('a', 4, 'thinking', 1);
+  const targets = [ordinary, done, later, tied, thinking, acknowledged, earlier, olderOrdinary];
+  let current;
+  for (const expected of [earlier, tied, later, done, ordinary, olderOrdinary, earlier]) {
+    current = nextAttentionTarget(targets, current);
+    assert.equal(current, expected);
+  }
+  assert.equal(nextAttentionTarget([earlier], earlier), undefined);
+  assert.equal(nextAttentionTarget([acknowledged, thinking]), undefined);
+});
+
+test('Agent elapsed time uses seconds, whole minutes, then hours and remaining minutes', () => {
+  for (const [elapsed, compact, full] of [
+    [-100, '0s', '0 秒'],
+    [12_500, '12s', '12 秒'],
+    [59_999, '59s', '59 秒'],
+    [60_000, '1m', '1 分钟'],
+    [270_000, '4m', '4 分钟'],
+    [3_599_999, '59m', '59 分钟'],
+    [3_600_000, '1h 0m', '1 小时 0 分钟'],
+    [3_959_999, '1h 5m', '1 小时 5 分钟'],
+  ]) {
+    assert.deepEqual(formatAgentDuration(elapsed), { compact, full }, `elapsed ${elapsed} ms`);
+  }
+});
+
+test('Agent elapsed time refreshes at the next second or minute boundary', () => {
+  for (const [elapsed, delay] of [
+    [-250, 1_250], [0, 1_000], [12_500, 500], [59_999, 1],
+    [60_000, 60_000], [120_500, 59_500], [3_599_999, 1], [3_900_000, 60_000],
+  ]) {
+    assert.equal(agentDurationRefreshDelay(elapsed), delay, `elapsed ${elapsed} ms`);
+  }
 });
 
 test('Zoom clamps both bounds under rapid increments/decrements and preserves every allowed size', () => {

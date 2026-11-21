@@ -49,7 +49,7 @@ export function SegmentedControl<T extends string>({ options, value, onChange, l
     measure(true);
     const observer = new ResizeObserver(() => measure(false));
     observer.observe(group);
-    observer.observe(active);
+    group.querySelectorAll('[role="radio"]').forEach(option => observer.observe(option));
     return () => observer.disconnect();
   }, [value, options.length, reduced]);
 

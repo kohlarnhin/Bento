@@ -87,6 +87,7 @@ export function SettingsDialog({ settings, updater, onClose, onCheckUpdates }: {
         {([
           ['terminal.restore', '重启后恢复终端'],
           ['terminal.commandNotices', '命令完成通知'],
+          ['terminal.agentNotices', 'AI 会话提醒'],
         ] as const).map(([key, label]) => <div key={key} className="h1-list-row">
           <label htmlFor={key} className="text-sm font-medium">{label}</label>
           <Switch id={key} checked={settings.features[key]} disabled={settings.fontLoading || !!settings.featureSaving}

@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 
 mod terminal;
 mod terminal_attention;
+mod terminal_agent;
 mod terminal_escape;
 mod terminal_persistence;
 mod terminal_shell;

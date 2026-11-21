@@ -9,6 +9,7 @@ const DEFAULT_APPLIED: &str = "autostart.defaultApplied";
 const APPEARANCE: &str = "appearance.theme";
 pub const RESTORE_TERMINALS: &str = "terminal.restore";
 pub const COMMAND_NOTICES: &str = "terminal.commandNotices";
+pub const AGENT_NOTICES: &str = "terminal.agentNotices";
 pub const SHOW_TRAY: &str = "tray.enabled";
 
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
@@ -63,6 +64,8 @@ pub struct Settings {
     restore_terminals: bool,
     #[serde(rename = "terminal.commandNotices")]
     command_notices: bool,
+    #[serde(rename = "terminal.agentNotices")]
+    agent_notices: bool,
     #[serde(rename = "tray.enabled")]
     show_tray: bool,
 }
@@ -87,6 +90,7 @@ pub fn read(conn: &Connection) -> Result<Settings, String> {
         appearance: read_appearance(conn)?,
         restore_terminals: enabled(conn, RESTORE_TERMINALS)?,
         command_notices: enabled(conn, COMMAND_NOTICES)?,
+        agent_notices: enabled(conn, AGENT_NOTICES)?,
         show_tray: enabled(conn, SHOW_TRAY)?,
     })
 }
@@ -152,7 +156,7 @@ pub fn set(conn: &Connection, key: &str, value: Value) -> Result<(), String> {
                 .ok_or("外观必须是跟随系统、浅色或深色")?;
             save(conn, key, choice)
         }
-        RESTORE_TERMINALS | COMMAND_NOTICES | SHOW_TRAY => {
+        RESTORE_TERMINALS | COMMAND_NOTICES | AGENT_NOTICES | SHOW_TRAY => {
             let enabled = value.as_bool().ok_or("该设置只能开启或关闭")?;
             save(conn, key, if enabled { "true" } else { "false" })
         }
@@ -183,6 +187,11 @@ pub fn set_setting(app: AppHandle, key: String, value: Value) -> Result<(), Stri
     if key == COMMAND_NOTICES {
         set(&conn, &key, value)?;
         app.state::<crate::terminal::TerminalManager>().set_command_notices(enabled(&conn, COMMAND_NOTICES)?);
+        return Ok(());
+    }
+    if key == AGENT_NOTICES {
+        set(&conn, &key, value)?;
+        app.state::<crate::terminal::TerminalManager>().set_agent_notices(enabled(&conn, AGENT_NOTICES)?);
         return Ok(());
     }
     if key == RESTORE_TERMINALS {
@@ -238,7 +247,7 @@ mod tests {
         assert_eq!(project_rows(&conn), before);
         assert_eq!(read(&conn).unwrap(), Settings { terminal_font_size: 14, terminal_max_per_project: 2,
             autostart_default_applied: false, appearance: Appearance::System, restore_terminals: true,
-            command_notices: true, show_tray: true });
+            command_notices: true, agent_notices: true, show_tray: true });
         set(&conn, FONT_SIZE, json!(18)).unwrap();
         assert_eq!(read(&conn).unwrap().terminal_font_size, 18);
         assert_eq!(project_rows(&conn), before);
@@ -280,6 +289,11 @@ mod tests {
         crate::init_db(&conn).unwrap();
         assert_eq!(read(&conn).unwrap().terminal_font_size, 14);
         assert_eq!(max_per_project(&conn).unwrap(), 2);
+        assert!(read(&conn).unwrap().agent_notices);
+        assert!(set(&conn, AGENT_NOTICES, json!("false")).is_err());
+        set(&conn, AGENT_NOTICES, json!(false)).unwrap();
+        assert!(!read(&conn).unwrap().agent_notices);
+        assert!(read(&conn).unwrap().command_notices);
         for value in [json!(0), json!(7), json!(-1), json!(2.5), json!(2.0), json!("2"), json!(true), Value::Null] {
             assert!(set(&conn, MAX_PER_PROJECT, value).is_err());
         }

@@ -10,10 +10,11 @@ interface Settings {
   'appearance.theme': Appearance;
   'terminal.restore': boolean;
   'terminal.commandNotices': boolean;
+  'terminal.agentNotices': boolean;
   'tray.enabled': boolean;
 }
 
-const defaults = { 'terminal.restore': true, 'terminal.commandNotices': true, 'tray.enabled': true };
+const defaults = { 'terminal.restore': true, 'terminal.commandNotices': true, 'terminal.agentNotices': true, 'tray.enabled': true };
 type Feature = keyof typeof defaults;
 type Appearance = 'system' | 'light' | 'dark';
 
@@ -82,6 +83,7 @@ export function useSettings() {
       setFeatures({
         'terminal.restore': settings['terminal.restore'] ?? true,
         'terminal.commandNotices': settings['terminal.commandNotices'] ?? true,
+        'terminal.agentNotices': settings['terminal.agentNotices'] ?? true,
         'tray.enabled': settings['tray.enabled'] ?? true,
       });
     }).catch(error => { if (active) setFontError(`读取设置失败：${error}`); })

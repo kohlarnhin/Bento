@@ -1,4 +1,6 @@
 use crate::terminal::CompletionEvent;
+use crate::terminal_agent::AgentState;
+use crate::terminal_attention::AgentEvent;
 use crate::terminal_shell::elapsed_text;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -33,18 +35,7 @@ pub fn post(app: &AppHandle, event: CompletionEvent) {
     let Some(completion) = event.completion else {
         return;
     };
-    let project_name = crate::get_projects_sync().ok().and_then(|projects| {
-        projects
-            .projects
-            .into_iter()
-            .find(|p| p.id == event.project_id)
-            .map(|p| {
-                p.display_name
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or(p.name)
-            })
-    });
-    let Some(project_name) = project_name else {
+    let Some(project_name) = project_name(&event.project_id) else {
         return;
     };
     let title = format!("{project_name} · 终端 {}", event.slot);
@@ -65,13 +56,36 @@ pub fn post(app: &AppHandle, event: CompletionEvent) {
         project_id: event.project_id,
         slot: event.slot,
     };
+    dispatch(app, target, completion.ended_at, title, body);
+}
+
+pub fn post_agent(app: &AppHandle, event: AgentEvent) {
+    let Some(agent) = event.status.agent else { return; };
+    let state = match agent.state {
+        AgentState::Waiting => "等你确认",
+        AgentState::Done => "已完成",
+        AgentState::Thinking => return,
+    };
+    let Some(project_name) = project_name(&event.project_id) else { return; };
+    let title = format!("{project_name} · {} {state}", agent.kind.label());
+    let body = format!("终端 {}", event.slot);
+    let target = TerminalTarget { project_id: event.project_id, slot: event.slot };
+    dispatch(app, target, agent.state_started_at, title, body);
+}
+
+fn project_name(project_id: &str) -> Option<String> {
+    crate::get_projects_sync().ok()?.projects.into_iter().find(|project| project.id == project_id)
+        .map(|project| project.display_name.filter(|name| !name.is_empty()).unwrap_or(project.name))
+}
+
+fn dispatch(app: &AppHandle, target: TerminalTarget, at: u64, title: String, body: String) {
     #[cfg(debug_assertions)]
     if crate::debug_e2e::enabled() {
         eprintln!("[Bento notification fixture] title={title:?} body={body:?} target={target:?}");
     }
     let main_app = app.clone();
     let _ = app.run_on_main_thread(move || {
-        platform::post(&main_app, target, completion.ended_at, &title, &body);
+        platform::post(&main_app, target, at, &title, &body);
     });
 }
 

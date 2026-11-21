@@ -31,7 +31,7 @@ import { createTerminal, getProjectTerminalSlots, getTerminalSnapshot, initTermi
 import { projectLogs } from './lib/useProjectLogs';
 import { recordRender } from './lib/renderMetrics';
 import { DEFAULT_TERMINAL_FONT_SIZE, TERMINAL_THEME } from './lib/terminalAppearance';
-import { clampTerminalFontSize, firstOpenedTerminalSlot, terminalsNeedingAttention } from './lib/terminalUsability';
+import { agentNeedsAttention, agentsByProject, clampTerminalFontSize, firstOpenedTerminalSlot, nextAttentionTarget } from './lib/terminalUsability';
 import { filterSidebarProjects, savedSidebarFilter, sidebarNavigation, SIDEBAR_FILTER_KEY } from './lib/sidebarModel';
 import { useProjectGitInfos } from './lib/useGitInfo';
 import { sameServiceStatuses } from './lib/projectServices';
@@ -147,12 +147,15 @@ export function App() {
   quickOpenRef.current = quickOpen;
   const [groupForm, setGroupForm] = useState<{ action: 'create' | 'rename' | 'delete'; group?: ProjectGroup } | null>(null);
   const gitInfos = useProjectGitInfos(projects);
-  const attentionProjects = useMemo(() => new Set(Object.values(terminals).filter(terminal => terminal.attention).map(terminal => terminal.projectId)), [terminals]);
+  const projectAgents = useMemo(() => agentsByProject(Object.values(terminals)), [terminals]);
+  const attentionProjects = useMemo(() => new Set(Object.values(terminals)
+    .filter(terminal => terminal.agent ? agentNeedsAttention(terminal.agent) : terminal.attention)
+    .map(terminal => terminal.projectId)), [terminals]);
   const completions = useMemo(() => {
     const result = new Map<string, TerminalCompletion>();
     for (const terminal of Object.values(terminals)) {
       const completion = terminal.completion;
-      if (completion && (result.get(terminal.projectId)?.endedAt ?? -1) < completion.endedAt) {
+      if (!terminal.agent && completion && (result.get(terminal.projectId)?.endedAt ?? -1) < completion.endedAt) {
         result.set(terminal.projectId, completion);
       }
     }
@@ -237,9 +240,11 @@ export function App() {
       previous.right === right ? previous : { projectId, slot, left, right });
   }, []);
   const watchedProjectId = selection?.view === 'terminal' && !quickOpen ? selection.projectId : null;
-  const watchedSlot = watchedProjectId ? (focusedTerminal?.projectId === watchedProjectId ? focusedTerminal.slot : activeSlots[watchedProjectId] ?? 1) : null;
-  const watchedLeft = watchedProjectId && focusedTerminal?.projectId === watchedProjectId ? focusedTerminal.left : watchedSlot;
-  const watchedRight = watchedProjectId && focusedTerminal?.projectId === watchedProjectId ? focusedTerminal.right : undefined;
+  const watchedLeft = watchedProjectId ? activeSlots[watchedProjectId] ?? 1 : null;
+  const focusedPane = watchedProjectId && focusedTerminal?.projectId === watchedProjectId &&
+    focusedTerminal.left === watchedLeft ? focusedTerminal : undefined;
+  const watchedSlot = focusedPane?.slot ?? watchedLeft;
+  const watchedRight = focusedPane?.right;
   const reportedTerminal = useRef<string | null>();
   const focusRequests = useRef(Promise.resolve());
   useEffect(() => {
@@ -277,8 +282,21 @@ export function App() {
     [projects, groups, searchQuery, filter, projectStatuses, attentionProjects, changedProjects]);
   const shortcutProjects = useMemo(() => visibleProjects.filter(project => !project.archived), [visibleProjects]);
   const selectedProject = projects.find(project => project.id === selection?.projectId);
-  const navigation = useRef({ projects: shortcutProjects, project: selectedProject, view: selection?.view || 'overview', selection, activeSlots });
-  navigation.current = { projects: shortcutProjects, project: selectedProject, view: selection?.view || 'overview', selection, activeSlots };
+  const currentNavigation = {
+    projects: shortcutProjects, project: selectedProject, view: selection?.view || 'overview', selection, activeSlots,
+    terminal: watchedProjectId && watchedSlot ? { projectId: watchedProjectId, slot: watchedSlot } : undefined,
+  };
+  const navigation = useRef(currentNavigation);
+  navigation.current = currentNavigation;
+  const jumpToAttention = useCallback(() => {
+    const target = nextAttentionTarget(Object.values(getTerminalSnapshot()), navigation.current.terminal);
+    if (!target) { toast('没有等待处理的终端'); return; }
+    if (!navigation.current.projects.some(project => project.id === target.projectId)) {
+      setSearchQuery('');
+      setFilter('all');
+    }
+    selectTerminalSlot(target.projectId, target.slot);
+  }, [selectTerminalSlot]);
   const [reordering, setReordering] = useState(false);
   const reorderPending = useRef(false);
   const [projectForm, setProjectForm] = useState<{ project?: ProjectConfig; inspection?: ProjectDirInspection; focusPort?: DashboardConflict; scanOnOpen?: boolean } | null>(null);
@@ -401,12 +419,7 @@ export function App() {
       else if (zoomIn || zoomOut || zoomReset) {
         void changeFontSize(current => zoomReset ? DEFAULT_TERMINAL_FONT_SIZE : clampTerminalFontSize(current + (zoomIn ? 1 : -1)));
       } else if (jump) {
-        const target = terminalsNeedingAttention(Object.values(getTerminalSnapshot()))[0];
-        if (!target) toast('没有等待处理的终端');
-        else {
-          if (!navigation.current.projects.some(project => project.id === target.projectId)) { setSearchQuery(''); setFilter('all'); }
-          selectTerminalSlot(target.projectId, target.slot);
-        }
+        if (!event.repeat) jumpToAttention();
       } else if (findNext) terminalControls.current?.navigateFind(event.shiftKey);
       else if (cycle) {
         const projectId = navigation.current.selection?.projectId;
@@ -446,7 +459,7 @@ export function App() {
       void unlisten.then((stop) => stop());
     };
   }, [openCreate, openSettings, openProjectConfig, openProjectEditor, handleRevealPath, openQuickSwitcher, openTerminal,
-    selectProject, selectTerminalSlot, changeFontSize, toggleFocusMode, toggleSplit]);
+    selectProject, selectTerminalSlot, changeFontSize, toggleFocusMode, toggleSplit, jumpToAttention]);
 
   useEffect(() => {
     const unlisten = listen('bento-open-settings', openSettings);
@@ -752,6 +765,7 @@ export function App() {
             filter={filter}
             onFilterChange={setFilter}
             attentionProjects={attentionProjects}
+            projectAgents={projectAgents}
             completions={completions}
             snippets={snippets}
             onRunSnippet={(id, command) => { void handleRunCommand(id, command, true); }}
@@ -802,6 +816,7 @@ export function App() {
                   slots={slots}
                   activeSlot={activeSlot}
                   terminals={terminals}
+                  onJumpToAttention={jumpToAttention}
                   maxTerminals={settings.maxPerProject}
                   snippets={snippets[selectedProject.id] ?? noSnippets}
                   onRunSnippet={command => { void handleRunCommand(selectedProject.id, command, true); }}

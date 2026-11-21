@@ -1,7 +1,9 @@
 use crate::lifecycle::{ManagedProject, Phase, ProcessMap, SHUTTING_DOWN};
+use crate::terminal::{TerminalKey, TerminalManager};
+use crate::terminal_agent::AgentSession;
 use crate::ProjectConfig;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Mutex,
@@ -40,6 +42,7 @@ pub struct PanelProject {
     port: Option<u16>,
     status: &'static str,
     started_at: Option<u64>,
+    agent_detail: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -172,21 +175,35 @@ impl TrayView {
     }
 }
 
-fn panel_view(projects: &[ProjectConfig], managed: &[ManagedProject], recent: &[String]) -> PanelView {
+fn panel_view(projects: &[ProjectConfig], managed: &[ManagedProject], recent: &[String], agents: &[(TerminalKey, AgentSession)]) -> PanelView {
     let mut active: Vec<_> = managed.iter().collect();
     active.sort_by_key(|info| info.phase != Phase::Running);
+    let mut by_project = HashMap::<&str, (u8, &AgentSession)>::new();
+    for (key, agent) in agents {
+        let rank = |slot, agent: &AgentSession| (agent.priority(), agent.state_started_at, slot);
+        if by_project.get(key.project_id.as_str()).is_none_or(|&(slot, previous)| rank(key.slot, agent) < rank(slot, previous)) {
+            by_project.insert(&key.project_id, (key.slot, agent));
+        }
+    }
+    let agent_detail = |id: &str| by_project.get(id).map(|(_, agent)| {
+        format!("{} · {}", agent.kind.label(), agent.state.label())
+    });
     let name = |id: &str| {
         projects.iter().find(|project| project.id == id).map(|project| {
             project.display_name.as_ref().filter(|name| !name.is_empty()).unwrap_or(&project.name).clone()
         })
     };
+    let agent_projects = projects.iter().filter(|project| by_project.contains_key(project.id.as_str())).map(|project| &project.id);
+    let mut seen: HashSet<_> = managed.iter().map(|project| project.id.as_str()).collect();
     let rows = active.into_iter().map(|info| PanelProject {
         id: info.id.clone(), name: name(&info.id).unwrap_or_else(|| info.id.clone()), port: info.port,
         status: match info.phase { Phase::Running => "running", Phase::Starting => "starting", Phase::PortTimeout => "error" },
         started_at: Some(info.started_at),
-    }).chain(recent.iter().filter_map(|id| {
-        if managed.iter().any(|project| project.id == *id) { return None; }
-        Some(PanelProject { id: id.clone(), name: name(id)?, port: None, status: "stopped", started_at: None })
+        agent_detail: agent_detail(&info.id),
+    }).chain(agent_projects.chain(recent.iter()).filter_map(|id| {
+        if !seen.insert(id.as_str()) { return None; }
+        Some(PanelProject { id: id.clone(), name: name(id)?, port: None, status: "stopped", started_at: None,
+            agent_detail: agent_detail(id) })
     })).take(8).collect();
     PanelView { running: managed.iter().filter(|info| info.phase == Phase::Running).count(),
         can_stop: !managed.is_empty(), rows }
@@ -264,7 +281,8 @@ async fn current(app: &AppHandle) -> Result<TrayView, String> {
         .map_err(|error| error.to_string())??;
     let recent = app.state::<TrayState>().recent.lock().unwrap_or_else(|err| err.into_inner()).clone();
     let mut view = TrayView::from_snapshot(&projects.projects, &managed);
-    view.panel = panel_view(&projects.projects, &managed, &recent);
+    let agents = app.state::<TerminalManager>().agents();
+    view.panel = panel_view(&projects.projects, &managed, &recent, &agents);
     Ok(view)
 }
 
@@ -593,7 +611,7 @@ mod tests {
         ];
         let recent: Vec<_> = ["p5", "p7", "p2", "p3", "missing", "p8", "p9", "p4", "p0", "p1", "p6"]
             .into_iter().map(String::from).collect();
-        let panel = panel_view(&projects, &managed, &recent);
+        let panel = panel_view(&projects, &managed, &recent, &[]);
         assert_eq!(panel.running, 1);
         assert!(panel.can_stop);
         assert_eq!(panel.rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
@@ -601,6 +619,22 @@ mod tests {
         assert_eq!(panel.rows[0].port, Some(5411));
         assert_eq!(panel.rows[0].started_at, Some(1000));
         assert_eq!(panel.rows[2].status, "stopped");
+    }
+
+    #[test]
+    fn panel_includes_agent_projects_outside_recents_and_shows_priority_state() {
+        use crate::terminal_agent::{AgentKind, AgentState};
+        let projects = [config("ai", None), config("recent", None)];
+        let thinking = AgentSession { kind: AgentKind::Codex, state: AgentState::Thinking,
+            state_started_at: 100, round_started_at: Some(100), acknowledged: false };
+        let waiting = AgentSession { kind: AgentKind::Claude, state: AgentState::Waiting, ..thinking };
+        let panel = panel_view(&projects, &[], &["recent".into()], &[
+            (TerminalKey::new("ai", 1), thinking), (TerminalKey::new("ai", 2), waiting),
+        ]);
+        assert_eq!(panel.rows[0].id, "ai");
+        assert_eq!(panel.rows[0].agent_detail.as_deref(), Some("Claude · 等你确认"));
+        assert_eq!(panel.rows[1].id, "recent");
+        assert_eq!(panel.running, 0);
     }
 
     #[test]

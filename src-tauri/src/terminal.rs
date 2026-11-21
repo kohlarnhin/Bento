@@ -8,6 +8,7 @@ use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
+use crate::terminal_agent::{AgentSession, AgentStatus, Probe};
 use crate::terminal_attention::{AttentionManager, Sinks as AttentionSinks};
 use crate::terminal_escape::{osc_cwd, EscapeStream};
 use crate::terminal_persistence::{self as persistence, SavedProject, SavedSessions, SavedTerminal, Store};
@@ -46,6 +47,8 @@ pub struct TerminalSessionInfo {
     pub title: Option<String>,
     pub restored_active: bool,
     pub completion: Option<Completion>,
+    #[serde(flatten)]
+    pub agent_status: AgentStatus,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -236,6 +239,7 @@ impl Session {
     fn info(&self) -> TerminalSessionInfo {
         let state = lock(&self.state.0);
         let metadata = lock(&self.metadata);
+        let (attention, agent_status) = self.attention.snapshot(&self.key, &self.session_id);
         TerminalSessionInfo {
             project_id: self.key.project_id.clone(),
             slot: self.key.slot,
@@ -243,10 +247,11 @@ impl Session {
             alive: state.alive,
             exit_code: state.exit_code,
             pid: self.pid,
-            attention: self.attention.raised(&self.key, &self.session_id),
+            attention,
             title: metadata.title.clone(),
             restored_active: self.restored_active,
             completion: metadata.completion.clone(),
+            agent_status,
         }
     }
 
@@ -347,6 +352,7 @@ pub struct TerminalManager {
     active_slots: Arc<Mutex<HashMap<String, u8>>>,
     integration: Option<PathBuf>,
     completion_enabled: Arc<AtomicBool>,
+    agent_notices: Arc<AtomicBool>,
     completion: CompletionSink,
     inactive: Arc<dyn Fn() -> bool + Send + Sync>,
     visible_tabs: Arc<Mutex<HashSet<TerminalKey>>>,
@@ -372,6 +378,7 @@ impl TerminalManager {
             active_slots: Arc::new(Mutex::new(HashMap::new())),
             integration: None,
             completion_enabled: Arc::new(AtomicBool::new(true)),
+            agent_notices: Arc::new(AtomicBool::new(true)),
             completion: Arc::new(|_, _| {}),
             inactive: Arc::new(|| false),
             visible_tabs: Arc::new(Mutex::new(HashSet::new())),
@@ -384,6 +391,7 @@ impl TerminalManager {
         let opened_app = app.clone();
         let closed_app = app.clone();
         let change_app = app.clone();
+        let agent_app = app.clone();
         let badge_app = app.clone();
         let inactive_app = app.clone();
         let inactive = Arc::new(move || {
@@ -394,6 +402,9 @@ impl TerminalManager {
         let notification_app = app.clone();
         let directory = terminal_data_dir(&app);
         let restore = crate::open_project_db().and_then(|db| crate::settings::enabled(&db, crate::settings::RESTORE_TERMINALS)).unwrap_or(true);
+        let agent_notices = Arc::new(AtomicBool::new(crate::open_project_db()
+            .and_then(|db| crate::settings::enabled(&db, crate::settings::AGENT_NOTICES)).unwrap_or(true)));
+        let notify_agent = agent_notices.clone();
         let mut manager = Self::with_attention(
             Arc::new(move |event| {
                 let _ = output_app.emit("terminal-output", event);
@@ -406,6 +417,13 @@ impl TerminalManager {
             Arc::new(|| crate::settings::max_per_project(&crate::open_project_db()?)),
             AttentionSinks {
                 change: Arc::new(move |event| { let _ = change_app.emit("terminal-attention", event); }),
+                agent: Arc::new(move |event, background| {
+                    let _ = agent_app.emit_to("main", "terminal-agent", &event);
+                    crate::tray::refresh(&agent_app);
+                    if background && notify_agent.load(Ordering::Relaxed) {
+                        crate::terminal_notifications::post_agent(&agent_app, event);
+                    }
+                }),
                 badge: Arc::new(move |count| {
                     if let Some(window) = badge_app.get_webview_window("main") {
                         let _ = window.set_badge_count((count > 0).then_some(count as i64));
@@ -429,6 +447,7 @@ impl TerminalManager {
         });
         manager.store = directory.map(|path| Arc::new(Mutex::new(Store::new(path.join("terminals"), restore))));
         manager.inactive = inactive;
+        manager.agent_notices = agent_notices;
         let enabled = crate::open_project_db().and_then(|db| crate::settings::enabled(&db, crate::settings::COMMAND_NOTICES)).unwrap_or(true);
         manager.completion_enabled.store(enabled, Ordering::Relaxed);
         manager.completion = Arc::new(move |event, background| {
@@ -496,6 +515,14 @@ impl TerminalManager {
                 }
             }
         }
+    }
+
+    pub fn set_agent_notices(&self, enabled: bool) {
+        self.agent_notices.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn agents(&self) -> Vec<(TerminalKey, AgentSession)> {
+        self.attention.agents()
     }
 
     pub fn save_sessions(&self) {
@@ -667,7 +694,14 @@ impl TerminalManager {
             metadata: Arc::new(Mutex::new(ShellMetadata { title: restore.and_then(|(tab, _, _)| tab.title.clone()), ..Default::default() })),
             restored_active: restore.is_some_and(|(_, _, active)| active),
         };
-        self.attention.register(&session.key, &session.session_id);
+        let master = Arc::downgrade(&session.master);
+        let probe = Probe::new(move || {
+            let master = master.upgrade()?;
+            let group = lock(&master).as_ref()?.process_group_leader()?;
+            // portable-pty starts the shell as the leader of its session and group.
+            (Some(group as u32) != pid).then_some(group)
+        }, cols, rows);
+        self.attention.register_pty(&session.key, &session.session_id, probe);
 
         // Retain ownership outside the closure until the waiter has successfully started.
         let pending_child = Arc::new(Mutex::new(Some(child)));
@@ -704,6 +738,9 @@ impl TerminalManager {
         }
 
         let writer_master = session.master.clone();
+        let writer_attention = self.attention.clone();
+        let writer_key = session.key.clone();
+        let writer_session = session.session_id.clone();
         let writer_result =
             thread::Builder::new()
                 .name("terminal-writer".into())
@@ -711,6 +748,9 @@ impl TerminalManager {
                     while let Ok(input) = receiver.recv() {
                         match input {
                             Input::Bytes(data) => {
+                                if data.contains(&b'\r') || data.windows(6).any(|part| matches!(part, b"\x1b[200~" | b"\x1b[201~")) {
+                                    writer_attention.input(&writer_key, &writer_session, &data);
+                                }
                                 if writer
                                     .write_all(&data)
                                     .and_then(|_| writer.flush())
@@ -903,7 +943,7 @@ impl TerminalManager {
             return Ok(());
         }
         let session = self.get(project_id, slot)?;
-        self.attention.resize(&session.key, &session.session_id);
+        self.attention.resize_pty(&session.key, &session.session_id, cols, rows);
         let master = lock(&session.master);
         if let Some(master) = master.as_ref() {
             master
@@ -979,8 +1019,7 @@ impl TerminalManager {
             }
         }
         drop(sessions);
-        drop(visible);
-        self.attention.focus(key);
+        self.attention.focus_visible(key, &visible);
     }
 }
 
@@ -1480,6 +1519,30 @@ mod tests {
         assert!(!fixture.manager.list()[0].attention);
         fixture.manager.close("bell");
         assert!(fixture.manager.list().is_empty());
+    }
+
+    #[test]
+    fn foreground_agent_in_a_wrapper_claims_osc_alerts_until_it_returns_to_shell() {
+        use crate::terminal_agent::{AgentKind, AgentState};
+        let fixture = Fixture::new();
+        let script = fixture.dir.join("claude");
+        std::fs::write(&script, "#!/bin/sh\nprintf '\\033]9;Claude needs your permission\\007'\nread -r reply\n").unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        fixture.manager.open("ai", 1, &fixture.dir, 80, 24, false, &fixture.env).unwrap();
+        fixture.idle("ai", 1);
+        fixture.manager.write("ai", 1, format!("/bin/sh -c '{}; :'\r", script.display()).into_bytes()).unwrap();
+        fixture.wait_until("ai", 1, "Claude foreground and waiting", |session| {
+            let info = session.info();
+            !info.attention && info.agent_status.agent.is_some_and(|agent|
+                agent.kind == AgentKind::Claude && agent.state == AgentState::Waiting)
+        });
+        fixture.manager.write("ai", 1, b"exit\r".to_vec()).unwrap();
+        fixture.wait_until("ai", 1, "shell regains foreground", |session| {
+            session.idle() && session.info().agent_status.agent.is_none()
+        });
+        assert!(!fixture.manager.list()[0].attention);
     }
 
     #[test]

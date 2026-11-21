@@ -8,7 +8,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { SearchAddon } from '@xterm/addon-search';
 import '@xterm/xterm/css/xterm.css';
-import type { TerminalAttention, TerminalCompletionEvent, TerminalOpenResult, TerminalOutput, TerminalSessionInfo } from '../types';
+import type { TerminalAgentEvent, TerminalAttention, TerminalCompletionEvent, TerminalOpenResult, TerminalOutput, TerminalSessionInfo } from '../types';
 import { formatDroppedPaths, recoverShiftedImeInput, trackBareShift, transformTypedInput, type TerminalImeState } from './terminalInput';
 import { DEFAULT_TERMINAL_FONT_SIZE, TERMINAL_FALLBACK_FONT_FAMILY, TERMINAL_FONT_FAMILY, TERMINAL_LINE_HEIGHT, TERMINAL_THEME } from './terminalAppearance';
 import { createTitlePublisher } from './terminalUsability';
@@ -70,6 +70,7 @@ interface Registry {
   initialized?: Promise<void>;
   closedSessions: Set<string>;
   exits: Map<string, TerminalExit>;
+  agentEvents: Map<string, TerminalAgentEvent>;
   fontSize: number;
   showError: (message: string) => void;
 }
@@ -77,9 +78,10 @@ interface Registry {
 // Retain instances and listeners through module HMR as well as React StrictMode remounts.
 const registry: Registry = import.meta.hot?.data.terminalRegistry ?? {
   entries: new Map(), snapshot: {}, subscribers: new Set(), closedSessions: new Set(), exits: new Map(), restoredSlots: new Map(),
-  fontSize: DEFAULT_TERMINAL_FONT_SIZE, showError: () => {},
+  agentEvents: new Map(), fontSize: DEFAULT_TERMINAL_FONT_SIZE, showError: () => {},
 };
 if (import.meta.hot) {
+  registry.agentEvents ??= new Map();
   import.meta.hot.data.terminalRegistry = registry;
   import.meta.hot.accept();
 }
@@ -164,7 +166,7 @@ function receiveOutput(entry: Entry, output: TerminalOutput) {
 function receiveExit(entry: Entry, event: TerminalExit) {
   if (entry.sessionId !== event.sessionId) return;
   entry.alive = false;
-  publish({ ...registry.snapshot[terminalKey(entry.projectId, entry.slot)], ...event, alive: false, attention: false, attentionAt: undefined });
+  publish({ ...registry.snapshot[terminalKey(entry.projectId, entry.slot)], ...event, alive: false, attention: false, attentionAt: undefined, agent: null });
 }
 
 function receiveAttention(event: TerminalAttention) {
@@ -179,6 +181,29 @@ function receiveCompletion(event: TerminalCompletionEvent) {
   if (current?.sessionId === event.sessionId) publish({ ...current, completion: event.completion });
 }
 
+function receiveAgent(event: TerminalAgentEvent) {
+  if (registry.closedSessions.has(event.sessionId) || registry.exits.has(event.sessionId)) return;
+  const current = registry.snapshot[terminalKey(event.projectId, event.slot)];
+  if (current?.sessionId === event.sessionId) {
+    if (current.alive && event.agentRevision > (current.agentRevision ?? 0)) publish({ ...current, ...event });
+  } else if (event.agentRevision > (registry.agentEvents.get(event.sessionId)?.agentRevision ?? 0)) {
+    registry.agentEvents.set(event.sessionId, event);
+  }
+}
+
+function mergeAgentSnapshot(session: TerminalSessionInfo): Pick<TerminalSessionInfo, 'agent' | 'agentRevision'> {
+  const current = registry.snapshot[terminalKey(session.projectId, session.slot)];
+  const buffered = registry.agentEvents.get(session.sessionId);
+  registry.agentEvents.delete(session.sessionId);
+  let latest = session;
+  for (const source of [current, buffered]) {
+    if (source?.sessionId === session.sessionId && (source.agentRevision ?? 0) > (latest.agentRevision ?? 0)) {
+      latest = { ...latest, agent: source.agent, agentRevision: source.agentRevision };
+    }
+  }
+  return { agent: session.alive && !registry.exits.has(session.sessionId) ? latest.agent : null, agentRevision: latest.agentRevision };
+}
+
 function receiveOpened(session: TerminalSessionInfo) {
   if (registry.closedSessions.has(session.sessionId)) return;
   const key = terminalKey(session.projectId, session.slot);
@@ -189,7 +214,7 @@ function receiveOpened(session: TerminalSessionInfo) {
   if (entry) entry.expectedSessionId = session.sessionId;
   const exited = registry.exits.get(session.sessionId);
   const attention = !exited && session.attention;
-  publish({ ...session, ...(exited ? { ...exited, alive: false, attention: false } : {}),
+  publish({ ...session, ...mergeAgentSnapshot(session), ...(exited ? { ...exited, alive: false, attention: false } : {}),
     title: sameSession ? current?.title ?? session.title : session.title,
     attentionAt: attentionTime(attention, sameSession ? current : undefined), opening: entry?.hydrating });
   if (entry && entry.sessionId !== session.sessionId && !entry.hydrating) startHydrate(entry, false);
@@ -198,6 +223,7 @@ function receiveOpened(session: TerminalSessionInfo) {
 function receiveClosed(event: TerminalClosed) {
   registry.closedSessions.add(event.sessionId);
   registry.exits.delete(event.sessionId);
+  registry.agentEvents.delete(event.sessionId);
   const key = terminalKey(event.projectId, event.slot);
   const current = registry.snapshot[key];
   const entry = registry.entries.get(key);
@@ -238,12 +264,13 @@ export function initTerminalRegistry(showError: (message: string) => void): Prom
         unlisteners.push(await listen<TerminalExit>('terminal-exit', ({ payload }) => dispatch(() => {
           if (registry.closedSessions.has(payload.sessionId)) return;
           registry.exits.set(payload.sessionId, payload);
+          registry.agentEvents.delete(payload.sessionId);
           const key = terminalKey(payload.projectId, payload.slot);
           const entry = registry.entries.get(key);
           if (entry?.hydrating) entry.exits.push(payload);
           else if (entry) receiveExit(entry, payload);
           if (registry.snapshot[key]?.sessionId === payload.sessionId) {
-            publish({ ...registry.snapshot[key], ...payload, alive: false, attention: false, attentionAt: undefined });
+            publish({ ...registry.snapshot[key], ...payload, alive: false, attention: false, attentionAt: undefined, agent: null });
           }
         })));
         unlisteners.push(await listen<TerminalAttention>('terminal-attention', ({ payload }) => dispatch(() => {
@@ -256,6 +283,7 @@ export function initTerminalRegistry(showError: (message: string) => void): Prom
           if (entry?.hydrating) entry.completions.push(payload);
           else receiveCompletion(payload);
         })));
+        unlisteners.push(await listen<TerminalAgentEvent>('terminal-agent', ({ payload }) => dispatch(() => receiveAgent(payload))));
         unlisteners.push(await listen<TerminalSessionInfo>('terminal-opened', ({ payload }) => dispatch(() => receiveOpened(payload))));
         unlisteners.push(await listen<TerminalClosed>('terminal-closed', ({ payload }) => dispatch(() => receiveClosed(payload))));
         const sessions = await invoke<TerminalSessionInfo[]>('terminal_list');
@@ -554,7 +582,7 @@ async function hydrate(entry: Entry, restart: boolean) {
     entry.title.reset();
     entry.terminal.reset();
     entry.terminal.write(result.snapshot.data);
-    publish({ ...result.session, attentionAt: attentionTime(result.session.attention, registry.snapshot[key]) });
+    publish({ ...result.session, ...mergeAgentSnapshot(result.session), attentionAt: attentionTime(result.session.attention, registry.snapshot[key]) });
     entry.buffered.sort((a, b) => a.seq - b.seq).forEach(output => receiveOutput(entry, output));
     entry.exits.forEach(event => receiveExit(entry, event));
     const exited = registry.exits.get(entry.sessionId);
@@ -578,7 +606,8 @@ async function hydrate(entry: Entry, restart: boolean) {
     }
     entry.buffered.sort((a, b) => a.seq - b.seq).forEach(output => receiveOutput(entry, output));
     entry.exits.forEach(event => receiveExit(entry, event));
-    publish({ ...(sessions ? session : registry.snapshot[key]), projectId: entry.projectId, slot: entry.slot, opening: false, error: message });
+    publish({ ...(sessions ? session && { ...session, ...mergeAgentSnapshot(session) } : registry.snapshot[key]),
+      projectId: entry.projectId, slot: entry.slot, opening: false, error: message });
     entry.attentions.forEach(receiveAttention);
     entry.completions.forEach(receiveCompletion);
     registry.showError(message);

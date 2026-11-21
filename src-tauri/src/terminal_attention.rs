@@ -1,11 +1,12 @@
 use crate::terminal::TerminalKey;
+use crate::terminal_agent::{AgentSession, AgentState, AgentStatus, Probe, Tracker as AgentTracker};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc, Mutex,
 };
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const MIN_OUTPUT: Duration = Duration::from_secs(2);
 pub const SILENCE: Duration = Duration::from_secs(3);
@@ -18,6 +19,16 @@ pub struct AttentionEvent {
     pub slot: u8,
     pub session_id: String,
     pub attention: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentEvent {
+    pub project_id: String,
+    pub slot: u8,
+    pub session_id: String,
+    #[serde(flatten)]
+    pub status: AgentStatus,
 }
 
 #[derive(Default)]
@@ -189,6 +200,7 @@ impl Tracker {
 
 pub struct Sinks {
     pub change: Arc<dyn Fn(AttentionEvent) + Send + Sync>,
+    pub agent: Arc<dyn Fn(AgentEvent, bool) + Send + Sync>,
     pub badge: Arc<dyn Fn(usize) + Send + Sync>,
     pub inactive: Arc<dyn Fn() -> bool + Send + Sync>,
     pub bounce: Arc<dyn Fn() + Send + Sync>,
@@ -199,6 +211,7 @@ impl Default for Sinks {
     fn default() -> Self {
         Self {
             change: Arc::new(|_| {}),
+            agent: Arc::new(|_, _| {}),
             badge: Arc::new(|_| {}),
             inactive: Arc::new(|| false),
             bounce: Arc::new(|| {}),
@@ -209,22 +222,44 @@ impl Default for Sinks {
 struct Entry {
     session_id: String,
     tracker: Tracker,
+    agent: Option<AgentTracker>,
+    agent_revision: u64,
+    probe: Arc<Probe>,
+}
+
+impl Entry {
+    fn agent_status(&self) -> AgentStatus {
+        AgentStatus {
+            agent: self.agent.as_ref().map(|tracker| tracker.session),
+            agent_revision: self.agent_revision,
+        }
+    }
 }
 
 #[derive(Default)]
 struct State {
     watched: Option<TerminalKey>,
+    visible: HashSet<TerminalKey>,
     sessions: HashMap<TerminalKey, Entry>,
 }
 
 enum Effect {
     Change(AttentionEvent, usize),
+    Agent(AgentEvent, usize, bool),
     Shutdown,
+}
+
+enum Activity<'a> {
+    Output(&'a [u8]),
+    Input(&'a [u8]),
+    Resize(u16, u16),
+    Tick,
 }
 
 pub struct AttentionManager {
     state: Mutex<State>,
     clock: Arc<dyn Fn() -> Duration + Send + Sync>,
+    epoch: u64,
     effects: mpsc::Sender<Effect>,
     stopped: AtomicBool,
 }
@@ -251,6 +286,10 @@ impl AttentionManager {
                                 (sinks.bounce)();
                             }
                         }
+                        Effect::Agent(event, count, pending) => {
+                            (sinks.agent)(event, pending && (sinks.inactive)());
+                            (sinks.badge)(count);
+                        }
                         Effect::Shutdown => break,
                     }
                 }
@@ -259,6 +298,7 @@ impl AttentionManager {
         let manager = Arc::new(Self {
             state: Mutex::new(State::default()),
             clock,
+            epoch: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
             effects,
             stopped: AtomicBool::new(false),
         });
@@ -279,134 +319,179 @@ impl AttentionManager {
         manager
     }
 
-    fn changed(&self, state: &State, event: AttentionEvent) {
-        let count = state
-            .sessions
-            .values()
-            .filter(|entry| entry.tracker.raised)
-            .count();
-        let _ = self.effects.send(Effect::Change(event, count));
+    fn badge_count(state: &State) -> usize {
+        state.sessions.values().filter(|entry| {
+            entry.tracker.raised || entry.agent.as_ref().is_some_and(|agent| agent.session.state == AgentState::Waiting)
+        }).count()
     }
 
-    pub fn register(&self, key: &TerminalKey, session_id: &str) {
+    #[cfg(test)]
+    fn register(&self, key: &TerminalKey, session_id: &str) {
+        self.register_pty(key, session_id, Probe::new(|| None, 80, 24));
+    }
+
+    pub fn register_pty(&self, key: &TerminalKey, session_id: &str, probe: Probe) {
         self.state.lock().unwrap().sessions.insert(
             key.clone(),
             Entry {
                 session_id: session_id.into(),
                 tracker: Tracker::default(),
+                agent: None,
+                agent_revision: 0,
+                probe: Arc::new(probe),
             },
         );
     }
 
-    pub fn raised(&self, key: &TerminalKey, session_id: &str) -> bool {
-        self.state
-            .lock()
-            .unwrap()
-            .sessions
-            .get(key)
-            .is_some_and(|entry| entry.session_id == session_id && entry.tracker.raised)
+    pub fn snapshot(&self, key: &TerminalKey, session_id: &str) -> (bool, AgentStatus) {
+        self.state.lock().unwrap().sessions.get(key).filter(|entry| entry.session_id == session_id)
+            .map(|entry| (entry.tracker.raised, entry.agent_status())).unwrap_or_default()
     }
 
-    fn update(&self, key: &TerminalKey, session_id: &str, update: impl FnOnce(&mut Tracker, bool)) {
-        let mut state = self.state.lock().unwrap();
+    #[cfg(test)]
+    fn raised(&self, key: &TerminalKey, session_id: &str) -> bool {
+        self.snapshot(key, session_id).0
+    }
+
+    pub fn agents(&self) -> Vec<(TerminalKey, AgentSession)> {
+        self.state.lock().unwrap().sessions.iter().filter_map(|(key, entry)| {
+            Some((key.clone(), entry.agent.as_ref()?.session))
+        }).collect()
+    }
+
+    fn update(
+        &self, state: &mut State, key: &TerminalKey, session_id: &str,
+        update: impl FnOnce(&mut Entry, bool, bool),
+    ) {
         let watched = state.watched.as_ref() == Some(key);
-        let Some(entry) = state
-            .sessions
-            .get_mut(key)
-            .filter(|entry| entry.session_id == session_id)
-        else {
+        let visible = state.visible.contains(key);
+        let Some(entry) = state.sessions.get_mut(key).filter(|entry| entry.session_id == session_id) else {
             return;
         };
-        let before = entry.tracker.raised;
-        update(&mut entry.tracker, watched);
+        let before = entry.agent_status().agent;
+        let raised_before = entry.tracker.raised;
+        update(entry, watched, visible);
         let raised = entry.tracker.raised;
-        if before != raised {
-            self.changed(
-                &state,
-                AttentionEvent {
-                    project_id: key.project_id.clone(),
-                    slot: key.slot,
-                    session_id: session_id.into(),
-                    attention: raised,
-                },
-            );
+        let after = entry.agent_status().agent;
+        let agent_change = if before != after {
+            entry.agent_revision += 1;
+            Some(entry.agent_status())
+        } else {
+            None
+        };
+
+        if raised_before != raised || agent_change.is_some() {
+            let count = Self::badge_count(state);
+            if raised_before != raised {
+                let event = AttentionEvent {
+                    project_id: key.project_id.clone(), slot: key.slot,
+                    session_id: session_id.into(), attention: raised,
+                };
+                let _ = self.effects.send(Effect::Change(event, count));
+            }
+            if let Some(status) = agent_change {
+                let notify = !visible && after.is_some_and(|agent| {
+                    agent.pending() && before.is_none_or(|old| old.kind != agent.kind || old.state != agent.state)
+                });
+                let event = AgentEvent {
+                    project_id: key.project_id.clone(), slot: key.slot, session_id: session_id.into(), status,
+                };
+                let _ = self.effects.send(Effect::Agent(event, count, notify));
+            }
         }
+    }
+
+    fn sample(&self, key: &TerminalKey, session_id: &str, probe: &Probe, activity: Activity<'_>) {
+        let mut sample = probe.sampling.lock().unwrap();
+        let now = (self.clock)();
+        let timestamp = self.epoch + now.as_millis() as u64;
+        probe.sample(&mut sample, timestamp);
+        let mut state = self.state.lock().unwrap();
+        self.update(&mut state, key, session_id, |entry, watched, visible| {
+            let was_agent = entry.agent.is_some();
+            sample.sync(&mut entry.agent, timestamp);
+            if entry.agent.is_some() { entry.tracker.clear(); }
+            match activity {
+                Activity::Output(bytes) => {
+                    if let Some(tracker) = &mut entry.agent { tracker.observe(bytes, timestamp, visible); }
+                    // Keep the generic escape scanner in sync, including while
+                    // an agent is foregrounded or returning control to the shell.
+                    entry.tracker.output(bytes, now, watched || was_agent || entry.agent.is_some());
+                }
+                Activity::Input(bytes) => {
+                    if let Some(tracker) = &mut entry.agent { sample.input(tracker, bytes, timestamp); }
+                }
+                Activity::Resize(cols, rows) => {
+                    entry.tracker.episode = None;
+                    sample.resize(entry.agent.as_mut(), cols, rows);
+                }
+                Activity::Tick => {
+                    entry.tracker.tick(now);
+                    if let Some(tracker) = &mut entry.agent { tracker.tick(timestamp, visible); }
+                }
+            }
+        });
+    }
+
+    fn activity(&self, key: &TerminalKey, session_id: &str, activity: Activity<'_>) {
+        let probe = self.state.lock().unwrap().sessions.get(key)
+            .filter(|entry| entry.session_id == session_id).map(|entry| entry.probe.clone());
+        if let Some(probe) = probe { self.sample(key, session_id, &probe, activity); }
     }
 
     pub fn output(&self, key: &TerminalKey, session_id: &str, bytes: &[u8]) {
-        let now = (self.clock)();
-        self.update(key, session_id, |tracker, watched| {
-            tracker.output(bytes, now, watched)
-        });
+        self.activity(key, session_id, Activity::Output(bytes));
     }
 
-    pub fn resize(&self, key: &TerminalKey, session_id: &str) {
-        self.update(key, session_id, |tracker, _| tracker.episode = None);
+    pub fn input(&self, key: &TerminalKey, session_id: &str, bytes: &[u8]) {
+        self.activity(key, session_id, Activity::Input(bytes));
     }
 
-    pub fn focus(&self, key: Option<TerminalKey>) {
+    pub fn resize_pty(&self, key: &TerminalKey, session_id: &str, cols: u16, rows: u16) {
+        self.activity(key, session_id, Activity::Resize(cols, rows));
+    }
+
+    #[cfg(test)]
+    fn resize(&self, key: &TerminalKey, session_id: &str) {
+        self.resize_pty(key, session_id, 80, 24);
+    }
+
+    pub fn focus_visible(&self, key: Option<TerminalKey>, visible: &HashSet<TerminalKey>) {
         let mut state = self.state.lock().unwrap();
         state.watched = key;
-        let event = state.watched.clone().and_then(|id| {
-            let entry = state.sessions.get_mut(&id)?;
-            let raised = entry.tracker.raised;
-            entry.tracker.clear();
-            raised.then(|| AttentionEvent {
-                project_id: id.project_id,
-                slot: id.slot,
-                session_id: entry.session_id.clone(),
-                attention: false,
-            })
-        });
-        if let Some(event) = event {
-            self.changed(&state, event);
+        state.visible.clone_from(visible);
+        for key in visible {
+            let Some(entry) = state.sessions.get(key) else { continue; };
+            let session_id = entry.session_id.clone();
+            self.update(&mut state, key, &session_id, |entry, watched, _| {
+                if watched { entry.tracker.clear(); }
+                if let Some(tracker) = &mut entry.agent { tracker.acknowledge(); }
+            });
         }
+    }
+
+    #[cfg(test)]
+    fn focus(&self, key: Option<TerminalKey>) {
+        let visible = key.iter().cloned().collect();
+        self.focus_visible(key, &visible);
     }
 
     pub fn remove(&self, key: &TerminalKey, session_id: &str) {
         let mut state = self.state.lock().unwrap();
-        if !state
-            .sessions
-            .get(key)
-            .is_some_and(|entry| entry.session_id == session_id)
-        {
-            return;
-        }
-        if let Some(entry) = state
-            .sessions
-            .remove(key)
-            .filter(|entry| entry.tracker.raised)
-        {
-            self.changed(
-                &state,
-                AttentionEvent {
-                    project_id: key.project_id.clone(),
-                    slot: key.slot,
-                    session_id: entry.session_id,
-                    attention: false,
-                },
-            );
-        }
+        if !state.sessions.get(key).is_some_and(|entry| entry.session_id == session_id) { return; }
+        self.update(&mut state, key, session_id, |entry, _, _| {
+            entry.tracker.clear();
+            entry.agent = None;
+        });
+        state.sessions.remove(key);
     }
 
     fn tick(&self) {
-        let now = (self.clock)();
-        let mut state = self.state.lock().unwrap();
-        let mut changes = Vec::new();
-        for (key, entry) in &mut state.sessions {
-            let before = entry.tracker.raised;
-            entry.tracker.tick(now);
-            if !before && entry.tracker.raised {
-                changes.push(AttentionEvent {
-                    project_id: key.project_id.clone(),
-                    slot: key.slot,
-                    session_id: entry.session_id.clone(),
-                    attention: true,
-                });
-            }
-        }
-        for event in changes {
-            self.changed(&state, event);
+        let sessions: Vec<_> = self.state.lock().unwrap().sessions.iter().map(|(key, entry)| {
+            (key.clone(), entry.session_id.clone(), entry.probe.clone())
+        }).collect();
+        for (key, session_id, probe) in sessions {
+            self.sample(&key, &session_id, &probe, Activity::Tick);
         }
     }
 

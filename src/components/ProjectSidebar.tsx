@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 import type { PortConflict, ProjectConfig, ProjectGroup, ProjectSelection, ProjectStatus, Snippet, TerminalCompletion } from '../types';
 import { moveProjectOrder, sidebarSections, type SidebarFilter, type SidebarSection } from '../lib/sidebarModel';
 import { getTerminalSnapshot, subscribeTerminals } from '../lib/terminalRegistry';
+import { agentMinutesSince, agentNames, agentStateLabels, type ProjectAgent } from '../lib/terminalUsability';
 import { cn } from '../lib/utils';
 import { recordRender } from '../lib/renderMetrics';
 import { useSidebarMotion } from '../hooks/useSidebarMotion';
@@ -14,6 +15,7 @@ import { SidebarScrollArea } from './SidebarScrollArea';
 import { Input } from './ui/input';
 import { SegmentedControl } from './ui/segmented-control';
 import { ProjectAvatar } from './ProjectAvatar';
+import { AgentElapsedTime } from './AgentElapsedTime';
 import { StatusDot } from './StatusDot';
 import { SidebarMenu, type SidebarMenuItem } from './SidebarMenu';
 import { ProjectActionsMenu } from './ProjectActionsMenu';
@@ -27,6 +29,7 @@ interface Props {
   filter: SidebarFilter;
   onFilterChange: (filter: SidebarFilter) => void;
   attentionProjects: ReadonlySet<string>;
+  projectAgents: ReadonlyMap<string, ProjectAgent>;
   completions: ReadonlyMap<string, TerminalCompletion>;
   snippets: Record<string, Snippet[]>;
   onRunSnippet: (id: string, command: string) => void;
@@ -101,7 +104,7 @@ function ProjectRowStatus({ projectId, status, conflict, attention, completion }
     tone={conflict ? 'error' : status} />;
 }
 
-export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive, folderDropName, groups: projectGroups, filter, onFilterChange, attentionProjects, completions, snippets, onRunSnippet, onQuickSwitch, onUpdateGroup, onReorderGroups, onGroupAction, onProjectFlags, visibleProjects, searchQuery, searchInputRef, onSearchChange, onReorder, reordering, statuses, conflicts, selection, maxPerProject, loading, projectsLoaded, onSelectProject, onCreateTerminal, onOpenProjectLogs, onDeleteProject, onRefresh, onCreate, managedCount, onStopAll, currentVersion, availableVersion, onCheckUpdates, onOpenSettings }: Props) {
+export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive, folderDropName, groups: projectGroups, filter, onFilterChange, attentionProjects, projectAgents, completions, snippets, onRunSnippet, onQuickSwitch, onUpdateGroup, onReorderGroups, onGroupAction, onProjectFlags, visibleProjects, searchQuery, searchInputRef, onSearchChange, onReorder, reordering, statuses, conflicts, selection, maxPerProject, loading, projectsLoaded, onSelectProject, onCreateTerminal, onOpenProjectLogs, onDeleteProject, onRefresh, onCreate, managedCount, onStopAll, currentVersion, availableVersion, onCheckUpdates, onOpenSettings }: Props) {
   recordRender('projectSidebar');
   const [archivedCollapsed, setArchivedCollapsed] = useState(() => {
     try { return JSON.parse(localStorage.getItem(ARCHIVED_COLLAPSED_KEY) ?? 'true') !== false; } catch { return true; }
@@ -109,6 +112,13 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
   const [temporaryCollapsed, setTemporaryCollapsed] = useState(new Set<string>());
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const [searchFocused, setSearchFocused] = useState(false);
+  const [, setCompletionClock] = useState(0);
+  const hasAgentCompletion = [...projectAgents.values()].some(({ agent }) => agent.state === 'done');
+  useEffect(() => {
+    if (!hasAgentCompletion || inactive) return;
+    const timer = setInterval(() => setCompletionClock(Date.now()), 15_000);
+    return () => clearInterval(timer);
+  }, [hasAgentCompletion, inactive]);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: SidebarMenuItem[] } | null>(null);
   const closeMenu = useCallback(() => setMenu(null), []);
@@ -322,6 +332,15 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
     const status = statuses[project.id] || 'stopped';
     const name = project.displayName || project.name;
     const shortcutIndex = visibleProjects.filter(project => !project.archived).findIndex(item => item.id === project.id);
+    const choice = projectAgents.get(project.id);
+    const agent = choice?.agent;
+    const minutesSinceCompletion = agent?.state === 'done' ? agentMinutesSince(agent.stateStartedAt, Date.now()) : 0;
+    const agentDetail = choice && [
+      agentNames[choice.agent.kind],
+      (choice.multiple || choice.agent.state === 'waiting') && `终端 ${choice.slot}`,
+      choice.agent.state === 'done' && (minutesSinceCompletion ? `${minutesSinceCompletion} 分钟前` : '刚刚'),
+      choice.agent.state === 'thinking' && !choice.multiple && agentStateLabels.thinking,
+    ].filter(Boolean).join(' · ');
     return <div key={project.id} ref={node => { if (node) rows.current.set(project.id, node); else rows.current.delete(project.id); }}
       data-project-id={project.id} data-project-dragging={draggingId === project.id || undefined} className={cn('flex flex-col', draggingId === project.id && 'opacity-40')}>
       <div className="sidebar-project-item sidebar-project-surface relative flex items-center"
@@ -350,11 +369,20 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
             onSelectProject(project.id);
           }}
           title={`${name}${shortcutIndex >= 0 && shortcutIndex < 9 ? ` · ⌘${shortcutIndex + 1}` : ''}\n${filtering ? '清除搜索和筛选后可拖动排序' : '拖动排序 · ⌥↑ / ⌥↓'}`}
-          data-project-row={project.id} aria-current={selected ? 'page' : undefined}
+          data-project-row={project.id} data-project-agent={agent?.state} aria-current={selected ? 'page' : undefined}
           aria-haspopup="menu" data-search-highlighted={searchFocused && highlighted === project.id || undefined} data-reorder-draggable={canReorder || undefined}>
           <ProjectAvatar project={project} status={status} conflict={conflict} />
-          <span className="min-w-0 flex-1 truncate">{name}</span>
-          <ProjectRowStatus projectId={project.id} status={status} conflict={conflict} attention={attentionProjects.has(project.id)} completion={completions.get(project.id)} />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate">{name}</span>
+            {agentDetail && <span className="sidebar-agent-detail block truncate" title={agentDetail}>{agentDetail}</span>}
+          </span>
+          {agent ? <span className="agent-status-chip" data-agent-state={agent.state}>
+            {agent.state === 'thinking' ? <>
+              <span className="agent-thinking-ring" aria-hidden="true" />
+              {choice?.multiple && <span className="sr-only">思考中 · </span>}
+              <AgentElapsedTime startAt={agent.roundStartedAt ?? agent.stateStartedAt} compact paused={inactive} />
+            </> : agentStateLabels[agent.state]}
+          </span> : <ProjectRowStatus projectId={project.id} status={status} conflict={conflict} attention={attentionProjects.has(project.id)} completion={completions.get(project.id)} />}
         </button>
       </div>
     </div>;

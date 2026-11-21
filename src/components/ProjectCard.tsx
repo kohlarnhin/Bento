@@ -42,6 +42,7 @@ interface ProjectCardProps {
   onTerminalClosed: (slot: number) => void;
   terminalControls: RefObject<TerminalWorkspaceControls>;
   onFocusedTerminal: (projectId: string, slot: number, left: number, right?: number) => void;
+  onJumpToAttention: () => void;
   onSelectView: (view: 'overview' | 'git') => void;
   onSelectTerminal: (slot: number) => void;
   status: ProjectStatus;
@@ -245,7 +246,7 @@ function ConflictDialog({ conflict, onClose, onConfirm }: {
   </Dialog>;
 }
 
-export function ProjectCard({ project, view, slots, activeSlot, terminals, terminalControls, onFocusedTerminal, onSelectView, onSelectTerminal,
+export function ProjectCard({ project, view, slots, activeSlot, terminals, terminalControls, onFocusedTerminal, onJumpToAttention, onSelectView, onSelectTerminal,
   focused, maxTerminals, snippets, onRunSnippet, onChangeSnippet, onToggleFocus, onNewTerminal, onTerminalClosed,
   status: runtimeStatus, runtime, conflicts, onStart, onStop, onRestart, onOpenBrowser,
   onSetDefaultService, onRevealPath, onOpenEditor, onOpenTerminal, onOpenLogs, onClearLogs, onEdit }: ProjectCardProps) {
@@ -457,6 +458,7 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
       <div className="workspace-view terminal-chrome" data-workspace-view="terminal" {...{ inert: !terminalInteractive ? '' : undefined }}>
         {mountTerminal && <TerminalWorkspace ref={terminalControls} project={project} activeSlot={activeSlot} slots={slots} terminals={terminals}
           snippets={snippets} onRunSnippet={onRunSnippet} onChangeSnippet={onChangeSnippet}
+          onJumpToAttention={onJumpToAttention}
           focused={focused} interactive={terminalInteractive} ready={terminalReady} onReady={setReadySlot} onFocusedSlot={onFocusedTerminal} />}
       </div>
     </div>

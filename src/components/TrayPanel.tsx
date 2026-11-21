@@ -4,7 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { projectInitial } from '../lib/sidebarModel';
 import { StatusDot } from './StatusDot';
 
-type Row = { id: string; name: string; port: number | null; status: 'starting' | 'running' | 'stopped' | 'error'; startedAt: number | null };
+type Row = { id: string; name: string; port: number | null; status: 'starting' | 'running' | 'stopped' | 'error'; startedAt: number | null; agentDetail?: string | null };
 type Pane = { running: number; canStop: boolean; rows: Row[] };
 
 function duration(startedAt: number, now: number) {
@@ -69,7 +69,7 @@ export function TrayPanel() {
         return <div className="tray-project" key={row.id} data-tray-project={row.id} data-tray-status={row.status}>
           <button type="button" className="tray-project-name" onClick={() => { void action('show', row.id); }}>
             <span className="tray-project-avatar" aria-hidden="true">{projectInitial(row.name)}</span>
-            <span className="min-w-0"><b title={row.name}>{row.name}</b><small>{detail || '运行中'}</small></span>
+            <span className="min-w-0"><b title={row.name}>{row.name}</b><small>{row.agentDetail ?? (detail || '运行中')}</small></span>
           </button>
           <StatusDot tone={row.status} aria-label={row.status === 'running' ? '运行中' : detail} />
           <button type="button" className="h1-button" data-tray-toggle={row.id} disabled={busy != null}

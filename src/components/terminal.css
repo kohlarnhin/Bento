@@ -4,6 +4,9 @@
 .workspace-tab-label { display: inline-grid; justify-items: center; }
 .workspace-tab-label::before { content: attr(data-tab-label); font-weight: 600; visibility: hidden; }
 .workspace-tab-label > span:first-child, .workspace-tab-label::before { grid-area: 1 / 1; }
+.workspace-tab-label[data-terminal-agent-kind] > span:first-child { display: inline-flex; align-items: center; gap: 5px; }
+.terminal-agent-sparkle { flex: none; }
+.terminal-agent-waiting-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--toolbar-text); }
 .terminal-tab-attention { position: absolute; inset-inline-start: 6px; top: 50%; translate: 0 -50%; }
 .terminal-tab-close, .terminal-tab-add {
   display: grid;
@@ -100,6 +103,10 @@
   font: 11.5px var(--font-mono);
 }
 .terminal-status-shortcuts { flex: none; margin-left: auto; }
+.terminal-status[data-terminal-agent] { gap: 9px; font: 12px var(--font-ui); }
+.terminal-status .agent-status-chip[data-agent-state="thinking"] { border-color: var(--hairline-selection); padding-inline: 8px; }
+.terminal-status-next { flex: none; margin-inline-start: auto; white-space: nowrap; }
+.terminal-status-next:hover { color: hsl(var(--foreground)); }
 
 .terminal-focus-rail {
   display: flex;

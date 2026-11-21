@@ -86,6 +86,8 @@
 }
 .h1-workspace-tabs > :is(.segmented-option, .segmented-item) { flex: 0 0 64px; }
 .h1-workspace-tabs .segmented-option { width: 64px; white-space: nowrap; padding: 6px 4px; font-size: 13px; line-height: 18px; }
+.h1-workspace-tabs > .segmented-item:has([data-terminal-agent-kind]) { flex-basis: 100px; }
+.h1-workspace-tabs .segmented-option:has([data-terminal-agent-kind]) { width: 100px; padding-inline: 5px 14px; }
 .dash-actions { justify-content: flex-end; gap: 10px; }
 .dash-actions > * { flex-shrink: 0; }
 .h1-toolbar [data-view-control][aria-hidden="true"] { opacity: 0; visibility: hidden; }
