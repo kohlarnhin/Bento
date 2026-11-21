@@ -332,9 +332,17 @@
   .h1-form-section > .h1-group-title { padding-inline: 6px; }
   .h1-form-footer { border-top: 1px solid var(--hairline-divider); }
 
-  .h1-palette-options { overflow: hidden; }
+  .h1-palette-options {
+    overflow: hidden;
+    border: .5px solid var(--card-border);
+  }
+  .h1-palette-options::after { content: none; }
   .h1-palette-options > button + button { border-top: 1px solid var(--hairline-divider); }
-  .h1-palette-options > button[aria-selected="true"] { border-radius: 8px; }
+  .h1-palette-options > .choice-row[aria-selected="true"],
+  .h1-palette-options > .choice-row:not([aria-disabled="true"]):hover {
+    background: var(--h1-hover) padding-box;
+    box-shadow: none;
+  }
 
   .app-sidebar {
     --sidebar-inset-top: 14px;
