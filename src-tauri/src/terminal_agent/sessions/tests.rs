@@ -55,7 +55,7 @@ impl Drop for Fixture {
 fn both_cli_formats_use_cwd_and_extract_title_duration_and_distinct_edits() {
     let fixture = Fixture::new();
     fixture.write(AgentKind::Claude, CLAUDE_ID, CLAUDE);
-    fixture.write(AgentKind::Codex, CODEX_ID, CODEX);
+    let codex_log = fixture.write(AgentKind::Codex, CODEX_ID, CODEX);
     let other_id = "383c4fef-fd6e-452a-9130-bdbdea62bc03";
     fixture.write(
         AgentKind::Claude,
@@ -100,21 +100,30 @@ fn both_cli_formats_use_cwd_and_extract_title_duration_and_distinct_edits() {
             .len(),
         1
     );
-    assert!(catalog
-        .written_since(AgentKind::Codex, Path::new(ROOT), 0, &HashSet::new())
-        .is_none());
+    assert!(catalog.reference_for_logs(AgentKind::Codex, &[PathBuf::from(ROOT)]).is_none());
     assert_eq!(
-        catalog.written_since(AgentKind::Codex, &codex.cwd, 0, &HashSet::new()),
+        catalog.reference_for_logs(AgentKind::Codex, std::slice::from_ref(&codex_log)),
         Some(codex.reference.clone())
     );
-    assert!(catalog
-        .written_since(
-            AgentKind::Codex,
-            &codex.cwd,
-            0,
-            &HashSet::from([codex.reference.clone()])
-        )
-        .is_none());
+    assert!(catalog.reference_for_logs(AgentKind::Claude, &[codex_log]).is_none());
+}
+
+#[test]
+fn simultaneous_processes_in_one_cwd_only_get_their_own_open_log() {
+    let fixture = Fixture::new();
+    let first = fixture.write(AgentKind::Codex, CODEX_ID, CODEX);
+    let second_id = "876c310b-5293-4557-ae09-11c6cb346803";
+    let second = fixture.write(AgentKind::Codex, second_id, &CODEX.replace(CODEX_ID, second_id));
+    let mut catalog = fixture.catalog();
+    catalog.refresh();
+    for (path, id) in [(&first, CODEX_ID), (&second, second_id)] {
+        assert_eq!(
+            catalog.reference_for_logs(AgentKind::Codex, std::slice::from_ref(path)),
+            SessionRef::new(AgentKind::Codex, id)
+        );
+    }
+    assert!(catalog.reference_for_logs(AgentKind::Codex, &[]).is_none());
+    assert!(catalog.reference_for_logs(AgentKind::Codex, &[first, second]).is_none());
 }
 
 #[test]

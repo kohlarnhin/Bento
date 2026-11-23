@@ -28,7 +28,7 @@ import Button from './components/ui/button';
 import { Toaster } from './components/ui/sonner';
 import { MotionPresence } from './components/ui/motion-presence';
 import { Empty, EmptyTitle, EmptyDescription } from './components/ui/empty';
-import { createTerminal, getProjectTerminalSlots, getTerminal, getTerminalSnapshot, initTerminalRegistry, registerTerminalResult, subscribeTerminals, takeRestoredSlot, terminalKey } from './lib/terminalRegistry';
+import { createTerminal, getProjectTerminalSlots, getTerminal, getTerminalSnapshot, initTerminalRegistry, prepareTerminalInput, registerTerminalResult, subscribeTerminals, takeRestoredSlot, terminalKey } from './lib/terminalRegistry';
 import { activateAgentTerminal, loadAgentIndex, useAgentRecoveries, type AgentArgv, type AgentRecoveryTarget, type ProjectAgentSession } from './lib/agentSessions';
 import { projectLogs } from './lib/useProjectLogs';
 import { recordRender } from './lib/renderMetrics';
@@ -380,12 +380,13 @@ export function App() {
     if (dialogOpen.current || creatingTerminals.current.has(projectId)) return;
     creatingTerminals.current.add(projectId);
     try {
-      await activateAgentTerminal(projectId, argv, terminal => {
+      const terminal = await activateAgentTerminal(projectId, argv, terminal => {
         registerTerminalResult(terminal);
-        if (recovery) dismissAgentRecovery(recovery.sessionId);
         selectTerminalSlot(terminal.projectId, terminal.slot);
         requestAnimationFrame(() => getTerminal(terminal.projectId, terminal.slot)?.focus());
-      }, recovery);
+      }, prepareTerminalInput, recovery);
+      registerTerminalResult(terminal);
+      if (recovery) dismissAgentRecovery(recovery.sessionId);
     } catch (error) {
       toast.error(String(error));
     } finally {

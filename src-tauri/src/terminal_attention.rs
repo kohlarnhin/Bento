@@ -230,7 +230,7 @@ struct Entry {
 impl Entry {
     fn agent_status(&self) -> AgentStatus {
         AgentStatus {
-            agent: self.agent.as_ref().map(|tracker| tracker.session),
+            agent: self.agent.as_ref().and_then(AgentTracker::status),
             agent_revision: self.agent_revision,
         }
     }
@@ -321,7 +321,7 @@ impl AttentionManager {
 
     fn badge_count(state: &State) -> usize {
         state.sessions.values().filter(|entry| {
-            entry.tracker.raised || entry.agent.as_ref().is_some_and(|agent| agent.session.state == AgentState::Waiting)
+            entry.tracker.raised || entry.agent_status().agent.is_some_and(|agent| agent.state == AgentState::Waiting)
         }).count()
     }
 
@@ -351,7 +351,7 @@ impl AttentionManager {
     pub fn agent_process(&self, key: &TerminalKey, session_id: &str) -> Option<crate::terminal_agent::AgentProcess> {
         let state = self.state.lock().unwrap();
         let entry = state.sessions.get(key).filter(|entry| entry.session_id == session_id)?;
-        entry.agent.as_ref()?.process
+        entry.agent.as_ref()?.process.clone()
     }
 
     #[cfg(test)]
@@ -361,7 +361,7 @@ impl AttentionManager {
 
     pub fn agents(&self) -> Vec<(TerminalKey, AgentSession)> {
         self.state.lock().unwrap().sessions.iter().filter_map(|(key, entry)| {
-            Some((key.clone(), entry.agent.as_ref()?.session))
+            Some((key.clone(), entry.agent.as_ref()?.status()?))
         }).collect()
     }
 

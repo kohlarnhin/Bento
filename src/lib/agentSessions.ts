@@ -44,9 +44,16 @@ export function agentArgv(tool: TerminalAgentKind, id?: string): AgentArgv {
 }
 
 export async function activateAgentTerminal(projectId: string, argv: AgentArgv,
-  select: (terminal: TerminalSessionInfo) => void, recovery?: AgentRecoveryTarget) {
-  const terminal = await invoke<TerminalSessionInfo>('terminal_agent_start', { projectId, argv, recovery });
-  select(terminal);
+  select: (terminal: TerminalSessionInfo) => void, prepare: (terminal: TerminalSessionInfo) => Promise<void>,
+  recovery?: AgentRecoveryTarget) {
+  const { session, launchId } = await invoke<{ session: TerminalSessionInfo; launchId: string | null }>(
+    'terminal_agent_start', { projectId, argv, recovery });
+  select(session);
+  if (!launchId) return session;
+  await prepare(session);
+  return invoke<TerminalSessionInfo>('terminal_agent_launch', {
+    projectId: session.projectId, slot: session.slot, sessionId: session.sessionId, launchId,
+  });
 }
 
 const clock = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });

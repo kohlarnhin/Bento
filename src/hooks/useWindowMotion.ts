@@ -59,13 +59,14 @@ export function useWindowMotion(root: RefObject<HTMLDivElement>, focused: boolea
     const css = getComputedStyle(surface);
     const wide = parseFloat(css.getPropertyValue('--sidebar-expanded-width'));
     const narrow = parseFloat(css.getPropertyValue('--sidebar-compact-width'));
-    const width = { px: wide };
+    const resize = { progress: 0 };
     let resizeStart = 0;
     let resizeEnd = 0;
     let timeline!: gsap.core.Timeline;
     const applyLayout = () => {
       const time = timeline.time();
-      surface.style.setProperty('--motion-sidebar-width', Math.round(width.px) + 'px');
+      surface.style.setProperty('--motion-sidebar-width', Math.round(wide + (narrow - wide) * resize.progress) + 'px');
+      surface.style.setProperty('--motion-sidebar-focus-share', String(resize.progress));
       expanded.style.visibility = time < resizeStart ? 'visible' : 'hidden';
       rail.style.visibility = time >= resizeEnd ? 'visible' : 'hidden';
     };
@@ -74,7 +75,7 @@ export function useWindowMotion(root: RefObject<HTMLDivElement>, focused: boolea
       timeline.fromTo(names, { x: 0, opacity: 1 },
         { x: -6, opacity: 0, duration: .12, stagger: (index: number) => .02 * Math.min(index, 4), ease: 'power2.inOut' });
       resizeStart = timeline.duration();
-      timeline.fromTo(width, { px: wide }, { px: narrow, duration: .32, ease: 'power2.inOut' });
+      timeline.fromTo(resize, { progress: 0 }, { progress: 1, duration: .32, ease: 'power2.inOut' });
       resizeEnd = timeline.duration();
       timeline.fromTo(icons, { scale: .8, opacity: 0 },
         { scale: 1, opacity: 1, duration: .15, stagger: (index: number) => .025 * Math.min(index, 4), ease: 'power3.out' });
@@ -83,6 +84,7 @@ export function useWindowMotion(root: RefObject<HTMLDivElement>, focused: boolea
     layout.current = { timeline, revert: () => {
       scope.revert();
       surface.style.removeProperty('--motion-sidebar-width');
+      surface.style.removeProperty('--motion-sidebar-focus-share');
       expanded.style.removeProperty('visibility');
       rail.style.removeProperty('visibility');
       delete surface.dataset.terminalLayoutMotion;

@@ -955,9 +955,17 @@ impl TerminalManager {
             && session.tab_order < tab.tab_order && lock(&session.state.0).alive).count())
     }
 
+    #[cfg(test)]
     fn write(&self, project_id: &str, slot: u8, data: Vec<u8>) -> Result<(), String> {
+        self.write_for_session(project_id, slot, None, data)
+    }
+
+    fn write_for_session(&self, project_id: &str, slot: u8, session_id: Option<&str>, data: Vec<u8>) -> Result<(), String> {
         let session = self.get(project_id, slot)?;
-        if !session.info().alive {
+        if session_id.is_some_and(|id| id != session.session_id) {
+            return Ok(());
+        }
+        if !lock(&session.state.0).alive {
             return Err("终端已退出，请重新启动终端".into());
         }
         session
@@ -1289,9 +1297,10 @@ pub fn terminal_write(
     state: State<'_, TerminalManager>,
     project_id: String,
     slot: u8,
+    session_id: Option<String>,
     data: String,
 ) -> Result<(), String> {
-    state.write(&project_id, slot, data.into_bytes())
+    state.write_for_session(&project_id, slot, session_id.as_deref(), data.into_bytes())
 }
 
 #[tauri::command]
@@ -1299,9 +1308,10 @@ pub fn terminal_write_bytes(
     state: State<'_, TerminalManager>,
     project_id: String,
     slot: u8,
+    session_id: Option<String>,
     data: Vec<u8>,
 ) -> Result<(), String> {
-    state.write(&project_id, slot, data)
+    state.write_for_session(&project_id, slot, session_id.as_deref(), data)
 }
 
 #[tauri::command]
@@ -1545,6 +1555,23 @@ mod tests {
         fixture.manager.close_terminal("a", 1, Some(&new.session_id)).unwrap();
         fixture.manager.close_terminal("a", 3, Some(&tabs[2].session_id)).unwrap();
         assert!(load().is_empty());
+    }
+
+    #[test]
+    fn a_delayed_terminal_report_cannot_reach_a_reused_slot() {
+        let fixture = Fixture::new();
+        let previous = fixture.create("a").session;
+        fixture.manager.close_terminal("a", previous.slot, Some(&previous.session_id)).unwrap();
+        let current = fixture.create("a").session;
+        assert_eq!(current.slot, previous.slot);
+        fixture.idle("a", current.slot);
+        let write = |id: &str, bytes: &[u8]| {
+            fixture.manager.write_for_session("a", current.slot, Some(id), bytes.to_vec()).unwrap()
+        };
+        write(&previous.session_id, b"echo STALE_REPORT\r");
+        write(&current.session_id, b"echo CURRENT_REPORT\r");
+        let output = fixture.wait_for_slot("a", current.slot, "\r\nCURRENT_REPORT\r\n");
+        assert!(!output.contains("STALE_REPORT"));
     }
 
     #[test]

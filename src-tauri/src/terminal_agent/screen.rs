@@ -180,6 +180,25 @@ impl Screen {
         }
     }
 
+    pub(super) fn has_prompt(&self, prompt: char) -> bool {
+        self.rows
+            .iter()
+            .any(|row| row.iter().find(|&&ch| ch != ' ') == Some(&prompt))
+    }
+
+    pub(super) fn codex_working(&self) -> bool {
+        const WORKING: &[char] = &['W', 'o', 'r', 'k', 'i', 'n', 'g'];
+        self.rows.iter().any(|row| {
+            let start = row.iter().position(|&ch| ch != ' ').unwrap_or(row.len());
+            let text = &row[start..];
+            text == WORKING
+                || text.strip_prefix(&['•', ' ']).is_some_and(|text| {
+                    text.strip_prefix(WORKING)
+                        .is_some_and(|tail| matches!(tail.first(), None | Some(' ')))
+                })
+        })
+    }
+
     pub(super) fn tail(&self) -> String {
         const LOOKBACK: usize = 24;
         let end = self

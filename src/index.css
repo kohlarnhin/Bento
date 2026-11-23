@@ -132,6 +132,7 @@
     height: 100%;
     --sidebar-width: var(--sidebar-expanded-width);
     --sidebar-current-width: var(--motion-sidebar-width, var(--sidebar-width));
+    --sidebar-focus-share: var(--motion-sidebar-focus-share, 0);
     --panel-gap: 8px;
     grid-template-columns: var(--sidebar-current-width) minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
@@ -139,14 +140,23 @@
   }
 
   .dark .h1-window { --panel-edge: rgba(255, 255, 255, .14); }
-  .h1-window[data-focus-mode] { --sidebar-width: var(--sidebar-compact-width); }
+  .h1-window[data-focus-mode] {
+    --sidebar-width: var(--sidebar-compact-width);
+    --sidebar-focus-share: var(--motion-sidebar-focus-share, 1);
+  }
+  .h1-window:is([data-focus-mode], [data-terminal-layout-motion]) {
+    /* The gap is transparent in the standard layout. Back it during focus so it
+       cannot reveal another surface as the two panels move. */
+    background: linear-gradient(var(--terminal-surface), var(--terminal-surface))
+      left var(--sidebar-current-width) top / var(--panel-gap) 100% no-repeat;
+  }
   .h1-sidebar-panel, .h1-main {
     --frame-edge: var(--panel-edge);
     overflow: hidden;
     border-radius: 16px;
     background-color: var(--h1-surface);
   }
-  .h1-sidebar-panel { position: relative; }
+  .h1-sidebar-panel { position: relative; contain: paint; }
   .h1-main {
     --workspace-inset-top: 16px;
     --workspace-inset-inline: 30px;
@@ -166,6 +176,7 @@
     visibility: hidden;
     pointer-events: none;
   }
+  .h1-window:not([data-terminal-layout-motion]) .h1-sidebar-panel > aside[inert] { display: none; }
 
   .h1-group {
     --frame-edge: var(--card-border);

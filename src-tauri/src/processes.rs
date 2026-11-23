@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 mod launch_marker;
 mod listeners;
+pub(crate) use listeners::fds as file_descriptors;
 pub use launch_marker::{new_launch_marker, MANAGED_RUN_ENV};
 
 fn lsof() -> Command {

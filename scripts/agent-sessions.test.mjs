@@ -77,11 +77,12 @@ test('history selection at the limit activates the already-running terminal repo
   const invoked = [], activated = [];
   const current = { projectId: 'nested-project', slot: 3, sessionId: 'already-open', alive: true };
   Object.defineProperty(globalThis, 'window', { configurable: true, value: { __TAURI_INTERNALS__: {
-    invoke: async (command, args) => { invoked.push({ command, args }); return current; },
+    invoke: async (command, args) => { invoked.push({ command, args }); return { session: current }; },
   } } });
   t.after(() => { delete globalThis.window; });
   const options = buttons(menu({ sessions: [codex], tools: ['codex'] }, argv =>
-    activateAgentTerminal('project', argv, terminal => activated.push(terminal)), true));
+    activateAgentTerminal('project', argv, terminal => activated.push(terminal),
+      async () => assert.fail('The running terminal needs no new launch')), true));
   assert.equal(options[0].props.disabled, true);
   assert.equal(options[1].props.disabled, true);
   assert.ok(!options[2].props.disabled);
@@ -91,15 +92,27 @@ test('history selection at the limit activates the already-running terminal repo
 });
 
 test('the recovery card continues in the original tab or dismisses without resuming', async t => {
-  const invoked = [], selected = [];
+  const invoked = [], selected = [], prepared = [];
   const recovery = { slot: 2, sessionId: 'restored-tab' };
+  const session = { ...recovery, projectId: 'project' };
+  let finishPreparing;
+  const ready = new Promise(resolve => { finishPreparing = resolve; });
   Object.defineProperty(globalThis, 'window', { configurable: true, value: { __TAURI_INTERNALS__: {
-    invoke: async (command, args) => { invoked.push({ command, args }); return { ...recovery, projectId: 'project' }; },
+    invoke: async (command, args) => {
+      invoked.push({ command, args });
+      if (command === 'terminal_agent_start') return { session, launchId: 'prepared-launch' };
+      assert.deepEqual(prepared, [session]);
+      return session;
+    },
   } } });
   t.after(() => { delete globalThis.window; });
   let visible = true;
   const card = AgentRecoveryCard({ session: claude, busy: false,
-    onContinue: argv => activateAgentTerminal('project', argv, terminal => selected.push(terminal), recovery),
+    onContinue: argv => activateAgentTerminal('project', argv, terminal => selected.push(terminal), async terminal => {
+      assert.deepEqual(selected, [terminal]);
+      await ready;
+      prepared.push(terminal);
+    }, recovery),
     onIgnore: () => { visible = false; },
   });
   assert.match(renderToStaticMarkup(card), /这里上次是 Claude 会话「筛选条件进 URL」/);
@@ -107,9 +120,16 @@ test('the recovery card continues in the original tab or dismisses without resum
   ignoreButton.props.onClick();
   assert.equal(visible, false);
   assert.deepEqual(invoked, []);
-  await continueButton.props.onClick();
-  assert.deepEqual(invoked, [{ command: 'terminal_agent_start', args: { projectId: 'project', argv: ['claude', '--resume', claude.id], recovery } }]);
-  assert.deepEqual(selected, [{ ...recovery, projectId: 'project' }]);
+  const continuing = continueButton.props.onClick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(invoked.map(({ command }) => command), ['terminal_agent_start']);
+  finishPreparing();
+  await continuing;
+  assert.deepEqual(invoked, [
+    { command: 'terminal_agent_start', args: { projectId: 'project', argv: ['claude', '--resume', claude.id], recovery } },
+    { command: 'terminal_agent_launch', args: { projectId: 'project', ...recovery, launchId: 'prepared-launch' } },
+  ]);
+  assert.deepEqual(selected, [session]);
 });
 
 const projects = [{ id: 'records', name: 'Records' }, { id: 'reports', name: 'Reports' }];
@@ -185,11 +205,12 @@ test('palette arrows cross groups and Enter calls the same resume path as the pl
   const invoked = [], selected = [], pending = [];
   const running = { projectId: 'records', slot: 2, sessionId: 'running-tab', alive: true };
   Object.defineProperty(globalThis, 'window', { configurable: true, value: { __TAURI_INTERNALS__: {
-    invoke: async (command, args) => { invoked.push({ command, args }); return running; },
+    invoke: async (command, args) => { invoked.push({ command, args }); return { session: running }; },
   } } });
   t.after(() => { delete globalThis.window; });
 
-  const openAgent = (projectId, argv) => pending.push(activateAgentTerminal(projectId, argv, tab => selected.push(tab)));
+  const openAgent = (projectId, argv) => pending.push(activateAgentTerminal(projectId, argv, tab => selected.push(tab),
+    async () => assert.fail('The running terminal needs no new launch')));
   const session = { ...codex, projectId: 'reports' };
   const options = [{ run: () => assert.fail('project activation') }, ...paletteOptions('CSV', [session], openAgent)];
   const index = quickSwitcherResultKey('ArrowDown', false, 0, options);

@@ -101,7 +101,7 @@ fn pids() -> Result<Vec<i32>, ()> {
     Err(())
 }
 
-fn fds(pid: i32) -> Option<Vec<libc::proc_fdinfo>> {
+pub(crate) fn fds(pid: i32) -> Option<Vec<libc::proc_fdinfo>> {
     let bytes =
         unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
     if bytes <= 0 {

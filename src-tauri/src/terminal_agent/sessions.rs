@@ -239,28 +239,20 @@ impl Catalog {
             .map(|(session, _)| session.summary.clone())
     }
 
-    pub fn written_since(
-        &self,
-        tool: AgentKind,
-        cwd: &Path,
-        started_at: u64,
-        claimed: &HashSet<SessionRef>,
-    ) -> Option<SessionRef> {
-        let cwd = canonical_path(cwd);
-        self.sessions()
-            .filter(|(session, modified)| {
-                *modified >= started_at
-                    && session.canonical_cwd == cwd
-                    && session.summary.reference.tool == tool
-                    && !claimed.contains(&session.summary.reference)
-            })
-            .max_by(|(left, left_mtime), (right, right_mtime)| {
-                left_mtime
-                    .cmp(right_mtime)
-                    .then(left.summary.last_at.cmp(&right.summary.last_at))
-                    .then(left.summary.reference.id.cmp(&right.summary.reference.id))
-            })
-            .map(|(session, _)| session.summary.reference.clone())
+    pub fn reference_for_logs(&self, tool: AgentKind, paths: &[PathBuf]) -> Option<SessionRef> {
+        let home = self.home.as_deref()?;
+        let canonical_home = canonical_path(home);
+        let mut references = paths.iter().filter_map(|path| {
+            let file = self.files.get(path).or_else(|| {
+                let relative = path.strip_prefix(&canonical_home).ok()?;
+                self.files.get(&home.join(relative))
+            })?;
+            let reference = &file.parsed.as_ref()?.summary.reference;
+            (reference.tool == tool).then_some(reference)
+        });
+        let reference = references.next()?;
+        // A process can also open nested session logs. Require a unique ID.
+        references.all(|other| other == reference).then(|| reference.clone())
     }
 }
 

@@ -3,9 +3,11 @@ mod screen;
 pub(crate) mod sessions;
 
 use crate::terminal_escape::{EscapeEvent, EscapeStream};
+pub(crate) use foreground::agent_log_paths;
 use foreground::{Detector, ForegroundAgent};
 use screen::Screen;
 use serde::{Deserialize, Serialize};
+use sessions::SessionRef;
 use std::sync::Mutex;
 
 const CODEX_QUIET_MS: u64 = 3_000;
@@ -148,14 +150,17 @@ fn basename(path: &[u8]) -> &[u8] {
     path.rsplit(|&byte| byte == b'/').next().unwrap_or_default()
 }
 
-fn identify<'a>(executable: &[u8], mut argv: impl Iterator<Item = &'a [u8]>) -> Option<AgentKind> {
+fn identify<'a, I: Iterator<Item = &'a [u8]>>(
+    executable: &[u8],
+    mut argv: I,
+) -> Option<(AgentKind, std::iter::Peekable<I>)> {
     let executable = basename(executable);
     let command = basename(argv.next().unwrap_or_default());
     if let Some(feature) = FEATURES
         .iter()
         .find(|feature| feature.command == executable || feature.command == command)
     {
-        return Some(feature.kind);
+        return Some((feature.kind, argv.peekable()));
     }
     let interpreter = if executable.is_empty() {
         command
@@ -194,7 +199,17 @@ fn identify<'a>(executable: &[u8], mut argv: impl Iterator<Item = &'a [u8]>) -> 
             }
             _ => false,
         })
-        .map(|feature| feature.kind)
+        .map(|feature| (feature.kind, args))
+}
+
+fn resume_arg<'a>(kind: AgentKind, mut args: impl Iterator<Item = &'a [u8]>) -> Option<SessionRef> {
+    let first = args.next()?;
+    let id = match (kind, first) {
+        (AgentKind::Codex, b"resume") | (AgentKind::Claude, b"--resume" | b"-r") => args.next()?,
+        (AgentKind::Claude, arg) => arg.strip_prefix(b"--resume=")?,
+        _ => return None,
+    };
+    SessionRef::new(kind, std::str::from_utf8(id).ok()?)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -260,6 +275,8 @@ struct Observation {
     notice: Option<AgentState>,
     bell: bool,
     approval: bool,
+    prompt: bool,
+    codex_working: bool,
 }
 
 #[derive(Default)]
@@ -289,6 +306,11 @@ impl Output {
         }
         if seen.changed {
             self.approval = approval(features, &self.screen.tail());
+            seen.prompt = self.screen.has_prompt(match kind {
+                AgentKind::Claude => '❯',
+                AgentKind::Codex => '›',
+            });
+            seen.codex_working = kind == AgentKind::Codex && self.screen.codex_working();
         }
         seen.approval = self.approval;
         seen
@@ -296,8 +318,9 @@ impl Output {
 }
 
 pub struct Tracker {
-    pub session: AgentSession,
+    session: AgentSession,
     pub process: Option<AgentProcess>,
+    ready: bool,
     output: Output,
     last_activity: u64,
     idle_at: Option<u64>,
@@ -315,6 +338,7 @@ impl Tracker {
                 acknowledged: true,
             },
             process: None,
+            ready: false,
             output: Output::default(),
             last_activity: now,
             idle_at: None,
@@ -328,6 +352,10 @@ impl Tracker {
         if self.session.state == AgentState::Done {
             self.session.acknowledged = true;
         }
+    }
+
+    pub fn status(&self) -> Option<AgentSession> {
+        self.ready.then_some(self.session)
     }
 
     fn state(&mut self, state: AgentState, now: u64, visible: bool) {
@@ -345,6 +373,9 @@ impl Tracker {
     }
 
     fn submit(&mut self, now: u64) {
+        if !self.ready {
+            return;
+        }
         self.session.round_started_at = Some(now);
         self.idle_at = None;
         self.last_activity = now;
@@ -356,6 +387,14 @@ impl Tracker {
     pub fn observe(&mut self, bytes: &[u8], now: u64, visible: bool) {
         let had_approval = self.output.approval;
         let seen = self.output.feed(self.session.kind, bytes);
+        self.ready |= seen.prompt
+            || seen.approval
+            || seen.title.is_some()
+            || seen.notice.is_some()
+            || seen.codex_working;
+        if !self.ready {
+            return;
+        }
         self.title = seen.title.or(self.title);
         if seen.approval || seen.notice == Some(AgentState::Waiting) {
             self.idle_at = None;
@@ -377,7 +416,8 @@ impl Tracker {
         }
 
         if self.session.kind == AgentKind::Codex {
-            if seen.changed {
+            // Startup paint, cursor reports and idle redraws never start a turn.
+            if seen.codex_working || (seen.changed && self.session.state == AgentState::Thinking) {
                 self.last_activity = now;
                 self.state(AgentState::Thinking, now, visible);
             }
@@ -414,11 +454,12 @@ impl Tracker {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentProcess {
     pub kind: AgentKind,
     pub pid: u32,
     pub started_at: u64,
+    pub resume: Option<SessionRef>,
 }
 
 pub struct Probe {
@@ -464,17 +505,11 @@ impl Probe {
 impl Sample {
     pub fn sync(&mut self, tracker: &mut Option<Tracker>, now: u64) {
         if self.observed != self.active {
-            self.active = self.observed;
+            self.active.clone_from(&self.observed);
             self.pasting = false;
-            *tracker = self.active.map(|agent| {
-                let mut tracker = Tracker::new(agent.kind, now, self.cols, self.rows);
-                let pid = agent.pid as u32;
-                tracker.process = Some(AgentProcess {
-                    kind: agent.kind,
-                    pid,
-                    started_at: crate::processes::identity(pid)
-                        .map_or(now, |identity| identity.started_at_millis()),
-                });
+            *tracker = self.active.as_ref().map(|agent| {
+                let mut tracker = Tracker::new(agent.process.kind, now, self.cols, self.rows);
+                tracker.process = Some(agent.process.clone());
                 tracker
             });
         }
@@ -515,7 +550,7 @@ mod tests {
     use AgentState::{Done, Thinking, Waiting};
 
     fn identify_args(executable: &str, args: &[&str]) -> Option<AgentKind> {
-        identify(executable.as_bytes(), args.iter().map(|arg| arg.as_bytes()))
+        identify(executable.as_bytes(), args.iter().map(|arg| arg.as_bytes())).map(|(kind, _)| kind)
     }
 
     #[test]
@@ -669,14 +704,55 @@ mod tests {
     fn generic_text_control_traffic_and_multiline_paste_do_not_fake_agent_signals() {
         let mut codex = Tracker::new(Codex, 0, 80, 24);
         codex.observe(b"\x1b]2;approve\x07\x1b[?25h\x1b[6n", 1, false);
-        assert_eq!(codex.session.state, Done);
-        codex.observe(b"Please approve the change in your own time.", 2, false);
-        assert_eq!(codex.session.state, Thinking);
+        assert_eq!(codex.status(), None);
+        codex.observe(
+            b"Working directory unavailable.\r\nPlease approve the change in your own time.",
+            2,
+            false,
+        );
+        codex.submit(3);
+        codex.tick(4_000, false);
+        assert_eq!(codex.status(), None);
+        codex.observe("\r\n› Send a message".as_bytes(), 5_000, false);
+        assert_eq!(codex.status().unwrap().state, Done);
+        assert_eq!(codex.session.round_started_at, None);
         let probe = Probe::new(|| None, 80, 24);
         let mut sample = probe.sampling.lock().unwrap();
-        sample.input(&mut codex, b"\x1b[200~first\rsecond\r\x1b[201~\n", 3);
-        assert_eq!(codex.session.round_started_at, Some(2));
-        sample.input(&mut codex, b"new request\r", 4);
-        assert_eq!(codex.session.round_started_at, Some(4));
+        sample.input(&mut codex, b"\x1b[200~first\rsecond\r\x1b[201~\n", 5_001);
+        assert_eq!(codex.session.round_started_at, None);
+        sample.input(&mut codex, b"new request\r", 5_002);
+        assert_eq!(codex.session.round_started_at, Some(5_002));
+        assert_eq!(codex.status().unwrap().state, Thinking);
+        codex.tick(8_002, true);
+        assert_eq!(codex.status().unwrap().state, Done);
+    }
+
+    #[test]
+    fn resume_id_is_read_from_the_cli_entry_point_only() {
+        let id = "383c4fef-fd6e-452a-9130-bdbdea62bc01";
+        let inspect = |exe: &str, argv: &[&str]| {
+            let (kind, args) = identify(exe.as_bytes(), argv.iter().map(|arg| arg.as_bytes()))?;
+            resume_arg(kind, args)
+        };
+        assert_eq!(
+            inspect(
+                "/usr/bin/node",
+                &["node", "/pkg/@openai/codex/bin/codex.js", "resume", id]
+            ),
+            SessionRef::new(Codex, id)
+        );
+        assert_eq!(
+            inspect("/bin/claude", &["claude", "--resume", id]),
+            SessionRef::new(Claude, id)
+        );
+        assert_eq!(inspect("/bin/codex", &["codex", "resume", "--last"]), None);
+        assert_eq!(
+            inspect("/bin/codex", &["codex", "exec", "resume", id]),
+            None
+        );
+        assert_eq!(
+            inspect("/bin/sh", &["sh", "-c", "codex", "resume", id]),
+            None
+        );
     }
 }

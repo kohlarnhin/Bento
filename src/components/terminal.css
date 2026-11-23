@@ -84,8 +84,8 @@
 
 .terminal-panes { display: grid; flex: 1; min-width: 0; min-height: 0; grid-template-columns: minmax(0, 1fr); }
 .terminal-panes[data-split] { border-top: 1px solid var(--hairline-divider); margin-top: 8px; }
-.terminal-pane-frame { display: flex; min-width: 0; min-height: 0; flex-direction: column; padding: 22px 26px; }
-.terminal-panes[data-split] .terminal-pane-frame { padding: 16px 22px 14px; }
+.terminal-pane-frame { display: flex; min-width: 0; min-height: 0; flex-direction: column; padding: 22px var(--terminal-content-inset); }
+.terminal-panes[data-split] .terminal-pane-frame { padding-block: 16px 14px; }
 .terminal-pane-heading {
   display: flex;
   flex: 0 0 23px;
@@ -203,8 +203,8 @@
   color: hsl(var(--muted-foreground));
 }
 
-@container (max-width: 640px) {
-  .terminal-pane-frame, .terminal-panes[data-split] .terminal-pane-frame { padding-inline: 16px; }
+@container bento-workspace (max-width: 640px) {
+  .terminal-pane-frame { --terminal-content-inset: 16px; }
   .terminal-status { gap: 10px; padding-inline: 16px; }
 }
 

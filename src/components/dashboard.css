@@ -1,10 +1,14 @@
 .h1-workspace {
+  --terminal-content-inset: 26px;
+  container: bento-workspace / inline-size;
   display: flex;
   flex: 1;
   min-width: 0;
   min-height: 0;
   flex-direction: column;
 }
+
+.h1-workspace:has(.terminal-panes[data-split]) { --terminal-content-inset: 22px; }
 
 .h1-main:has(> .h1-workspace) { padding: 0; }
 
@@ -27,14 +31,18 @@
   align-items: center;
   gap: 10px;
   padding: var(--workspace-inset-top) var(--workspace-inset-inline) 0;
-  /* The panel widens in focus mode while the controls stay at their window coordinates. */
-  padding-inline-start: calc(var(--workspace-inset-inline) + var(--sidebar-expanded-width) - var(--sidebar-current-width));
+  padding-inline-start: calc(var(--workspace-inset-inline) +
+    var(--sidebar-focus-share) * (var(--terminal-content-inset) - var(--workspace-inset-inline)));
   min-height: calc(44px + var(--workspace-inset-top));
   flex: none;
   position: relative;
   z-index: 4;
   background-color: color-mix(in srgb, var(--workspace-background), var(--terminal-surface) var(--terminal-mix));
   color: var(--toolbar-text);
+}
+
+@container bento-workspace (max-width: 640px) {
+  .h1-toolbar { --terminal-content-inset: 16px; }
 }
 
 .h1-toolbar-heading, .dash-actions {

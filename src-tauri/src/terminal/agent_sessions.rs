@@ -2,21 +2,23 @@ use super::{
     await_command, lock, project_config, validate_slot, Session, TerminalManager,
     TerminalSessionInfo,
 };
-use crate::processes::{process_cwd, quote_shell};
+use crate::processes::quote_shell;
 use crate::projects::EnvVar;
 use crate::terminal_agent::sessions::{Catalog, ProjectSessionSummary, SessionRef, SessionSummary};
-use crate::terminal_agent::{AgentKind, AgentProcess};
+use crate::terminal_agent::{agent_log_paths, AgentKind, AgentProcess};
 use serde::{Deserialize, Serialize};
-use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CString, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 
 const LAUNCH_WINDOW_MS: u64 = 5_000;
+const PREPARE_WINDOW_MS: u64 = 30_000;
+static NEXT_LAUNCH: AtomicU64 = AtomicU64::new(1);
 
 struct Binding {
     reference: SessionRef,
@@ -24,9 +26,25 @@ struct Binding {
     process: Option<AgentProcess>,
 }
 
+struct PendingLaunch {
+    id: String,
+    command: String,
+    reference: Option<SessionRef>,
+    check_idle: bool,
+    expires_at: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreparedAgent {
+    session: TerminalSessionInfo,
+    launch_id: Option<String>,
+}
+
 pub(super) struct AgentLink {
     pub(super) recovery: Option<SessionRef>,
     binding: Option<Binding>,
+    pending: Option<PendingLaunch>,
 }
 
 impl AgentLink {
@@ -34,28 +52,40 @@ impl AgentLink {
         Self {
             recovery,
             binding: None,
+            pending: None,
         }
     }
 
     fn active(
         &mut self,
-        process: Option<AgentProcess>,
+        process: Option<&AgentProcess>,
         now: u64,
         pending: bool,
     ) -> Option<SessionRef> {
+        if pending {
+            if let Some(launch) = self
+                .pending
+                .as_ref()
+                .filter(|launch| now <= launch.expires_at)
+            {
+                if let Some(reference) = &launch.reference {
+                    return Some(reference.clone());
+                }
+            }
+        }
         let binding = self.binding.as_mut()?;
-        if let Some(bound) = binding.process {
+        if let Some(bound) = binding.process.as_ref() {
             if process == Some(bound) {
                 return Some(binding.reference.clone());
             }
         } else if let Some(process) = process {
-            if process.kind == binding.reference.tool
+            if process.resume.as_ref() == Some(&binding.reference)
                 && process
                     .started_at
                     .checked_sub(binding.requested_at)
                     .is_some_and(|elapsed| elapsed <= LAUNCH_WINDOW_MS)
             {
-                binding.process = Some(process);
+                binding.process = Some(process.clone());
                 return Some(binding.reference.clone());
             }
         } else if now.saturating_sub(binding.requested_at) <= LAUNCH_WINDOW_MS {
@@ -74,7 +104,7 @@ impl Session {
     pub(super) fn saved_agent_reference(&self) -> Option<SessionRef> {
         let process = self.agent_process();
         let mut link = lock(&self.agent_link);
-        link.active(process, now(), false)
+        link.active(process.as_ref(), now(), false)
             .or_else(|| process.is_none().then(|| link.recovery.clone()).flatten())
     }
 }
@@ -103,33 +133,28 @@ impl TerminalManager {
         let now = now();
         for session in &sessions {
             let process = session.agent_process();
-            let linked = lock(&session.agent_link).active(process, now, true);
+            let linked = lock(&session.agent_link).active(process.as_ref(), now, true);
             if let Some(reference) = linked {
                 claimed.insert(reference);
             } else if let Some(process) = process {
                 unlinked.push((session, process));
             }
         }
-        // Start with the newest process, so two terminals do not claim the same log.
-        unlinked.sort_unstable_by_key(|(session, process)| {
-            (
-                Reverse(process.started_at),
-                &session.key.project_id,
-                session.key.slot,
-            )
-        });
         for (session, process) in unlinked {
-            let cwd = process_cwd(process.pid).unwrap_or_else(|| session.current_directory());
-            let Some(reference) =
-                catalog.written_since(process.kind, &cwd, process.started_at, &claimed)
-            else {
+            // The literal resume argument or a writable log held by the job
+            // identifies its session. Cwd and mtime cannot prove ownership.
+            let reference = match &process.resume {
+                Some(reference) => catalog.find(reference, None).map(|item| item.reference),
+                None => catalog.reference_for_logs(process.kind, &agent_log_paths(&process)),
+            };
+            let Some(reference) = reference.filter(|reference| !claimed.contains(reference)) else {
                 continue;
             };
-            if session.agent_process() != Some(process) {
+            if session.agent_process().as_ref() != Some(&process) {
                 continue;
             }
             let mut link = lock(&session.agent_link);
-            if link.active(Some(process), now, true).is_none() {
+            if link.active(Some(&process), now, true).is_none() {
                 claimed.insert(reference.clone());
                 link.binding = Some(Binding {
                     reference,
@@ -149,7 +174,7 @@ impl TerminalManager {
         if sessions.iter().any(|session| {
             session.agent_process().is_some_and(|process| {
                 lock(&session.agent_link)
-                    .active(Some(process), now, false)
+                    .active(Some(&process), now, false)
                     .is_none()
             })
         }) {
@@ -174,12 +199,12 @@ impl TerminalManager {
             .collect()
     }
 
-    fn start_agent(
+    fn prepare_agent(
         &self,
         project: &crate::ProjectConfig,
         argv: Vec<String>,
         recovery: Option<RecoveryTarget>,
-    ) -> Result<TerminalSessionInfo, String> {
+    ) -> Result<PreparedAgent, String> {
         let (tool, reference) = parse_command(&argv).ok_or("无效的 AI 会话命令")?;
         let project_dir = crate::expand_tilde(&project.path);
         let project_dir = Path::new(&project_dir);
@@ -193,8 +218,8 @@ impl TerminalManager {
             .map_or(project_dir, |session| session.cwd.as_path());
         let available = available_tools(cwd, &project.env).contains(&tool);
         let mut command = argv.join(" ");
-        let requested_at;
-        let (session, result) = {
+        let launch_id = NEXT_LAUNCH.fetch_add(1, Ordering::Relaxed).to_string();
+        let session = {
             let _mutation = lock(&self.mutation);
             let current = if let Some(target) = recovery.as_ref() {
                 validate_slot(target.slot)?;
@@ -210,16 +235,19 @@ impl TerminalManager {
             } else {
                 None
             };
-            requested_at = now();
+            let requested_at = now();
             if let Some(reference) = &reference {
                 if let Some(existing) = self.all_sessions().into_iter().find(|session| {
                     let process = session.agent_process();
                     lock(&session.agent_link)
-                        .active(process, requested_at, true)
+                        .active(process.as_ref(), requested_at, true)
                         .as_ref()
                         == Some(reference)
                 }) {
-                    return Ok(existing.info());
+                    return Ok(PreparedAgent {
+                        session: existing.info(),
+                        launch_id: None,
+                    });
                 }
                 if summary.is_none() {
                     return Err("找不到该 AI 会话的本地记录".into());
@@ -251,15 +279,52 @@ impl TerminalManager {
                     self.get(&project.id, opened.session.slot)?
                 }
             };
-            let result = session.queue_command(command, check_idle)?;
-            if let Some(reference) = reference.clone() {
-                lock(&session.agent_link).binding = Some(Binding {
-                    reference,
-                    requested_at,
-                    process: None,
-                });
+            lock(&session.agent_link).pending = Some(PendingLaunch {
+                id: launch_id.clone(),
+                command,
+                reference,
+                check_idle,
+                expires_at: requested_at + PREPARE_WINDOW_MS,
+            });
+            session
+        };
+        Ok(PreparedAgent {
+            session: session.info(),
+            launch_id: Some(launch_id),
+        })
+    }
+
+    fn launch_agent(
+        &self,
+        project_id: &str,
+        slot: u8,
+        session_id: &str,
+        launch_id: &str,
+    ) -> Result<TerminalSessionInfo, String> {
+        let requested_at = now();
+        let (session, result, recovery) = {
+            let _mutation = lock(&self.mutation);
+            let session = self.get(project_id, slot)?;
+            if session.session_id != session_id {
+                return Err("AI 会话的终端已变更".into());
             }
-            (session, result)
+            let mut link = lock(&session.agent_link);
+            if link
+                .pending
+                .as_ref()
+                .is_none_or(|launch| launch.id != launch_id || requested_at > launch.expires_at)
+            {
+                return Err("AI 会话启动请求已失效".into());
+            }
+            let launch = link.pending.take().unwrap();
+            let result = session.queue_command(launch.command, launch.check_idle)?;
+            link.binding = launch.reference.map(|reference| Binding {
+                reference,
+                requested_at,
+                process: None,
+            });
+            drop(link);
+            (session, result, launch.check_idle)
         };
         let result = await_command(result);
         {
@@ -272,7 +337,7 @@ impl TerminalManager {
             {
                 link.binding = None;
             }
-            if result.is_ok() && recovery.is_some() {
+            if result.is_ok() && recovery {
                 link.recovery = None;
             }
         }
@@ -433,13 +498,29 @@ pub async fn terminal_agent_start(
     project_id: String,
     argv: Vec<String>,
     recovery: Option<RecoveryTarget>,
-) -> Result<TerminalSessionInfo, String> {
+) -> Result<PreparedAgent, String> {
     let manager = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        manager.start_agent(&project_config(&project_id)?, argv, recovery)
+        manager.prepare_agent(&project_config(&project_id)?, argv, recovery)
     })
     .await
     .map_err(|error| format!("打开 AI 会话失败：{error}"))?
+}
+
+#[tauri::command]
+pub async fn terminal_agent_launch(
+    state: State<'_, TerminalManager>,
+    project_id: String,
+    slot: u8,
+    session_id: String,
+    launch_id: String,
+) -> Result<TerminalSessionInfo, String> {
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        manager.launch_agent(&project_id, slot, &session_id, &launch_id)
+    })
+    .await
+    .map_err(|error| format!("启动 AI 会话失败：{error}"))?
 }
 
 #[cfg(test)]
@@ -478,11 +559,12 @@ mod tests {
             kind: AgentKind::Codex,
             pid: 10,
             started_at: 200,
+            resume: Some(reference.clone()),
         };
-        assert_eq!(link.active(Some(process), 10_000, false), Some(reference));
+        assert_eq!(link.active(Some(&process), 10_000, false), Some(reference));
         assert_eq!(
             link.active(
-                Some(AgentProcess {
+                Some(&AgentProcess {
                     started_at: 12_000,
                     ..process
                 }),
@@ -491,5 +573,27 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn same_kind_processes_cannot_claim_a_pending_resume_without_the_matching_id() {
+        let reference = SessionRef::new(AgentKind::Codex, ID).unwrap();
+        let other = SessionRef::new(AgentKind::Codex, "383c4fef-fd6e-452a-9130-bdbdea62bc02");
+        let mut link = AgentLink::new(None);
+        let mut process = AgentProcess {
+            kind: AgentKind::Codex,
+            pid: 10,
+            started_at: 200,
+            resume: None,
+        };
+        for resume in [None, other] {
+            link.binding = Some(Binding {
+                reference: reference.clone(),
+                requested_at: 100,
+                process: None,
+            });
+            process.resume = resume;
+            assert_eq!(link.active(Some(&process), 210, true), None);
+        }
     }
 }

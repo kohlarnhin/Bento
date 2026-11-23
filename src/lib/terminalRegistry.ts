@@ -207,7 +207,7 @@ function receiveOpened(session: TerminalSessionInfo) {
   publish({ ...session, ...mergeAgentSnapshot(session),
     title: sameSession ? current?.title ?? session.title : session.title,
     attentionAt: attentionTime(attention, sameSession ? current : undefined), opening: entry?.hydrating });
-  if (entry && entry.sessionId !== session.sessionId && !entry.hydrating) startHydrate(entry, false);
+  if (entry?.opened && entry.sessionId !== session.sessionId && !entry.hydrating) startHydrate(entry, false);
 }
 
 function receiveClosed(event: TerminalClosed) {
@@ -295,14 +295,15 @@ async function drainInput(entry: Entry) {
   try {
     while (!entry.disposed && entry.input.length) {
       const chunk = entry.input.shift()!;
-      if (chunk.sessionId !== entry.sessionId || !entry.alive || entry.hydrating) continue;
+      if (chunk.sessionId !== entry.expectedSessionId || chunk.sessionId !== entry.sessionId || !entry.alive || entry.hydrating) continue;
+      const target = { projectId: entry.projectId, slot: entry.slot, sessionId: chunk.sessionId };
       if (chunk.binary) {
         await invoke('terminal_write_bytes', {
-          projectId: entry.projectId, slot: entry.slot,
+          ...target,
           data: Array.from(chunk.data, (character) => character.charCodeAt(0) & 255),
         });
       } else {
-        await invoke('terminal_write', { projectId: entry.projectId, slot: entry.slot, data: chunk.data });
+        await invoke('terminal_write', { ...target, data: chunk.data });
       }
     }
   } catch (error) {
@@ -600,6 +601,57 @@ async function hydrate(entry: Entry, restart: boolean) {
   }
 }
 
+function openTerminal(entry: Entry) {
+  if (entry.opened) return;
+  entry.terminal.open(entry.container);
+  const textarea = entry.terminal.textarea!;
+  textarea.addEventListener('blur', () => { entry.ime.shiftDown = false; });
+  textarea.addEventListener('compositionstart', () => { entry.ime.composing = true; });
+  textarea.addEventListener('compositionend', () => {
+    entry.ime.composing = false;
+    entry.ime.pendingSend = true;
+    clearTimeout(entry.imePendingTimer);
+    // Registered after open(): xterm queues its composition finalization before this timer.
+    entry.imePendingTimer = setTimeout(() => {
+      entry.ime.pendingSend = false;
+      entry.imePendingTimer = undefined;
+    }, 0);
+  });
+  entry.opened = true;
+}
+
+function inactiveTerminalHost() {
+  if (!registry.inactiveHost) {
+    const host = document.createElement('div');
+    host.hidden = true;
+    host.inert = true;
+    document.body.appendChild(host);
+    registry.inactiveHost = host;
+  }
+  return registry.inactiveHost;
+}
+
+export async function prepareTerminalInput(session: TerminalSessionInfo) {
+  await initTerminalRegistry(registry.showError);
+  const { projectId, slot, sessionId } = session;
+  const key = terminalKey(projectId, slot);
+  const ensureCurrent = () => {
+    if (registry.snapshot[key]?.sessionId !== sessionId || registry.closedSessions.has(sessionId)) {
+      throw new Error('AI 会话的终端已变更');
+    }
+  };
+  ensureCurrent();
+  const entry = registry.entries.get(key) ?? createEntry(projectId, slot);
+  if (!entry.container.isConnected) inactiveTerminalHost().appendChild(entry.container);
+  // Start the CLI only after its own emulator can answer synchronous PTY queries.
+  openTerminal(entry);
+  if (entry.sessionId !== sessionId || entry.opening) await startHydrate(entry, false);
+  // Let the emulator consume the pending snapshot before the first live query.
+  if (!entry.disposed) await new Promise<void>(resolve => entry.terminal.write('', resolve));
+  ensureCurrent();
+  if (entry.sessionId !== sessionId || !entry.alive) throw new Error('AI 会话的终端尚未就绪');
+}
+
 async function showTerminal(entry: Entry, shouldFocus: () => boolean) {
   await initTerminalRegistry(registry.showError);
   // A missing bundled face must not keep the terminal from opening; the fallback fonts still work.
@@ -609,23 +661,7 @@ async function showTerminal(entry: Entry, shouldFocus: () => boolean) {
   });
   if (entry.disposed || !visible(entry)) return;
   entry.terminal.options.fontFamily = fontFamily;
-  if (!entry.opened) {
-    entry.terminal.open(entry.container);
-    const textarea = entry.terminal.textarea!;
-    textarea.addEventListener('blur', () => { entry.ime.shiftDown = false; });
-    textarea.addEventListener('compositionstart', () => { entry.ime.composing = true; });
-    textarea.addEventListener('compositionend', () => {
-      entry.ime.composing = false;
-      entry.ime.pendingSend = true;
-      clearTimeout(entry.imePendingTimer);
-      // Registered after open(): xterm queues its composition finalization before this timer.
-      entry.imePendingTimer = setTimeout(() => {
-        entry.ime.pendingSend = false;
-        entry.imePendingTimer = undefined;
-      }, 0);
-    });
-    entry.opened = true;
-  }
+  openTerminal(entry);
   fitTerminal(entry.projectId, entry.slot, shouldFocus());
   if (!entry.sessionId && !entry.opening) void startHydrate(entry, false);
 }
@@ -667,14 +703,7 @@ export function attachTerminal(projectId: string, slot: number, host: HTMLDivEle
       return;
     }
     // Keep xterm's renderer mounted while its project or slot is hidden.
-    if (!registry.inactiveHost) {
-      const inactiveHost = document.createElement('div');
-      inactiveHost.hidden = true;
-      inactiveHost.inert = true;
-      document.body.appendChild(inactiveHost);
-      registry.inactiveHost = inactiveHost;
-    }
-    registry.inactiveHost.appendChild(entry.container);
+    inactiveTerminalHost().appendChild(entry.container);
   };
 }
 
