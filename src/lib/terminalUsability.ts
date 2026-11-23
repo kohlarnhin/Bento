@@ -128,16 +128,32 @@ export function agentDurationRefreshDelay(elapsedMs: number): number {
   return step - elapsed % step + Math.max(0, -elapsedMs);
 }
 
-export function firstOpenedTerminalSlot(projectId: string, terminals: readonly {
+interface TerminalTab {
   projectId: string;
   slot: number;
   sessionId?: string;
-}[]): number | undefined {
-  let first: number | undefined;
-  for (const terminal of terminals) {
-    if (terminal.projectId === projectId && terminal.sessionId && (first === undefined || terminal.slot < first)) {
-      first = terminal.slot;
-    }
-  }
-  return first;
+  tabOrder?: number;
+}
+
+export function projectTerminalSlots(projectId: string, terminals: readonly TerminalTab[]): number[] {
+  return terminals.filter(tab => tab.projectId === projectId && tab.sessionId)
+    .sort((a, b) => (a.tabOrder ?? a.slot) - (b.tabOrder ?? b.slot) || a.slot - b.slot)
+    .map(tab => tab.slot);
+}
+
+export function terminalDisplayNumber(slots: readonly number[], slot: number): number | undefined {
+  const index = slots.indexOf(slot);
+  return index < 0 ? undefined : index + 1;
+}
+
+export function terminalSelectionAfterClose(slot: number, before: readonly number[], remaining: readonly number[]): number | undefined {
+  if (remaining.includes(slot)) return slot;
+  const index = before.indexOf(slot);
+  if (index < 0) return remaining[0];
+  const exists = (candidate: number) => remaining.includes(candidate);
+  return before.slice(index + 1).find(exists) ?? before.slice(0, index).reverse().find(exists) ?? remaining[0];
+}
+
+export function firstOpenedTerminalSlot(projectId: string, terminals: readonly TerminalTab[]): number | undefined {
+  return projectTerminalSlots(projectId, terminals)[0];
 }

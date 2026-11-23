@@ -47,12 +47,27 @@ pub fn install_menu(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         &MenuItem::with_id(app, "apphub-quit", "退出 Bento", true, Some("CmdOrCtrl+Q"))?,
         index,
     )?;
+    let close_text = PredefinedMenuItem::close_window(app, None)?.text()?;
+    for submenu in items.iter().filter_map(|item| item.as_submenu()) {
+        if let Some(index) = submenu.items()?.iter().position(|item| {
+            item.as_predefined_menuitem().is_some_and(|item| item.text().ok().as_deref() == Some(&close_text))
+        }) {
+            submenu.remove_at(index)?;
+            submenu.insert(&MenuItem::with_id(app, "apphub-close", &close_text, true, Some("CmdOrCtrl+W"))?, index)?;
+        }
+    }
     #[cfg(debug_assertions)]
     crate::debug_e2e::record_menu(before, crate::debug_e2e::menu_snapshot(&menu)?);
     app.set_menu(menu)?;
     app.on_menu_event(|app, event| {
         if event.id().as_ref() == "apphub-quit" {
             request(app);
+        } else if event.id().as_ref() == "apphub-close" {
+            if let Some(panel) = app.get_webview_window(crate::tray::PANEL).filter(|panel| panel.is_focused().unwrap_or(false)) {
+                let _ = panel.hide();
+            } else if app.get_webview_window("main").is_some_and(|window| window.is_visible().unwrap_or(false)) {
+                let _ = app.emit_to("main", "bento-close-shortcut", ());
+            }
         } else if event.id().as_ref() == "apphub-check-updates" {
             crate::reopen_main_window(app);
             let _ = app.emit("bento-check-updates", ());

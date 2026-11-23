@@ -1,15 +1,39 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { agentDurationRefreshDelay, agentsByProject, clampTerminalFontSize, createTitlePublisher, firstOpenedTerminalSlot, formatAgentDuration, nextAttentionTarget, normalizeTerminalTitle, terminalsNeedingAttention } from '../src/lib/terminalUsability.ts';
+import { agentDurationRefreshDelay, agentsByProject, clampTerminalFontSize, createTitlePublisher, firstOpenedTerminalSlot, formatAgentDuration, nextAttentionTarget, normalizeTerminalTitle, projectTerminalSlots, terminalDisplayNumber, terminalSelectionAfterClose, terminalsNeedingAttention } from '../src/lib/terminalUsability.ts';
 
-test('project navigation takes the earliest opened label, including an exited session', () => {
+test('project navigation takes the earliest registered tab and skips placeholders', () => {
   const other = { projectId: 'other', slot: 1, sessionId: 'other' };
   const placeholder = { projectId: 'project', slot: 1, opening: true };
   const third = { projectId: 'project', slot: 3, sessionId: 'third', alive: true };
-  const second = { projectId: 'project', slot: 2, sessionId: 'second', alive: false };
+  const second = { projectId: 'project', slot: 2, sessionId: 'second', alive: true };
   assert.equal(firstOpenedTerminalSlot('project', [other, placeholder]), undefined);
   assert.equal(firstOpenedTerminalSlot('project', [third, other, placeholder, second]), 2);
   assert.equal(firstOpenedTerminalSlot('project', [third, other, placeholder]), 3);
+});
+
+test('terminal numbering closes gaps and appends a recycled slot to the end', () => {
+  const second = { projectId: 'project', slot: 2, sessionId: 'two', tabOrder: 10 };
+  const third = { projectId: 'project', slot: 3, sessionId: 'three', tabOrder: 11 };
+  const appended = { projectId: 'project', slot: 1, sessionId: 'new', tabOrder: 12 };
+  const remaining = projectTerminalSlots('project', [{ projectId: 'project', slot: 1 }, third, second]);
+  assert.deepEqual(remaining, [2, 3]);
+  assert.deepEqual([1, 2, 3].map(slot => terminalDisplayNumber(remaining, slot)), [undefined, 1, 2]);
+  const reopened = projectTerminalSlots('project', [appended, third, second]);
+  assert.deepEqual(reopened, [2, 3, 1]);
+  assert.equal(terminalDisplayNumber(reopened, 1), 3);
+  assert.equal(firstOpenedTerminalSlot('project', [appended, third, second]), 2);
+  assert.deepEqual(projectTerminalSlots('project', []), []);
+});
+
+test('closing a selected tab chooses the right neighbor, then the left, then overview', () => {
+  const before = [2, 3, 1, 4];
+  assert.equal(terminalSelectionAfterClose(2, before, [3, 1, 4]), 3);
+  assert.equal(terminalSelectionAfterClose(3, before, [2, 1, 4]), 1);
+  assert.equal(terminalSelectionAfterClose(4, before, [2, 3, 1]), 1);
+  assert.equal(terminalSelectionAfterClose(3, before, [1, 4]), 1);
+  assert.equal(terminalSelectionAfterClose(3, before, [2, 3, 4]), 3);
+  assert.equal(terminalSelectionAfterClose(1, [1], []), undefined);
 });
 
 for (const spinner of ['✳', '✶', '✻', '✽', '·', '✢', '⠋', '⠙', '⠸', '⣿', '🌱', '']) {

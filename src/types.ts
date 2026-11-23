@@ -167,6 +167,7 @@ export interface TerminalSessionInfo {
   projectId: string;
   slot: number;
   sessionId: string;
+  tabOrder?: number;
   alive: boolean;
   attention: boolean;
   agent?: TerminalAgent | null;

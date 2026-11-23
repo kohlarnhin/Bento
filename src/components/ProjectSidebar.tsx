@@ -4,8 +4,8 @@ import { ArrowDownToLine, Check, ChevronRight, FolderOpen, FolderPlus, GripVerti
 import { toast } from 'sonner';
 import type { PortConflict, ProjectConfig, ProjectGroup, ProjectSelection, ProjectStatus, Snippet, TerminalCompletion } from '../types';
 import { moveProjectOrder, sidebarSections, type SidebarFilter, type SidebarSection } from '../lib/sidebarModel';
-import { getTerminalSnapshot, subscribeTerminals } from '../lib/terminalRegistry';
-import { agentMinutesSince, agentNames, agentStateLabels, type ProjectAgent } from '../lib/terminalUsability';
+import { getProjectTerminalSlots, getTerminalSnapshot, subscribeTerminals } from '../lib/terminalRegistry';
+import { agentMinutesSince, agentNames, agentStateLabels, terminalDisplayNumber, type ProjectAgent } from '../lib/terminalUsability';
 import { cn } from '../lib/utils';
 import { recordRender } from '../lib/renderMetrics';
 import { useSidebarMotion } from '../hooks/useSidebarMotion';
@@ -335,10 +335,11 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
     const shortcutIndex = visibleProjects.filter(project => !project.archived).findIndex(item => item.id === project.id);
     const choice = projectAgents.get(project.id);
     const agent = choice?.agent;
+    const number = choice && terminalDisplayNumber(getProjectTerminalSlots(project.id), choice.slot);
     const minutesSinceCompletion = agent?.state === 'done' ? agentMinutesSince(agent.stateStartedAt, Date.now()) : 0;
     const agentDetail = choice && [
       agentNames[choice.agent.kind],
-      (choice.multiple || choice.agent.state === 'waiting') && `终端 ${choice.slot}`,
+      number && (choice.multiple || choice.agent.state === 'waiting') && `终端 ${number}`,
       choice.agent.state === 'done' && (minutesSinceCompletion ? `${minutesSinceCompletion} 分钟前` : '刚刚'),
       choice.agent.state === 'thinking' && !choice.multiple && agentStateLabels.thinking,
     ].filter(Boolean).join(' · ');

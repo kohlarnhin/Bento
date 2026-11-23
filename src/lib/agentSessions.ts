@@ -67,7 +67,15 @@ export function useAgentRecoveries(terminals: Record<string, TerminalStatus>) {
   const [dismissed, setDismissed] = useState<ReadonlySet<string>>(new Set());
   const dismiss = useCallback((sessionId: string) => setDismissed(previous => new Set(previous).add(sessionId)), []);
   useEffect(() => {
-    if (!batch) return;
+    const pending = new Set(batch.split(','));
+    setDismissed(previous => {
+      const remaining = new Set([...previous].filter(id => pending.has(id)));
+      return remaining.size === previous.size ? previous : remaining;
+    });
+    if (!batch) {
+      setResolved(previous => Object.keys(previous).length ? {} : previous);
+      return;
+    }
     let current = true;
     void loadAgentIndex<AgentRecoveries>('terminal_agent_recoveries', {}, result => {
       if (current) setResolved(result);

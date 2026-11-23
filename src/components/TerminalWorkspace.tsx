@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { dashboardLog, dashboardServices, logTime } from '../lib/dashboard';
 import { getTerminal, terminalKey, type TerminalStatus } from '../lib/terminalRegistry';
 import type { AgentRecoveries, OpenAgent } from '../lib/agentSessions';
-import { agentNames, agentNeedsAttention, agentStateLabels } from '../lib/terminalUsability';
+import { agentNames, agentNeedsAttention, agentStateLabels, terminalDisplayNumber } from '../lib/terminalUsability';
 import { useProjectLogLines } from '../lib/useProjectLogs';
 import type { ProjectConfig, Service, Snippet, SnippetChange } from '../types';
 import { ProjectTerminal, type ProjectTerminalControls, type TerminalDimensions } from './ProjectTerminal';
@@ -93,10 +93,11 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
   const dragFrame = useRef<DOMRect>();
   const services = useMemo(() => dashboardServices(project), [project.port, project.services]);
   const logOptions = [{ value: 'logs', label: '合并日志' }, ...services.map(service => ({ value: `log:${service.id}`, label: `${service.name} · 日志` }))];
-  const peers = slots.filter(slot => slot !== activeSlot && terminals[terminalKey(project.id, slot)]?.sessionId);
-  const options = [...peers.map(slot => ({ value: `terminal:${slot}`, label: `终端 ${slot}` })), ...logOptions];
+  const peers = slots.filter(slot => slot !== activeSlot);
+  const options = [...peers.map(slot => ({ value: `terminal:${slot}`, label: `终端 ${terminalDisplayNumber(slots, slot)}` })), ...logOptions];
   const selected = options.some(option => option.value === source) ? source! : logOptions[services.length > 1 ? 1 : 0].value;
   const rightSlot = split ? peers.find(slot => selected === `terminal:${slot}`) : undefined;
+  const activeNumber = terminalDisplayNumber(slots, activeSlot)!;
   const rightService = selected.startsWith('log:') ? selected.slice('log:'.length) : undefined;
   const inputSlot = (inputPane === 'right' ? rightSlot : undefined) ?? activeSlot;
   const currentInputSlot = useRef(inputSlot);
@@ -116,6 +117,9 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
   useEffect(() => { onFocusedSlot(project.id, inputSlot, activeSlot, rightSlot); },
     [project.id, inputSlot, activeSlot, rightSlot, onFocusedSlot]);
   useLayoutEffect(() => setInputPane('left'), [activeSlot]);
+  useEffect(() => {
+    if (source?.startsWith('terminal:') && !slots.includes(Number(source.slice('terminal:'.length)))) setSource(undefined);
+  }, [source, slots]);
   useLayoutEffect(() => {
     if (!interactive || !ready) return;
     const frame = requestAnimationFrame(() => getTerminal(project.id, currentInputSlot.current)?.focus());
@@ -150,8 +154,8 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
     <div ref={panes} className="terminal-panes" data-split={split || undefined}
       style={split ? { gridTemplateColumns: `minmax(0, ${splitWidth}fr) 1px minmax(0, ${100 - splitWidth}fr)` } : undefined}>
       <div className="terminal-pane-frame">
-        {split && <div className="terminal-pane-heading">终端 {activeSlot}{inputSlot === activeSlot && context?.shell && ` · ${shell}`}</div>}
-        <ProjectTerminal project={project} activeSlot={activeSlot} ref={leftControls} interactive={interactive}
+        {split && <div className="terminal-pane-heading">终端 {activeNumber}{inputSlot === activeSlot && context?.shell && ` · ${shell}`}</div>}
+        <ProjectTerminal project={project} activeSlot={activeSlot} terminalNumber={activeNumber} ref={leftControls} interactive={interactive}
           agentRecoveries={agentRecoveries} onOpenAgent={onOpenAgent} onDismissAgentRecovery={onDismissAgentRecovery}
           onReady={onReady} onFocus={focusLeft} onResize={resize} />
       </div>
@@ -180,7 +184,8 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
               onValueChange={sourceChanged} className="terminal-source-select" popupClassName="terminal-chrome" />
           </div>
           {rightSlot === undefined ? <ServiceLogPane key={selected} projectId={project.id} services={services} serviceId={rightService} /> :
-            <ProjectTerminal project={project} activeSlot={rightSlot} ref={rightControls} interactive={interactive} onFocus={focusRight} onResize={resize}
+            <ProjectTerminal project={project} activeSlot={rightSlot} terminalNumber={terminalDisplayNumber(slots, rightSlot)!}
+              ref={rightControls} interactive={interactive} onFocus={focusRight} onResize={resize}
               agentRecoveries={agentRecoveries} onOpenAgent={onOpenAgent} onDismissAgentRecovery={onDismissAgentRecovery} />}
         </div>
       </>}

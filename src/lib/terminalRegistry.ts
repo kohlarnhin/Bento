@@ -11,9 +11,8 @@ import '@xterm/xterm/css/xterm.css';
 import type { TerminalAgentEvent, TerminalAttention, TerminalCompletionEvent, TerminalOpenResult, TerminalOutput, TerminalSessionInfo } from '../types';
 import { formatDroppedPaths, recoverShiftedImeInput, trackBareShift, transformTypedInput, type TerminalImeState } from './terminalInput';
 import { DEFAULT_TERMINAL_FONT_SIZE, TERMINAL_FALLBACK_FONT_FAMILY, TERMINAL_FONT_FAMILY, TERMINAL_LINE_HEIGHT, TERMINAL_THEME } from './terminalAppearance';
-import { createTitlePublisher } from './terminalUsability';
+import { createTitlePublisher, projectTerminalSlots } from './terminalUsability';
 
-type TerminalExit = Pick<TerminalSessionInfo, 'projectId' | 'slot' | 'sessionId' | 'exitCode'>;
 type TerminalClosed = Pick<TerminalSessionInfo, 'projectId' | 'slot' | 'sessionId'>;
 export interface TerminalStatus extends Partial<TerminalSessionInfo> {
   projectId: string;
@@ -46,7 +45,6 @@ interface Entry {
   seq: number;
   hydrating: boolean;
   buffered: TerminalOutput[];
-  exits: TerminalExit[];
   attentions: TerminalAttention[];
   completions: TerminalCompletionEvent[];
   opening?: Promise<void>;
@@ -69,7 +67,6 @@ interface Registry {
   subscribers: Set<() => void>;
   initialized?: Promise<void>;
   closedSessions: Set<string>;
-  exits: Map<string, TerminalExit>;
   agentEvents: Map<string, TerminalAgentEvent>;
   fontSize: number;
   showError: (message: string) => void;
@@ -77,7 +74,7 @@ interface Registry {
 
 // Retain instances and listeners through module HMR as well as React StrictMode remounts.
 const registry: Registry = import.meta.hot?.data.terminalRegistry ?? {
-  entries: new Map(), snapshot: {}, subscribers: new Set(), closedSessions: new Set(), exits: new Map(), restoredSlots: new Map(),
+  entries: new Map(), snapshot: {}, subscribers: new Set(), closedSessions: new Set(), restoredSlots: new Map(),
   agentEvents: new Map(), fontSize: DEFAULT_TERMINAL_FONT_SIZE, showError: () => {},
 };
 if (import.meta.hot) {
@@ -89,7 +86,7 @@ if (import.meta.hot) {
 export const terminalKey = (projectId: string, slot: number) => `${projectId}#${slot}`;
 
 export function getProjectTerminalSlots(projectId: string, snapshot = registry.snapshot): number[] {
-  return [...new Set([1, ...Object.values(snapshot).filter(status => status.projectId === projectId).map(status => status.slot)])].sort((a, b) => a - b);
+  return projectTerminalSlots(projectId, Object.values(snapshot));
 }
 
 function publish(status: TerminalStatus) {
@@ -163,12 +160,6 @@ function receiveOutput(entry: Entry, output: TerminalOutput) {
   entry.terminal.write(output.data);
 }
 
-function receiveExit(entry: Entry, event: TerminalExit) {
-  if (entry.sessionId !== event.sessionId) return;
-  entry.alive = false;
-  publish({ ...registry.snapshot[terminalKey(entry.projectId, entry.slot)], ...event, alive: false, attention: false, attentionAt: undefined, agent: null });
-}
-
 function receiveAttention(event: TerminalAttention) {
   const current = registry.snapshot[terminalKey(event.projectId, event.slot)];
   if (!current || current.sessionId !== event.sessionId) return;
@@ -182,7 +173,7 @@ function receiveCompletion(event: TerminalCompletionEvent) {
 }
 
 function receiveAgent(event: TerminalAgentEvent) {
-  if (registry.closedSessions.has(event.sessionId) || registry.exits.has(event.sessionId)) return;
+  if (registry.closedSessions.has(event.sessionId)) return;
   const current = registry.snapshot[terminalKey(event.projectId, event.slot)];
   if (current?.sessionId === event.sessionId) {
     if (current.alive && event.agentRevision > (current.agentRevision ?? 0)) publish({ ...current, ...event });
@@ -201,7 +192,7 @@ function mergeAgentSnapshot(session: TerminalSessionInfo): Pick<TerminalSessionI
       latest = { ...latest, agent: source.agent, agentRevision: source.agentRevision };
     }
   }
-  return { agent: session.alive && !registry.exits.has(session.sessionId) ? latest.agent : null, agentRevision: latest.agentRevision };
+  return { agent: session.alive ? latest.agent : null, agentRevision: latest.agentRevision };
 }
 
 function receiveOpened(session: TerminalSessionInfo) {
@@ -212,27 +203,30 @@ function receiveOpened(session: TerminalSessionInfo) {
   const sameSession = current?.sessionId === session.sessionId;
   if (!sameSession) entry?.title.reset();
   if (entry) entry.expectedSessionId = session.sessionId;
-  const exited = registry.exits.get(session.sessionId);
-  const attention = !exited && session.attention;
-  publish({ ...session, ...mergeAgentSnapshot(session), ...(exited ? { ...exited, alive: false, attention: false } : {}),
+  const attention = session.attention;
+  publish({ ...session, ...mergeAgentSnapshot(session),
     title: sameSession ? current?.title ?? session.title : session.title,
     attentionAt: attentionTime(attention, sameSession ? current : undefined), opening: entry?.hydrating });
   if (entry && entry.sessionId !== session.sessionId && !entry.hydrating) startHydrate(entry, false);
 }
 
 function receiveClosed(event: TerminalClosed) {
+  if (registry.closedSessions.has(event.sessionId)) return;
   registry.closedSessions.add(event.sessionId);
-  registry.exits.delete(event.sessionId);
   registry.agentEvents.delete(event.sessionId);
   const key = terminalKey(event.projectId, event.slot);
   const current = registry.snapshot[key];
   const entry = registry.entries.get(key);
   // A delayed close of the old session must never dispose its replacement.
-  if (current?.sessionId && current.sessionId !== event.sessionId) return;
-  if (entry?.expectedSessionId && entry.expectedSessionId !== event.sessionId) return;
+  const knownSession = entry?.expectedSessionId ?? current?.sessionId;
+  if (knownSession && knownSession !== event.sessionId) return;
+  if (registry.restoredSlots.get(event.projectId) === event.slot) registry.restoredSlots.delete(event.projectId);
   if (entry) {
     entry.disposed = true;
     entry.input = [];
+    entry.buffered = [];
+    entry.attentions = [];
+    entry.completions = [];
     entry.resize = undefined;
     clearTimeout(entry.imePendingTimer);
     entry.title.reset();
@@ -260,18 +254,6 @@ export function initTerminalRegistry(showError: (message: string) => void): Prom
           const entry = registry.entries.get(terminalKey(payload.projectId, payload.slot));
           if (entry?.hydrating) entry.buffered.push(payload);
           else if (entry) receiveOutput(entry, payload);
-        })));
-        unlisteners.push(await listen<TerminalExit>('terminal-exit', ({ payload }) => dispatch(() => {
-          if (registry.closedSessions.has(payload.sessionId)) return;
-          registry.exits.set(payload.sessionId, payload);
-          registry.agentEvents.delete(payload.sessionId);
-          const key = terminalKey(payload.projectId, payload.slot);
-          const entry = registry.entries.get(key);
-          if (entry?.hydrating) entry.exits.push(payload);
-          else if (entry) receiveExit(entry, payload);
-          if (registry.snapshot[key]?.sessionId === payload.sessionId) {
-            publish({ ...registry.snapshot[key], ...payload, alive: false, attention: false, attentionAt: undefined, agent: null });
-          }
         })));
         unlisteners.push(await listen<TerminalAttention>('terminal-attention', ({ payload }) => dispatch(() => {
           const entry = registry.entries.get(terminalKey(payload.projectId, payload.slot));
@@ -372,7 +354,7 @@ function createEntry(projectId: string, slot: number): Entry {
       if (entry.disposed || !current || current.sessionId !== entry.sessionId || current.title === (title || undefined)) return;
       publish({ ...current, title: title || undefined });
     }),
-    hydrating: false, buffered: [], exits: [], attentions: [], completions: [], input: [], writing: false, resizing: false,
+    hydrating: false, buffered: [], attentions: [], completions: [], input: [], writing: false, resizing: false,
     lastPrintable: '', pasting: false,
     ime: { shiftDown: false, composing: false, pendingSend: false },
   };
@@ -538,17 +520,19 @@ export function fitVisibleTerminals() {
 
 function startHydrate(entry: Entry, restart: boolean): Promise<void> {
   if (entry.opening) return entry.opening;
+  const key = terminalKey(entry.projectId, entry.slot);
+  const current = registry.snapshot[key];
+  if (entry.disposed || !current?.sessionId) return Promise.resolve();
+  entry.expectedSessionId = current.sessionId;
   entry.hydrating = true;
   entry.buffered = [];
-  entry.exits = [];
   entry.attentions = [];
   entry.completions = [];
   entry.input = [];
   entry.resize = undefined;
   entry.lastPrintable = '';
   entry.title.reset();
-  const key = terminalKey(entry.projectId, entry.slot);
-  publish({ ...registry.snapshot[key], projectId: entry.projectId, slot: entry.slot, opening: true, error: undefined, title: undefined });
+  publish({ ...current, opening: true, error: undefined });
   entry.opening = hydrate(entry, restart).finally(() => {
     if (entry.disposed) return;
     entry.hydrating = false;
@@ -560,14 +544,18 @@ function startHydrate(entry: Entry, restart: boolean): Promise<void> {
 
 async function hydrate(entry: Entry, restart: boolean) {
   const key = terminalKey(entry.projectId, entry.slot);
+  const sessionId = entry.expectedSessionId;
+  if (!sessionId || entry.disposed) return;
+  const args = { projectId: entry.projectId, slot: entry.slot, cols: entry.terminal.cols, rows: entry.terminal.rows };
   try {
     let result = await invoke<TerminalOpenResult>(restart ? 'terminal_restart' : 'terminal_open', {
-      projectId: entry.projectId, slot: entry.slot, cols: entry.terminal.cols, rows: entry.terminal.rows,
+      ...args, sessionId,
     });
+    if (restart && entry.expectedSessionId === sessionId) entry.expectedSessionId = result.session.sessionId;
     // An external restart may overtake an in-flight snapshot. Keep buffering until it matches.
     while (!entry.disposed && entry.expectedSessionId && result.session.sessionId !== entry.expectedSessionId) {
       result = await invoke<TerminalOpenResult>('terminal_open', {
-        projectId: entry.projectId, slot: entry.slot, cols: entry.terminal.cols, rows: entry.terminal.rows,
+        ...args, sessionId: entry.expectedSessionId,
       });
     }
     if (entry.disposed || registry.closedSessions.has(result.session.sessionId)) return;
@@ -584,13 +572,9 @@ async function hydrate(entry: Entry, restart: boolean) {
     entry.terminal.write(result.snapshot.data);
     publish({ ...result.session, ...mergeAgentSnapshot(result.session), attentionAt: attentionTime(result.session.attention, registry.snapshot[key]) });
     entry.buffered.sort((a, b) => a.seq - b.seq).forEach(output => receiveOutput(entry, output));
-    entry.exits.forEach(event => receiveExit(entry, event));
-    const exited = registry.exits.get(entry.sessionId);
-    if (exited) receiveExit(entry, exited);
     entry.attentions.forEach(receiveAttention);
     entry.completions.forEach(receiveCompletion);
     entry.buffered = [];
-    entry.exits = [];
     entry.attentions = [];
     entry.completions = [];
   } catch (error) {
@@ -599,13 +583,15 @@ async function hydrate(entry: Entry, restart: boolean) {
     const sessions = await invoke<TerminalSessionInfo[]>('terminal_list').catch(() => undefined);
     if (entry.disposed) return;
     const session = sessions?.find(item => item.projectId === entry.projectId && item.slot === entry.slot);
-    if (sessions) {
-      entry.sessionId = session?.sessionId;
-      entry.expectedSessionId = session?.sessionId;
-      entry.alive = !!session?.alive;
+    if (sessions && !session) {
+      receiveClosed({ projectId: entry.projectId, slot: entry.slot, sessionId: entry.expectedSessionId ?? sessionId });
+      return;
+    }
+    if (session && session.sessionId !== sessionId) {
+      entry.expectedSessionId = session.sessionId;
+      return hydrate(entry, false);
     }
     entry.buffered.sort((a, b) => a.seq - b.seq).forEach(output => receiveOutput(entry, output));
-    entry.exits.forEach(event => receiveExit(entry, event));
     publish({ ...(sessions ? session && { ...session, ...mergeAgentSnapshot(session) } : registry.snapshot[key]),
       projectId: entry.projectId, slot: entry.slot, opening: false, error: message });
     entry.attentions.forEach(receiveAttention);
@@ -692,9 +678,11 @@ export function attachTerminal(projectId: string, slot: number, host: HTMLDivEle
   };
 }
 
-export async function restartTerminal(projectId: string, slot: number) {
+export async function restartTerminal(projectId: string, slot: number, sessionId: string) {
   await initTerminalRegistry(registry.showError);
-  const entry = registry.entries.get(terminalKey(projectId, slot)) ?? createEntry(projectId, slot);
+  const key = terminalKey(projectId, slot);
+  if (registry.snapshot[key]?.sessionId !== sessionId) return;
+  const entry = registry.entries.get(key) ?? createEntry(projectId, slot);
   return startHydrate(entry, true);
 }
 
@@ -718,8 +706,7 @@ export function registerTerminalResult(session: TerminalSessionInfo) {
   }
 }
 
-export async function closeTerminal(projectId: string, slot: number) {
-  const current = registry.snapshot[terminalKey(projectId, slot)];
-  await invoke('terminal_close', { projectId, slot });
-  if (current?.sessionId) receiveClosed({ projectId, slot, sessionId: current.sessionId });
+export async function closeTerminal(projectId: string, slot: number, sessionId: string) {
+  await invoke('terminal_close', { projectId, slot, sessionId });
+  receiveClosed({ projectId, slot, sessionId });
 }

@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useImperativeHandle, useRef, useState, type RefObject } from 'react';
 import { ChevronDown, Plus, RotateCcw, Sparkle, X } from 'lucide-react';
 import { toast } from 'sonner';
 import type { ProjectView, TerminalAgent } from '../types';
 import { closeTerminal, getTerminalSnapshot, restartTerminal, terminalKey, type TerminalStatus } from '../lib/terminalRegistry';
-import { agentNames } from '../lib/terminalUsability';
+import { agentNames, terminalDisplayNumber } from '../lib/terminalUsability';
 import { loadAgentIndex, type AgentMenuData, type OpenAgent } from '../lib/agentSessions';
 import { AgentSessionMenuItems } from './AgentSessionActions';
 import { SidebarMenu } from './SidebarMenu';
@@ -37,12 +37,12 @@ interface Props {
   onSelectTerminal: (slot: number) => void;
   onNewTerminal: () => Promise<void>;
   onOpenAgent: OpenAgent;
-  onTerminalClosed: (slot: number) => void;
+  closeActiveTab: RefObject<() => void>;
 }
 
 export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, maxTerminals,
-  onSelectView, onSelectTerminal, onNewTerminal, onOpenAgent, onTerminalClosed }: Props) {
-  const [menu, setMenu] = useState<{ slot: number; x: number; y: number }>();
+  onSelectView, onSelectTerminal, onNewTerminal, onOpenAgent, closeActiveTab }: Props) {
+  const [menu, setMenu] = useState<{ slot: number; sessionId: string; x: number; y: number }>();
   const [confirmation, setConfirmation] = useState<Request>();
   const [creating, setCreating] = useState(false);
   const [agentMenuOpen, setAgentMenuOpen] = useState(false);
@@ -84,11 +84,8 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
     executing.current = true;
     setBusy(true);
     try {
-      if (action === 'restart') await restartTerminal(projectId, slot);
-      else {
-        await closeTerminal(projectId, slot);
-        onTerminalClosed(slot);
-      }
+      if (action === 'restart') await restartTerminal(projectId, slot, sessionId);
+      else await closeTerminal(projectId, slot, sessionId);
       setConfirmation(undefined);
     } catch (error) {
       toast.error(`${actionLabel[action]}终端失败：${error}`);
@@ -105,9 +102,17 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
     if (status.alive) setConfirmation(next);
     else void perform(next);
   }
+  useImperativeHandle(closeActiveTab, () => () => {
+    closeMenu();
+    closeAgentMenu();
+    request('close', activeSlot);
+  });
 
   const menuStatus = menu && terminals[terminalKey(projectId, menu.slot)];
-  const disabled = busy || !menuStatus?.sessionId || menuStatus.opening;
+  const menuNumber = menu && menuStatus?.sessionId === menu.sessionId ? terminalDisplayNumber(slots, menu.slot) : undefined;
+  const confirmationNumber = confirmation && terminals[terminalKey(projectId, confirmation.slot)]?.sessionId === confirmation.sessionId
+    ? terminalDisplayNumber(slots, confirmation.slot) : undefined;
+  const disabled = busy || menuStatus?.opening;
   const add = <div className="terminal-tab-add-wrap" data-view-control aria-hidden={!terminalView || undefined}>
     <ActionTooltip label={createLabel}>
       <span title={createLabel}>
@@ -129,23 +134,24 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
   const agentCounts = { claude: 0, codex: 0 };
   const tabs = [
     { value: 'overview', label: <TabLabel label="概览" /> },
-    ...slots.map(slot => {
+    ...slots.map((slot, index) => {
       const status = terminals[terminalKey(projectId, slot)];
       const agent = status?.agent;
       const number = agent ? ++agentCounts[agent.kind] : 0;
-      const slotName = `终端 ${slot}`;
+      const slotName = `终端 ${index + 1}`;
       const label = agent ? agentNames[agent.kind] + (number > 1 ? ` ${number}` : '') : slotName;
       return {
         value: `terminal:${slot}`, title: agent && status?.title ? `${slotName} · ${status.title}` : status?.title || slotName,
         label: <TabLabel label={label} agent={agent} attention={status?.attention} completion={!!status?.completion} />,
         onContextMenu: (event: React.MouseEvent<HTMLButtonElement>) => {
           event.preventDefault();
+          if (!status?.sessionId) return;
           closeAgentMenu();
           const bounds = event.currentTarget.getBoundingClientRect();
-          setMenu({ slot, x: event.clientX || bounds.left, y: event.clientY || bounds.bottom });
+          setMenu({ slot, sessionId: status.sessionId, x: event.clientX || bounds.left, y: event.clientY || bounds.bottom });
         },
-        accessory: <>{status?.sessionId && <button type="button" className="terminal-tab-close" title={`关闭终端 ${slot}`}
-          aria-label={`关闭终端 ${slot}`} data-terminal-tab-close={slot} disabled={busy || status.opening}
+        accessory: <>{status?.sessionId && <button type="button" className="terminal-tab-close" title={`关闭${slotName}`}
+          aria-label={`关闭${slotName}`} data-terminal-tab-close={slot} disabled={busy || status.opening}
           onClick={() => request('close', slot)}><X size={10} aria-hidden="true" /></button>}</>,
       };
     }),
@@ -166,15 +172,15 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
       <AgentSessionMenuItems data={agentMenu?.projectId === projectId ? agentMenu.data : undefined} atLimit={atLimit || creating} onTerminal={() => { closeAgentMenu(); create(); }}
         onAgent={argv => { closeAgentMenu(); void onOpenAgent(argv); }} />
     </SidebarMenu>}</MotionPresence>
-    <MotionPresence>{menu && <SidebarMenu x={menu.x} y={menu.y} label={`终端 ${menu.slot} 操作`} className={terminalView ? 'terminal-chrome' : undefined}
+    <MotionPresence>{menu && menuNumber !== undefined && <SidebarMenu x={menu.x} y={menu.y} label={`终端 ${menuNumber} 操作`} className={terminalView ? 'terminal-chrome' : undefined}
       items={[
         { label: '重启', icon: <RotateCcw size={14} />, disabled, onSelect: () => request('restart', menu.slot) },
         { label: '关闭', icon: <X size={14} />, disabled, onSelect: () => request('close', menu.slot) },
       ]} onClose={closeMenu} />}</MotionPresence>
-    <MotionPresence>{confirmation && <Dialog open onOpenChange={open => { if (!open && !busy) setConfirmation(undefined); }}>
+    <MotionPresence>{confirmation && confirmationNumber !== undefined && <Dialog open onOpenChange={open => { if (!open && !busy) setConfirmation(undefined); }}>
       <DialogContent hideClose={busy} data-terminal-tab-confirm>
         <DialogHeader>
-          <DialogTitle>{actionLabel[confirmation.action]}终端 {confirmation.slot}</DialogTitle>
+          <DialogTitle>{actionLabel[confirmation.action]}终端 {confirmationNumber}</DialogTitle>
           <DialogDescription>此终端和其中正在运行的命令将结束。</DialogDescription>
         </DialogHeader>
         <div className="flex justify-end gap-2">

@@ -490,6 +490,8 @@ impl AttentionManager {
             entry.agent = None;
         });
         state.sessions.remove(key);
+        state.visible.remove(key);
+        if state.watched.as_ref() == Some(key) { state.watched = None; }
     }
 
     fn tick(&self) {

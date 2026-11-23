@@ -1,7 +1,8 @@
-import { useEffect, useState, useCallback, useRef, useMemo, useSyncExternalStore, type CSSProperties } from 'react';
+import { useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo, useSyncExternalStore, type CSSProperties } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
 import { FolderPlus } from 'lucide-react';
 import { toast } from 'sonner';
@@ -32,7 +33,7 @@ import { activateAgentTerminal, loadAgentIndex, useAgentRecoveries, type AgentAr
 import { projectLogs } from './lib/useProjectLogs';
 import { recordRender } from './lib/renderMetrics';
 import { DEFAULT_TERMINAL_FONT_SIZE, TERMINAL_THEME } from './lib/terminalAppearance';
-import { agentNeedsAttention, agentsByProject, clampTerminalFontSize, firstOpenedTerminalSlot, nextAttentionTarget } from './lib/terminalUsability';
+import { agentNeedsAttention, agentsByProject, clampTerminalFontSize, firstOpenedTerminalSlot, nextAttentionTarget, terminalSelectionAfterClose } from './lib/terminalUsability';
 import { filterSidebarProjects, savedSidebarFilter, sidebarNavigation, SIDEBAR_FILTER_KEY } from './lib/sidebarModel';
 import { useProjectGitInfos } from './lib/useGitInfo';
 import { sameServiceStatuses } from './lib/projectServices';
@@ -121,6 +122,7 @@ export function App() {
   const updater = useUpdater();
   const settings = useSettings();
   const terminalControls = useRef<TerminalWorkspaceControls>(null);
+  const closeActiveTab = useRef<() => void>(null);
   const [focusMode, setFocusMode] = useState(false);
   const [folderDropName, setFolderDropName] = useState<string | null>(null);
   const toggleFocusMode = useCallback(() => {
@@ -218,15 +220,18 @@ export function App() {
     if (slot === undefined) setSelection({ projectId, view: 'overview' });
     else selectTerminalSlot(projectId, slot);
   }, [selectTerminalSlot, setSelection]);
-  useEffect(() => {
+  const previousTerminals = useRef(terminals);
+  useLayoutEffect(() => {
+    const before = previousTerminals.current;
+    previousTerminals.current = terminals;
     setProjectNavigation(navigation => {
       const previous = navigation.activeSlots;
       let next = previous;
       let selected = navigation.selection;
       for (const [projectId, slot] of Object.entries(previous)) {
-        if (slot === 1 || terminals[terminalKey(projectId, slot)]) continue;
-        const slots = getProjectTerminalSlots(projectId, terminals).filter(candidate => terminals[terminalKey(projectId, candidate)]?.sessionId);
-        const replacement = slots.filter(candidate => candidate < slot).at(-1) ?? slots.find(candidate => candidate > slot);
+        if (terminals[terminalKey(projectId, slot)]?.sessionId) continue;
+        const replacement = terminalSelectionAfterClose(slot, getProjectTerminalSlots(projectId, before),
+          getProjectTerminalSlots(projectId, terminals));
         if (next === previous) next = { ...previous };
         if (replacement !== undefined) next[projectId] = replacement;
         else {
@@ -237,14 +242,6 @@ export function App() {
       return next === previous ? navigation : { selection: selected, activeSlots: next };
     });
   }, [terminals]);
-  const onTerminalClosed = useCallback((projectId: string, slot: number) => {
-    const replacement = firstOpenedTerminalSlot(projectId, Object.values(getTerminalSnapshot()));
-    setProjectNavigation(previous => {
-      if (previous.selection?.projectId !== projectId || previous.selection.view !== 'terminal' || (previous.activeSlots[projectId] ?? 1) !== slot) return previous;
-      return replacement === undefined ? { ...previous, selection: { projectId, view: 'overview' } } :
-        { ...previous, activeSlots: { ...previous.activeSlots, [projectId]: replacement } };
-    });
-  }, []);
   const [focusedTerminal, setFocusedTerminal] = useState<{ projectId: string; slot: number; left: number; right?: number }>();
   const onFocusedTerminal = useCallback((projectId: string, slot: number, left: number, right?: number) => {
     setFocusedTerminal(previous => previous?.projectId === projectId && previous.slot === slot && previous.left === left &&
@@ -256,20 +253,21 @@ export function App() {
     focusedTerminal.left === watchedLeft ? focusedTerminal : undefined;
   const watchedSlot = focusedPane?.slot ?? watchedLeft;
   const watchedRight = focusedPane?.right;
+  const watchedSession = watchedProjectId && watchedSlot ? terminals[terminalKey(watchedProjectId, watchedSlot)]?.sessionId : undefined;
   const reportedTerminal = useRef<string | null>();
   const focusRequests = useRef(Promise.resolve());
   useEffect(() => {
     const report = (projectId: string | null, slot: number | null, visibleSlots: number[] = []) => {
-      const key = projectId && slot ? terminalKey(projectId, slot) + ':' + visibleSlots.join(',') : null;
+      const key = projectId && slot && watchedSession ? watchedSession + ':' + visibleSlots.join(',') : null;
       if (reportedTerminal.current === key) return;
       reportedTerminal.current = key;
       focusRequests.current = focusRequests.current.catch(() => {}).then(() =>
-        invoke<void>('terminal_focus', { projectId, slot, visibleSlots }),
+        invoke<void>('terminal_focus', { projectId, slot, visibleSlots, sessionId: projectId ? watchedSession : null }),
       );
       void focusRequests.current.catch(error => toast.error(`更新终端关注状态失败：${error}`));
     };
     const update = () => {
-      if (document.visibilityState === 'visible' && document.hasFocus()) {
+      if (watchedSession && document.visibilityState === 'visible' && document.hasFocus()) {
         report(watchedProjectId, watchedSlot, [watchedLeft, watchedRight].filter((slot): slot is number => slot != null));
       }
       else report(null, null);
@@ -286,7 +284,7 @@ export function App() {
       window.removeEventListener('pagehide', blur);
       document.removeEventListener('visibilitychange', update);
     };
-  }, [watchedProjectId, watchedSlot, watchedLeft, watchedRight]);
+  }, [watchedProjectId, watchedSlot, watchedLeft, watchedRight, watchedSession]);
   const [searchQuery, setSearchQuery] = useState('');
   const searchInput = useRef<HTMLInputElement>(null);
   const visibleProjects = useMemo(() => filterSidebarProjects(projects, groups, filter, searchQuery, projectStatuses, attentionProjects, changedProjects),
@@ -318,6 +316,16 @@ export function App() {
   const externalRequest = useRef(false);
   const dialogOpen = useRef(false);
   dialogOpen.current = !!(projectForm || deleteProject || activeLogProject || externalStop || stopAllOpen || settingsOpen || quickOpen || groupForm || externalRequest.current || updater.isModalOpen);
+  useEffect(() => {
+    const unlisten = listen('bento-close-shortcut', () => {
+      if (navigation.current.view !== 'terminal') {
+        void getCurrentWindow().hide().catch(error => toast.error(String(error)));
+      } else if (!dialogOpen.current && !document.querySelector('[role="dialog"][data-state="open"]')) {
+        closeActiveTab.current?.();
+      }
+    });
+    return () => { void unlisten.then(stop => stop()); };
+  }, []);
   const openQuickSwitcher = useCallback(() => {
     if (dialogOpen.current) return;
     terminalControls.current?.closeFind();
@@ -461,6 +469,7 @@ export function App() {
         const projectId = navigation.current.selection?.projectId;
         if (!projectId) return;
         const slots = getProjectTerminalSlots(projectId);
+        if (!slots.length) return;
         const index = slots.indexOf(navigation.current.activeSlots[projectId] ?? 1);
         const direction = event.code === 'BracketLeft' ? -1 : 1;
         selectTerminalSlot(projectId, slots[(index + direction + slots.length) % slots.length]);
@@ -519,17 +528,17 @@ export function App() {
     let active = true;
     const reveal = async () => {
       if (!active) return;
-      const target = await invoke<{ projectId: string; slot: number } | null>('take_terminal_notification');
+      const target = await invoke<{ projectId: string; slot: number; sessionId: string } | null>('take_terminal_notification');
       if (!active || !target) return;
+      if (getTerminalSnapshot()[terminalKey(target.projectId, target.slot)]?.sessionId !== target.sessionId) return;
       if (!navigation.current.projects.some(project => project.id === target.projectId)) { setSearchQuery(''); setFilter('all'); }
-      if (getTerminalSnapshot()[terminalKey(target.projectId, target.slot)]?.sessionId) selectTerminalSlot(target.projectId, target.slot);
-      else selectProject(target.projectId);
+      selectTerminalSlot(target.projectId, target.slot);
     };
     const reportError = (error: unknown) => toast.error(String(error));
     const unsubscribe = listen('terminal-notification-open', () => { void reveal().catch(reportError); });
     void unsubscribe.then(reveal).catch(reportError);
     return () => { active = false; void unsubscribe.then(stop => stop()); };
-  }, [projectsLoaded, selectProject, selectTerminalSlot]);
+  }, [projectsLoaded, selectTerminalSlot]);
 
   const selectedProjectId = selection?.projectId;
   useEffect(() => {
@@ -865,7 +874,7 @@ export function App() {
                   onOpenAgent={(argv, recovery) => openAgent(selectedProject.id, argv, recovery)}
                   agentRecoveries={agentRecoveries}
                   onDismissAgentRecovery={dismissAgentRecovery}
-                  onTerminalClosed={slot => onTerminalClosed(selectedProject.id, slot)}
+                  closeActiveTab={closeActiveTab}
                   terminalControls={terminalControls}
                   onFocusedTerminal={onFocusedTerminal}
                   onSelectView={view => selectView({ projectId: selectedProject.id, view })}
@@ -880,7 +889,11 @@ export function App() {
                   onSetDefaultService={setDefaultService}
                   onRevealPath={handleRevealPath}
                   onOpenEditor={() => openProjectEditor(selectedProject.id)}
-                  onOpenTerminal={() => selectTerminalSlot(selectedProject.id, activeSlots[selectedProject.id] ?? 1)}
+                  onOpenTerminal={() => {
+                    const slot = slots.includes(activeSlot) ? activeSlot : slots[0];
+                    if (slot === undefined) void openTerminal(selectedProject.id);
+                    else selectTerminalSlot(selectedProject.id, slot);
+                  }}
                   onOpenLogs={id => openProjectLogs(selectedProject, id)}
                   onClearLogs={() => handleClearLogs(selectedProject.id)}
                   onEdit={focusPort => openProjectConfig(selectedProject, focusPort)}

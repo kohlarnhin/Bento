@@ -43,6 +43,7 @@ pub struct TerminalSessionInfo {
     pub project_id: String,
     pub slot: u8,
     pub session_id: String,
+    pub tab_order: u64,
     pub alive: bool,
     pub exit_code: Option<u32>,
     pub pid: Option<u32>,
@@ -240,6 +241,7 @@ enum Input {
 #[derive(Clone)]
 struct Session {
     session_id: String,
+    tab_order: u64,
     key: TerminalKey,
     pid: Option<u32>,
     state: Arc<(Mutex<SessionState>, Condvar)>,
@@ -279,6 +281,7 @@ impl Session {
             project_id: self.key.project_id.clone(),
             slot: self.key.slot,
             session_id: self.session_id.clone(),
+            tab_order: self.tab_order,
             alive: state.alive,
             exit_code: state.exit_code,
             pid: self.pid,
@@ -464,7 +467,10 @@ impl TerminalManager {
                 let _ = exit_app.emit("terminal-exit", event);
             }),
             Arc::new(move |event| { let _ = opened_app.emit("terminal-opened", event); }),
-            Arc::new(move |event| { let _ = closed_app.emit("terminal-closed", event); }),
+            Arc::new(move |event| {
+                crate::terminal_notifications::remove(&closed_app, &event);
+                let _ = closed_app.emit("terminal-closed", event);
+            }),
             Arc::new(|| crate::settings::max_per_project(&crate::open_project_db()?)),
             AttentionSinks {
                 change: Arc::new(move |event| { let _ = change_app.emit("terminal-attention", event); }),
@@ -513,6 +519,7 @@ impl TerminalManager {
 
     pub fn restore(&self) {
         let Some(store) = &self.store else { return; };
+        let _mutation = lock(&self.mutation);
         let sessions = {
             let mut store = lock(store);
             if store.enabled { store.load() } else { Ok(SavedSessions::new()) }
@@ -528,7 +535,7 @@ impl TerminalManager {
                         let cwd = if tab.cwd.is_absolute() && tab.cwd.is_dir() { tab.cwd.clone() } else { root.clone() };
                         let slot = tab.slot;
                         let active = saved.active == Some(tab.slot);
-                        match self.spawn(&project.id, slot, &cwd, 80, 24, &project.env, Some((tab, saved.saved_at, active))) {
+                        match self.spawn(&project.id, slot, &cwd, 80, 24, &project.env, None, Some((tab, saved.saved_at, active))) {
                             Ok(session) => {
                                 if active { lock(&self.active_slots).insert(project.id.clone(), slot); }
                                 lock(&self.sessions).insert(session.key.clone(), session);
@@ -598,9 +605,11 @@ impl TerminalManager {
         let mut store = lock(store);
         if !store.enabled { return; }
         let mut snapshot = SavedSessions::new();
-        let sessions: Vec<_> = lock(&self.sessions).values().cloned().collect();
+        let mut sessions: Vec<_> = lock(&self.sessions).values().cloned().collect();
+        sessions.sort_unstable_by_key(|session| session.tab_order);
         let active = lock(&self.active_slots).clone();
         for session in sessions {
+            if !lock(&session.state.0).alive { continue; }
             let entry = snapshot.entry(session.key.project_id.clone()).or_insert_with(|| SavedProject {
                 active: active.get(&session.key.project_id).copied(),
                 saved_at: persistence::now_secs(),
@@ -614,7 +623,6 @@ impl TerminalManager {
             });
         }
         for entry in snapshot.values_mut() {
-            entry.terminals.sort_by_key(|tab| tab.slot);
             entry.active = entry.active.filter(|slot| entry.terminals.iter().any(|tab| tab.slot == *slot));
         }
         if let Err(error) = store.save(snapshot) {
@@ -629,6 +637,7 @@ impl TerminalManager {
             .ok_or_else(|| "该终端已关闭".to_string())
     }
 
+    #[cfg(test)]
     fn open(
         &self,
         project_id: &str,
@@ -645,30 +654,26 @@ impl TerminalManager {
 
     fn open_locked(&self, project_id: &str, slot: u8, cwd: &Path, cols: u16, rows: u16, restart: bool, env: &[crate::projects::EnvVar]) -> Result<OpenResult, String> {
         validate_slot(slot)?;
-        let existing = self.get(project_id, slot).ok();
-        if let Some(existing) = &existing {
-            if !restart {
-                return Ok(existing.result());
-            }
-            existing.terminate();
-        } else if slot > 1 {
+        let existing = self.get(project_id, slot)?;
+        if !lock(&existing.state.0).alive {
             return Err("该终端已关闭".into());
         }
-        let result = self.spawn_and_insert(project_id, slot, cwd, cols, rows, env);
+        if !restart {
+            return Ok(existing.result());
+        }
+        existing.terminate();
+        let result = self.spawn_and_insert(project_id, slot, cwd, cols, rows, env, Some(existing.tab_order));
         if result.is_err() {
-            if let Some(existing) = existing {
-                lock(&self.sessions).remove(&existing.key);
-                self.emit_closed(&existing);
-            }
+            self.remove_matching(|session| session.session_id == existing.session_id);
         }
         result
     }
 
-    fn spawn_and_insert(&self, project_id: &str, slot: u8, cwd: &Path, cols: u16, rows: u16, env: &[crate::projects::EnvVar]) -> Result<OpenResult, String> {
+    fn spawn_and_insert(&self, project_id: &str, slot: u8, cwd: &Path, cols: u16, rows: u16, env: &[crate::projects::EnvVar], tab_order: Option<u64>) -> Result<OpenResult, String> {
         if !cwd.is_dir() {
             return Err(format!("项目目录不存在：{}", cwd.display()));
         }
-        let session = self.spawn(project_id, slot, cwd, cols.max(1), rows.max(1), env, None)?;
+        let session = self.spawn(project_id, slot, cwd, cols.max(1), rows.max(1), env, tab_order, None)?;
         let result = session.result();
         lock(&self.sessions).insert(session.key.clone(), session);
         (self.opened)(result.session.clone());
@@ -687,7 +692,7 @@ impl TerminalManager {
             return Err(format!("每个项目最多 {max} 个终端，可在设置中调整"));
         }
         let slot = (1..=6).find(|slot| !slots.contains(slot)).ok_or("每个项目最多 6 个终端，可在设置中调整")?;
-        self.spawn_and_insert(project_id, slot, cwd, cols, rows, env)
+        self.spawn_and_insert(project_id, slot, cwd, cols, rows, env, None)
     }
 
     fn spawn(
@@ -698,6 +703,7 @@ impl TerminalManager {
         cols: u16,
         rows: u16,
         env: &[crate::projects::EnvVar],
+        tab_order: Option<u64>,
         restore: Option<(SavedTerminal, u64, bool)>,
     ) -> Result<Session, String> {
         crate::projects::validate_env(env)?;
@@ -729,12 +735,10 @@ impl TerminalManager {
             }
             None => (None, None, false),
         };
+        let sequence = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
         let session = Session {
-            session_id: format!(
-                "{}-{}",
-                std::process::id(),
-                NEXT_SESSION.fetch_add(1, Ordering::Relaxed)
-            ),
+            session_id: format!("{}-{sequence}", std::process::id()),
+            tab_order: tab_order.unwrap_or(sequence),
             key: TerminalKey::new(project_id, slot),
             pid,
             state: Arc::new((
@@ -767,7 +771,7 @@ impl TerminalManager {
         let pending_child = Arc::new(Mutex::new(Some(child)));
         let waiter_child = pending_child.clone();
         let waiter_session = session.clone();
-        let exit = self.exit.clone();
+        let manager = self.clone();
         let waiter = thread::Builder::new()
             .name("terminal-waiter".into())
             .spawn(move || {
@@ -781,12 +785,15 @@ impl TerminalManager {
                     state.exit_code = exit_code;
                     waiter_session.state.1.notify_all();
                 }
-                exit(TerminalExit {
-                    project_id: waiter_session.key.project_id,
+                (manager.exit)(TerminalExit {
+                    project_id: waiter_session.key.project_id.clone(),
                     slot: waiter_session.key.slot,
-                    session_id: waiter_session.session_id,
+                    session_id: waiter_session.session_id.clone(),
                     exit_code,
                 });
+                // Notify a concurrent terminate() before waiting for its mutation lock.
+                let _mutation = lock(&manager.mutation);
+                manager.remove_matching(|session| session.session_id == waiter_session.session_id);
             });
         if let Err(err) = waiter {
             self.attention.remove(&session.key, &session.session_id);
@@ -936,8 +943,16 @@ impl TerminalManager {
 
     pub fn list(&self) -> Vec<TerminalSessionInfo> {
         let mut sessions: Vec<_> = lock(&self.sessions).values().map(Session::info).collect();
-        sessions.sort_by(|a, b| a.project_id.cmp(&b.project_id).then(a.slot.cmp(&b.slot)));
+        sessions.sort_by(|a, b| a.project_id.cmp(&b.project_id).then(a.tab_order.cmp(&b.tab_order)));
         sessions
+    }
+
+    pub fn display_number(&self, project_id: &str, slot: u8, session_id: &str) -> Option<usize> {
+        let sessions = lock(&self.sessions);
+        let tab = sessions.get(&TerminalKey::new(project_id, slot))?;
+        if tab.session_id != session_id || !lock(&tab.state.0).alive { return None; }
+        Some(1 + sessions.values().filter(|session| session.key.project_id == project_id
+            && session.tab_order < tab.tab_order && lock(&session.state.0).alive).count())
     }
 
     fn write(&self, project_id: &str, slot: u8, data: Vec<u8>) -> Result<(), String> {
@@ -960,10 +975,11 @@ impl TerminalManager {
             let _mutation = lock(&self.mutation);
             let mut sessions: Vec<_> = lock(&self.sessions).values()
                 .filter(|session| session.key.project_id == project_id).cloned().collect();
-            sessions.sort_by_key(|session| (session.key.slot != slot, session.key.slot));
+            sessions.retain(|session| lock(&session.state.0).alive);
+            sessions.sort_by_key(|session| (session.key.slot != slot, session.tab_order));
             if current_only {
                 if let Some(current) = sessions.first().filter(|session| session.key.slot == slot) {
-                    if current.info().alive && !current.idle() {
+                    if !current.idle() {
                         return Err("当前终端中有程序正在运行".into());
                     }
                     sessions.truncate(1);
@@ -971,9 +987,6 @@ impl TerminalManager {
             }
             let (session, check_idle) = if let Some(session) = sessions.iter().find(|session| session.idle()) {
                 (session.clone(), true)
-            } else if let Some(session) = sessions.iter().find(|session| !session.info().alive) {
-                self.open_locked(project_id, session.key.slot, cwd, 80, 24, true, env)?;
-                (self.get(project_id, session.key.slot)?, false)
             } else if sessions.len() < (self.limit)()?.clamp(1, 6) as usize || sessions.is_empty() {
                 let opened = self.create_locked(project_id, cwd, 80, 24, env)?;
                 (self.get(project_id, opened.session.slot)?, false)
@@ -1004,16 +1017,14 @@ impl TerminalManager {
 
     pub fn close(&self, project_id: &str) {
         let _mutation = lock(&self.mutation);
-        self.remove_matching(|key| key.project_id == project_id);
-        lock(&self.active_slots).remove(project_id);
-        self.save_sessions_locked();
+        self.remove_matching(|session| session.key.project_id == project_id);
     }
 
-    fn close_terminal(&self, project_id: &str, slot: u8) -> Result<(), String> {
+    fn close_terminal(&self, project_id: &str, slot: u8, session_id: Option<&str>) -> Result<(), String> {
         validate_slot(slot)?;
         let _mutation = lock(&self.mutation);
-        self.remove_matching(|key| key.project_id == project_id && key.slot == slot);
-        self.save_sessions_locked();
+        self.remove_matching(|session| session.key.project_id == project_id && session.key.slot == slot
+            && session_id.is_none_or(|id| session.session_id == id));
         Ok(())
     }
 
@@ -1024,21 +1035,43 @@ impl TerminalManager {
         });
     }
 
-    fn remove_matching(&self, remove: impl Fn(&TerminalKey) -> bool) {
-        let removed: Vec<_> = {
+    // The caller holds mutation, so an exit from a replaced shell cannot close its successor.
+    fn remove_matching(&self, remove: impl Fn(&Session) -> bool) {
+        let removed = {
             let mut sessions = lock(&self.sessions);
-            let keys: Vec<_> = sessions.keys().filter(|key| remove(key)).cloned().collect();
-            keys.into_iter().filter_map(|key| sessions.remove(&key)).collect()
+            let keys: Vec<_> = sessions.values().filter(|session| remove(session)).map(|session| session.key.clone()).collect();
+            keys.into_iter().filter_map(|key| sessions.remove(&key)).collect::<Vec<_>>()
         };
+        if removed.is_empty() { return; }
+        {
+            let mut visible = lock(&self.visible_tabs);
+            let mut active = lock(&self.active_slots);
+            let sessions = lock(&self.sessions);
+            for session in &removed {
+                let key = &session.key;
+                visible.remove(key);
+                if active.get(&key.project_id) != Some(&key.slot) { continue; }
+                let next = sessions.values().filter(|tab| tab.key.project_id == key.project_id && lock(&tab.state.0).alive)
+                    .min_by_key(|tab| (tab.tab_order < session.tab_order, tab.tab_order.abs_diff(session.tab_order)));
+                if let Some(next) = next {
+                    active.insert(key.project_id.clone(), next.key.slot);
+                } else {
+                    active.remove(&key.project_id);
+                }
+            }
+        }
+        self.save_sessions_locked();
+        for session in &removed {
+            self.emit_closed(session);
+        }
         for session in removed {
             session.terminate();
-            self.emit_closed(&session);
         }
     }
 
     pub fn retain_projects(&self, ids: &HashSet<String>) {
         let _mutation = lock(&self.mutation);
-        self.remove_matching(|key| !ids.contains(&key.project_id));
+        self.remove_matching(|session| !ids.contains(&session.key.project_id));
     }
 
     pub fn kill_all(&self) {
@@ -1047,21 +1080,25 @@ impl TerminalManager {
     }
 
     pub fn focus(&self, key: Option<TerminalKey>) {
-        self.focus_visible(key, None);
+        self.focus_visible(key, None, None);
     }
 
-    fn focus_visible(&self, key: Option<TerminalKey>, visible_slots: Option<Vec<u8>>) {
+    fn focus_visible(&self, key: Option<TerminalKey>, visible_slots: Option<Vec<u8>>, session_id: Option<&str>) {
         let mut visible = lock(&self.visible_tabs);
+        let mut active = lock(&self.active_slots);
+        let sessions = lock(&self.sessions);
+        let key = key.filter(|key| sessions.get(key).is_some_and(|session| {
+            session_id.is_none_or(|id| session.session_id == id) && lock(&session.state.0).alive
+        }));
         visible.clear();
         if let Some(key) = &key {
-            lock(&self.active_slots).insert(key.project_id.clone(), key.slot);
+            active.insert(key.project_id.clone(), key.slot);
             visible.insert(key.clone());
             if let Some(slots) = visible_slots {
                 visible.extend(slots.into_iter().filter(|slot| validate_slot(*slot).is_ok())
-                    .map(|slot| TerminalKey::new(&key.project_id, slot)));
+                    .map(|slot| TerminalKey::new(&key.project_id, slot)).filter(|key| sessions.contains_key(key)));
             }
         }
-        let sessions = lock(&self.sessions);
         for session in visible.iter().filter_map(|key| sessions.get(key)) {
             if lock(&session.metadata).completion.take().is_some() {
                 (self.completion)(session.completion_event(None), false);
@@ -1130,12 +1167,19 @@ pub async fn terminal_open(
     slot: u8,
     cols: u16,
     rows: u16,
+    session_id: Option<String>,
 ) -> Result<OpenResult, String> {
     let manager = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let project = project_config(&project_id)?;
         let path = crate::expand_tilde(&project.path);
-        manager.open(
+        let _mutation = lock(&manager.mutation);
+        if let Some(id) = &session_id {
+            if manager.get(&project_id, slot)?.session_id != *id {
+                return Err("该终端已关闭".into());
+            }
+        }
+        manager.open_locked(
             &project_id,
             slot,
             Path::new(&path),
@@ -1156,12 +1200,19 @@ pub async fn terminal_restart(
     slot: u8,
     cols: u16,
     rows: u16,
+    session_id: Option<String>,
 ) -> Result<OpenResult, String> {
     let manager = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let project = project_config(&project_id)?;
         let path = crate::expand_tilde(&project.path);
-        manager.open(
+        let _mutation = lock(&manager.mutation);
+        if let Some(id) = &session_id {
+            if manager.get(&project_id, slot)?.session_id != *id {
+                return Err("该终端已关闭".into());
+            }
+        }
+        manager.open_locked(
             &project_id,
             slot,
             Path::new(&path),
@@ -1188,10 +1239,10 @@ pub async fn terminal_create(
 
 #[tauri::command]
 pub async fn terminal_close(
-    state: State<'_, TerminalManager>, project_id: String, slot: u8,
+    state: State<'_, TerminalManager>, project_id: String, slot: u8, session_id: Option<String>,
 ) -> Result<(), String> {
     let manager = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || manager.close_terminal(&project_id, slot))
+    tauri::async_runtime::spawn_blocking(move || manager.close_terminal(&project_id, slot, session_id.as_deref()))
         .await.map_err(|err| format!("关闭终端失败：{err}"))?
 }
 
@@ -1209,11 +1260,11 @@ pub fn terminal_context(
 }
 
 #[tauri::command]
-pub fn terminal_focus(state: State<'_, TerminalManager>, project_id: Option<String>, slot: Option<u8>, visible_slots: Option<Vec<u8>>) {
+pub fn terminal_focus(state: State<'_, TerminalManager>, project_id: Option<String>, slot: Option<u8>, visible_slots: Option<Vec<u8>>, session_id: Option<String>) {
     let key = project_id.zip(slot).map(|(project_id, slot)| TerminalKey { project_id, slot });
     #[cfg(debug_assertions)]
     crate::debug_e2e::record_terminal_focus(key.as_ref());
-    state.focus_visible(key, visible_slots);
+    state.focus_visible(key, visible_slots, session_id.as_deref());
 }
 
 #[tauri::command]
@@ -1369,8 +1420,17 @@ mod tests {
             }
             self.idle(id, slot);
             self.manager.write(id, slot, b"exit 0\r".to_vec()).unwrap();
-            self.wait_until(id, slot, "shell exited", |session| !session.info().alive);
+            self.wait_closed(&session);
             assert_eq!(session.info().exit_code, Some(0));
+        }
+
+        fn wait_closed(&self, session: &Session) {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while !lock(&self.closed).iter().any(|event| event.session_id == session.session_id) {
+                assert!(Instant::now() < deadline, "No close event for {:?}", session.key);
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(self.manager.get(&session.key.project_id, session.key.slot).is_err());
         }
 
         fn diagnostics(&self, id: &str, slot: u8) -> String {
@@ -1403,7 +1463,7 @@ mod tests {
     }
 
     #[test]
-    fn create_enforces_live_db_limit_counts_exited_slots_and_reuses_smallest_free_slot() {
+    fn create_enforces_live_db_limit_and_appends_a_reused_slot_after_exit() {
         let fixture = Fixture::new();
         assert!(fixture.manager.open("a", 2, &fixture.dir, 80, 24, false, &fixture.env).unwrap_err().contains("该终端已关闭"));
         assert!(fixture.manager.open("a", 2, &fixture.dir, 80, 24, true, &fixture.env).is_err());
@@ -1411,11 +1471,11 @@ mod tests {
         assert_eq!(fixture.create("a").session.slot, 1);
         let two = fixture.create("a");
         assert_eq!(two.session.slot, 2);
-        fixture.exit("a", 2);
         assert_eq!(fixture.manager.create("a", &fixture.dir, 80, 24, &fixture.env).unwrap_err(), "每个项目最多 2 个终端，可在设置中调整");
+        fixture.exit("a", 2);
+        assert_eq!(fixture.create("a").session.slot, 2);
         fixture.limit(3);
         assert_eq!(fixture.create("a").session.slot, 3);
-        fixture.manager.open("a", 2, &fixture.dir, 80, 24, true, &fixture.env).unwrap();
         let before = fixture.manager.list();
         fixture.limit(1);
         assert_eq!(fixture.manager.list().iter().map(|s| &s.session_id).collect::<Vec<_>>(), before.iter().map(|s| &s.session_id).collect::<Vec<_>>());
@@ -1423,13 +1483,14 @@ mod tests {
         assert!(fixture.manager.create("a", &fixture.dir, 80, 24, &fixture.env).is_err());
         let restarted = fixture.manager.open("a", 3, &fixture.dir, 80, 24, true, &fixture.env).unwrap();
         assert_ne!(restarted.session.session_id, before[2].session_id);
-        fixture.manager.close_terminal("a", 2).unwrap();
+        assert_eq!(restarted.session.tab_order, before[2].tab_order);
+        fixture.manager.close_terminal("a", 2, Some(&before[1].session_id)).unwrap();
         assert!(fixture.manager.create("a", &fixture.dir, 80, 24, &fixture.env).is_err());
         fixture.limit(3);
         assert_eq!(fixture.create("a").session.slot, 2);
-        assert_eq!(fixture.manager.list().iter().map(|s| s.slot).collect::<Vec<_>>(), [1, 2, 3]);
+        assert_eq!(fixture.manager.list().iter().map(|s| s.slot).collect::<Vec<_>>(), [1, 3, 2]);
         assert_eq!(lock(&fixture.opened).len(), 6);
-        assert_eq!(lock(&fixture.closed).iter().map(|s| s.slot).collect::<Vec<_>>(), [2]);
+        assert_eq!(lock(&fixture.closed).iter().map(|s| s.slot).collect::<Vec<_>>(), [2, 2]);
     }
 
     #[test]
@@ -1445,6 +1506,45 @@ mod tests {
         let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
         assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
         assert_eq!(fixture.manager.list().len(), 2);
+    }
+
+    #[test]
+    fn close_and_shell_exit_remove_the_saved_tab_and_its_recovery_before_relaunch() {
+        use crate::terminal_agent::{sessions::SessionRef, AgentKind};
+        let mut fixture = Fixture::new();
+        let directory = fixture.dir.join("terminals");
+        fixture.manager.store = Some(Arc::new(Mutex::new(Store::new(directory.clone(), true))));
+        fixture.limit(3);
+        let tabs: Vec<_> = (0..3).map(|_| fixture.create("a").session).collect();
+        let recovery = SessionRef::new(AgentKind::Claude, "383c4fef-fd6e-452a-9130-bdbdea62bc01").unwrap();
+        lock(&fixture.manager.get("a", 1).unwrap().agent_link).recovery = Some(recovery.clone());
+        lock(&fixture.manager.get("a", 3).unwrap().agent_link).recovery = Some(recovery.clone());
+        fixture.manager.focus(Some(TerminalKey::new("a", 1)));
+        fixture.manager.save_sessions();
+        let load = || Store::new(directory.clone(), true).load().unwrap();
+        assert_eq!(load()["a"].terminals[0].agent_session, Some(recovery.clone()));
+
+        fixture.manager.close_terminal("a", 1, Some(&tabs[0].session_id)).unwrap();
+        let after = load();
+        assert_eq!(after["a"].active, Some(2));
+        assert_eq!(after["a"].terminals.iter().map(|tab| tab.slot).collect::<Vec<_>>(), [2, 3]);
+        assert_eq!(after["a"].terminals[1].agent_session, Some(recovery));
+        assert_eq!(fixture.manager.display_number("a", 2, &tabs[1].session_id), Some(1));
+        assert_eq!(fixture.manager.display_number("a", 3, &tabs[2].session_id), Some(2));
+
+        fixture.exit("a", 2);
+        assert_eq!(load()["a"].terminals.iter().map(|tab| tab.slot).collect::<Vec<_>>(), [3]);
+        assert_eq!(load()["a"].active, Some(3));
+        let new = fixture.create("a").session;
+        assert_eq!(new.slot, 1);
+        fixture.manager.close_terminal("a", 1, Some(&tabs[0].session_id)).unwrap();
+        assert_eq!(fixture.manager.display_number("a", 1, &tabs[0].session_id), None);
+        assert_eq!(fixture.manager.display_number("a", 1, &new.session_id), Some(2));
+        fixture.manager.save_sessions();
+        assert_eq!(load()["a"].terminals.iter().map(|tab| tab.slot).collect::<Vec<_>>(), [3, 1]);
+        fixture.manager.close_terminal("a", 1, Some(&new.session_id)).unwrap();
+        fixture.manager.close_terminal("a", 3, Some(&tabs[2].session_id)).unwrap();
+        assert!(load().is_empty());
     }
 
     #[test]
@@ -1484,7 +1584,7 @@ mod tests {
     }
 
     #[test]
-    fn run_routes_preferred_idle_other_idle_preferred_exited_then_lowest_exited() {
+    fn run_routes_preferred_idle_then_other_idle_and_reuses_capacity_after_exit() {
         let fixture = Fixture::new();
         fixture.limit(3);
         for _ in 0..3 { fixture.create("a"); }
@@ -1503,14 +1603,12 @@ mod tests {
         assert!(fixture.manager.list().iter().all(|s| !fixture.manager.get("a", s.slot).unwrap().result().snapshot.data.contains("FORBIDDEN")));
         fixture.exit("a", 2);
         fixture.exit("a", 3);
-        let old = fixture.manager.get("a", 3).unwrap().session_id;
-        fixture.limit(1); // Restarting an exited slot above the lowered limit is still allowed.
-        assert_eq!(fixture.run("a", 3, "printf 'restarted-preferred\\n'").slot, 3);
-        fixture.wait_for_slot("a", 3, "\r\nrestarted-preferred\r\n");
-        assert_ne!(fixture.manager.get("a", 3).unwrap().session_id, old);
-        fixture.busy("a", 3);
-        assert_eq!(fixture.run("a", 1, "printf 'restarted-lowest\\n'").slot, 2);
-        fixture.wait_for_slot("a", 2, "\r\nrestarted-lowest\r\n");
+        fixture.limit(1);
+        assert!(fixture.manager.run("a", 3, &fixture.dir, "FORBIDDEN".into(), &fixture.env, false).is_err());
+        fixture.limit(2);
+        assert_eq!(fixture.run("a", 3, "printf 'created-after-exit\\n'").slot, 2);
+        fixture.wait_for_slot("a", 2, "\r\ncreated-after-exit\r\n");
+        assert!(fixture.manager.get("a", 3).is_err());
     }
 
     #[test]
@@ -1540,7 +1638,7 @@ mod tests {
     #[test]
     fn real_pty_bell_raises_unwatched_and_focus_restart_close_exit_clear_it() {
         let fixture = Fixture::new();
-        fixture.manager.open("bell", 1, &fixture.dir, 80, 24, false, &fixture.env).unwrap();
+        fixture.create("bell");
         let ring = || {
             fixture.idle("bell", 1);
             fixture.manager.write("bell", 1, b"printf '\\a'\n".to_vec()).unwrap();
@@ -1559,13 +1657,10 @@ mod tests {
         fixture.manager.open("bell", 1, &fixture.dir, 80, 24, true, &fixture.env).unwrap();
         assert!(!fixture.manager.list()[0].attention);
         ring();
+        let last = fixture.manager.get("bell", 1).unwrap();
         fixture.manager.write("bell", 1, b"exit\n".to_vec()).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while fixture.manager.list()[0].alive {
-            assert!(Instant::now() < deadline);
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(!fixture.manager.list()[0].attention);
+        fixture.wait_closed(&last);
+        assert!(!last.info().attention);
         fixture.manager.close("bell");
         assert!(fixture.manager.list().is_empty());
     }
@@ -1579,7 +1674,7 @@ mod tests {
         let mut permissions = std::fs::metadata(&script).unwrap().permissions();
         std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
         std::fs::set_permissions(&script, permissions).unwrap();
-        fixture.manager.open("ai", 1, &fixture.dir, 80, 24, false, &fixture.env).unwrap();
+        fixture.create("ai");
         fixture.idle("ai", 1);
         fixture.manager.write("ai", 1, format!("/bin/sh -c '{}; :'\r", script.display()).into_bytes()).unwrap();
         fixture.wait_until("ai", 1, "Claude foreground and waiting", |session| {
@@ -1752,8 +1847,9 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_get_or_create_and_exited_session_are_stable() {
+    fn concurrent_attaches_share_one_pty_and_exited_tabs_cannot_reopen() {
         let fixture = Fixture::new();
+        fixture.create("same");
         let handles: Vec<_> = (0..6)
             .map(|_| {
                 let manager = fixture.manager.clone();
@@ -1777,30 +1873,23 @@ mod tests {
                 && session.pid == sessions[0].pid));
         assert_eq!(fixture.manager.list().len(), 1);
         fixture.idle("same", 1);
+        let exited = fixture.manager.get("same", 1).unwrap();
         fixture.manager.write("same", 1, b"exit 7\n".to_vec()).unwrap();
-        fixture.wait_until("same", 1, "shell exited with status 7", |session| !session.info().alive);
-        let exited = fixture
-            .manager
-            .open("same", 1, &fixture.dir, 80, 24, false, &fixture.env)
-            .unwrap();
-        assert_eq!(exited.session.session_id, sessions[0].session_id);
-        assert_eq!(exited.session.exit_code, Some(7));
-        let restarted = fixture
-            .manager
-            .open("same", 1, &fixture.dir, 80, 24, true, &fixture.env)
-            .unwrap();
-        assert_ne!(restarted.session.session_id, sessions[0].session_id);
-        assert_ne!(restarted.session.pid, sessions[0].pid);
-        assert!(restarted.session.alive);
+        fixture.wait_closed(&exited);
+        assert_eq!(exited.info().exit_code, Some(7));
+        for restart in [false, true] {
+            assert!(fixture.manager.open("same", 1, &fixture.dir, 80, 24, restart, &fixture.env).is_err());
+        }
+        let reopened = fixture.create("same");
+        assert_ne!(reopened.session.session_id, sessions[0].session_id);
+        assert_ne!(reopened.session.pid, sessions[0].pid);
+        assert!(reopened.session.alive);
     }
 
     #[test]
     fn real_pty_cwd_unicode_resize_and_process_group_cleanup() {
         let fixture = Fixture::new();
-        let first = fixture
-            .manager
-            .open("pty", 1, &fixture.dir, 80, 24, false, &fixture.env)
-            .unwrap();
+        let first = fixture.create("pty");
         let pgid = first.session.pid.unwrap() as i32;
         fixture.idle("pty", 1);
         fixture
@@ -1848,13 +1937,11 @@ mod tests {
         let fixture = Fixture::new();
         assert!(fixture
             .manager
-            .open(
+            .create(
                 "missing",
-                1,
                 &fixture.dir.join("does-not-exist"),
                 80,
                 24,
-                false,
                 &fixture.env
             )
             .unwrap_err()
