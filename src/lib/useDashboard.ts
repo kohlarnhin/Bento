@@ -27,7 +27,7 @@ function useDashboardPoll(task: () => void, delay: number, events: { focus?: boo
   }, [delay, onFocus]);
 }
 
-export function useDashboard(project: ProjectConfig, runtime: ProjectRuntimeStatus | undefined, view: ProjectView) {
+export function useDashboard(project: ProjectConfig, runtime: ProjectRuntimeStatus | undefined, view: ProjectView, sample = true) {
   const { id, path } = project;
   const [snapshot, setSnapshot] = useState<DashboardSnapshot>();
   const [snapshotError, setSnapshotError] = useState<string>();
@@ -65,16 +65,16 @@ export function useDashboard(project: ProjectConfig, runtime: ProjectRuntimeStat
 
   useEffect(() => {
     const inputs = JSON.stringify([path, ports, runtimeKey]);
-    if (previousInputs.current != null && previousInputs.current !== inputs && document.visibilityState === 'visible') refresh();
+    if (sample && previousInputs.current != null && previousInputs.current !== inputs && document.visibilityState === 'visible') refresh();
     previousInputs.current = inputs;
     if (previousLaunch.current !== runtime?.startedAt && runtime?.startedAt != null) {
       previousLaunch.current = runtime.startedAt;
       healthGeneration.current++;
       setHealth({});
     }
-  }, [refresh, runtimeKey, runtime?.startedAt, path, ports]);
+  }, [refresh, runtimeKey, runtime?.startedAt, path, ports, sample]);
 
-  useDashboardPoll(refresh, 5000);
+  useDashboardPoll(refresh, sample ? 5000 : 0);
   useDashboardPoll(() => setNow(Date.now()), 15_000);
   useDashboardPoll(() => {
     const instance = lifetime.current;
@@ -86,7 +86,8 @@ export function useDashboard(project: ProjectConfig, runtime: ProjectRuntimeStat
       .finally(() => { if (gitPending.current === instance) gitPending.current = undefined; });
   }, view === 'terminal' && git !== undefined ? 0 : 15_000, { focus: view !== 'terminal' });
 
-  const listening = snapshot?.services.some(service => service.state === 'listening') ?? false;
+  const current = sample ? snapshot : undefined;
+  const listening = current?.services.some(service => service.state === 'listening') ?? false;
   useDashboardPoll(() => {
     if (!listening) return;
     const instance = lifetime.current;
@@ -112,5 +113,5 @@ export function useDashboard(project: ProjectConfig, runtime: ProjectRuntimeStat
     return () => { void unlisten.then(stop => stop()); };
   }, [id, refresh]);
 
-  return { snapshot, snapshotError, git, health, now, refresh };
+  return { snapshot: current, snapshotError, git, health, now, refresh };
 }

@@ -906,7 +906,7 @@ export function App() {
             onFocus: () => { closeQuickSwitcher(); toggleFocusMode(); },
             onSplit: () => { closeQuickSwitcher(); toggleSplit(); },
           } : undefined}
-          onRescan={selectedProject ? () => { closeQuickSwitcher(); openProjectConfig(selectedProject, undefined, true); } : undefined}
+          onRescan={selectedProject?.runnable ? () => { closeQuickSwitcher(); openProjectConfig(selectedProject, undefined, true); } : undefined}
           onClose={closeQuickSwitcher}
           onCreate={() => { closeQuickSwitcher(); openCreate(); }}
           onCreateGroup={() => { closeQuickSwitcher(); dialogOpen.current = true; setGroupForm({ action: 'create' }); }}

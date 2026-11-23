@@ -37,6 +37,7 @@ export interface ProjectConfig {
   displayName?: string;
   description?: string;
   path: string;
+  runnable: boolean;
   port?: number | null;
   services: Service[];
   injectPorts: boolean;
@@ -55,6 +56,7 @@ export interface ProjectDraft {
   displayName?: string;
   description?: string;
   path: string;
+  runnable: boolean;
   port?: number | null;
   services: Service[];
   injectPorts: boolean;

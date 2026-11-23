@@ -122,3 +122,26 @@ with sqlite3.connect(sys.argv[1]) as conn:
   assert.match(run('list', '--group', '').stdout, /changed[\s\S]*未分组/);
   assert.doesNotMatch(run('list', '--group', '个人').stdout, /changed/);
 });
+
+test('CLI adds projects that do not run and switches them between run modes', (t) => {
+  const { run, database } = fixture(t);
+  const add = (...args) => run('add', '--id', 'notes', '--name', 'notes', '--path', '/tmp', ...args);
+  assert.match(add().stderr, /--command.*--no-run/);
+  assert.match(add('--no-run', '--port', '5173').stderr, /--no-run.*--port/);
+  assert.equal(add('--no-run').status, 0);
+  assert.match(run('list').stdout, /notes .*（无需运行）/);
+  assert.match(run('update', '--id', 'notes', '--port', '5173').stderr, /--run/);
+  assert.match(run('update', '--id', 'notes', '--run').stderr, /--command/);
+  assert.equal(run('update', '--id', 'notes', '--run', '--command', 'pnpm dev', '--port', '5173').status, 0);
+  assert.equal(run('check-port', '5173').status, 1);
+  assert.match(run('list').stdout, /notes .*pnpm dev/);
+  assert.equal(run('update', '--id', 'notes', '--no-run', '--name', 'notes-renamed').status, 0);
+  assert.equal(run('check-port', '5173').status, 0);
+  const row = spawnSync('python3', ['-c', `
+import json, sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as conn:
+    print(json.dumps(conn.execute("SELECT name, runnable, start_command, port, services FROM projects WHERE id='notes'").fetchone()))
+`, database], { encoding: 'utf8' });
+  assert.equal(row.status, 0, row.stderr);
+  assert.deepEqual(JSON.parse(row.stdout), ['notes-renamed', 0, '', null, '[]']);
+});

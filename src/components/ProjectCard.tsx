@@ -252,15 +252,17 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
   focused, maxTerminals, showQuickCommands, snippets, onRunSnippet, onChangeSnippet, onToggleFocus, onNewTerminal, onOpenAgent, closeActiveTab,
   status: runtimeStatus, runtime, conflicts, onStart, onStop, onRestart, onOpenBrowser,
   onSetDefaultService, onRevealPath, onOpenEditor, onOpenLogs, onClearLogs, onEdit }: ProjectCardProps) {
-  const { snapshot, snapshotError, git, health, now, refresh } = useDashboard(project, runtime, view);
-  const launch = useProjectLaunch(project);
+  const runnable = project.runnable;
+  const { snapshot, snapshotError, git, health, now, refresh } = useDashboard(project, runtime, view, runnable || !!runtime?.isManaged);
+  const launch = useProjectLaunch(project, runnable);
   const auditLaunch = launch?.data?.mode === 'shared' && project.injectPorts && project.services.some(service => service.port != null);
   const standard = usePortStandard(project.path, project.startCommand, project.services, auditLaunch);
-  const unconfigured = (!project.startCommand.trim() && !project.services.some(service => service.startCommand?.trim())) ||
-    !!launch?.error || !!standard?.data?.services.some(service => !service.references.length);
+  const unconfigured = runnable && ((!project.startCommand.trim() && !project.services.some(service => service.startCommand?.trim())) ||
+    !!launch?.error || !!standard?.data?.services.some(service => !service.references.length));
   const status = dashboardStatus(runtimeStatus, runtime, snapshot);
   const active = !!runtime?.isManaged || status === 'running' || status === 'starting';
   const running = status === 'running';
+  const showRun = runnable || active;
   const services = useMemo(() => dashboardServices(project), [project.services, project.port]);
   const blocked = !active && (conflicts.length > 0 || !!snapshot?.conflicts.length);
   const [occupied, setOccupied] = useState<DashboardConflict>();
@@ -323,7 +325,7 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
   }, [active, startedAt, refresh]);
 
   const act = (kind: 'start' | 'restart' | 'stop') => {
-    if (busy.current || (kind === 'start' && blocked)) return;
+    if (busy.current || (kind === 'start' && blocked) || (kind !== 'stop' && !runnable)) return;
     busy.current = true;
     setPending(true);
     const action = kind === 'start' ? onStart : kind === 'restart' ? onRestart : onStop;
@@ -341,7 +343,7 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
       if (!event.metaKey || event.shiftKey || event.ctrlKey || event.altKey || event.repeat || event.isComposing
         || event.keyCode === 229 || document.querySelector('[role="dialog"][data-state="open"]')
         || (event.target instanceof HTMLElement && (event.target.matches('input, textarea') || event.target.isContentEditable))) return;
-      const action = event.key.toLowerCase() === 'r' ? running ? 'restart' : active ? undefined : 'start'
+      const action = event.key.toLowerCase() === 'r' ? !runnable ? undefined : running ? 'restart' : active ? undefined : 'start'
         : event.key === '.' && active ? 'stop' : undefined;
       if (!action) return;
       event.preventDefault();
@@ -350,7 +352,7 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [active, running, view]);
+  }, [active, running, runnable, view]);
 
   const verifyRelease = async () => {
     if (!occupied?.owner || !occupied.identity) return;
@@ -370,21 +372,21 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
     <header className="h1-toolbar" data-tauri-drag-region="deep">
       <div className="h1-toolbar-heading">
         <h1 className="dash-truncate" title={name}>{name}</h1>
-        <span className="dash-badge" data-status={status} title={statusText}>
+        {showRun && <span className="dash-badge" data-status={status} title={statusText}>
           <StatusDot tone={status} aria-hidden="true" /><span className="dash-truncate">{statusText}</span>
-        </span>
+        </span>}
       </div>
       <ProjectTabs projectId={project.id} view={view} activeSlot={activeSlot} slots={slots} terminals={terminals}
         maxTerminals={maxTerminals} onSelectView={onSelectView} onSelectTerminal={onSelectTerminal}
         onNewTerminal={onNewTerminal} onOpenAgent={onOpenAgent} closeActiveTab={closeActiveTab} />
       <div className="dash-actions">
-        {services.length > 1 ? <ProjectWebMenu project={project} listeningPort={listeningPort} actualPort={openPort} terminal={terminalView}
+        {showRun && (services.length > 1 ? <ProjectWebMenu project={project} listeningPort={listeningPort} actualPort={openPort} terminal={terminalView}
           onOpenBrowser={onOpenBrowser} onSetDefault={onSetDefaultService} />
           : <OpenServiceButton className="h1-button" port={openPort ?? defaultService.port} listening={openPort != null}
               onOpen={onOpenBrowser} data-project-action="open" title={openPort == null ? undefined : 'localhost:' + openPort}>
               打开网页 <ArrowUpRight size={13} aria-hidden="true" />
-            </OpenServiceButton>}
-        {active && <button type="button" className="h1-button" disabled={pending || status === 'starting'} onClick={() => act('restart')}
+            </OpenServiceButton>)}
+        {active && runnable && <button type="button" className="h1-button" disabled={pending || status === 'starting'} onClick={() => act('restart')}
           aria-keyshortcuts="Meta+R" title="重启 ⌘R" data-project-action="restart">重启</button>}
         <ActionTooltip label={focusLabel + ' ⌘⇧↩'}>
           <button type="button" className="h1-button terminal-focus-toggle" aria-label={focusLabel} aria-keyshortcuts="Meta+Shift+Enter"
@@ -393,14 +395,14 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
             <FocusIcon size={14} aria-hidden="true" />
           </button>
         </ActionTooltip>
-        <button type="button" className="h1-button h1-button-primary" disabled={pending || (!active && blocked)}
+        {showRun && <button type="button" className="h1-button h1-button-primary" disabled={pending || (!active && blocked)}
           onClick={() => act(active ? 'stop' : 'start')} aria-label={active ? '停止' : '启动'}
           aria-keyshortcuts={active ? 'Meta+.' : 'Meta+R'} title={active ? '停止 ⌘.' : blocked ? '请先处理端口冲突' : '启动 ⌘R'}
           data-project-action={active ? 'stop' : 'start'}>
           <span ref={launchLabel} className="launch-label" data-running={active || undefined} aria-hidden="true">
             <span><Play size={12} fill="currentColor" />启动</span><span><Square size={10} fill="currentColor" />停止</span>
           </span>
-        </button>
+        </button>}
       </div>
     </header>
 
@@ -408,7 +410,7 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
       <div className="workspace-view" data-workspace-view="overview" {...{ inert: shown !== 'overview' || view !== 'overview' ? '' : undefined }}>
         <div ref={overviewContent} className="dash-main" data-project-overview={project.id}>
           <div className="dash-top">
-            <section className="h1-group dash-card dash-summary" aria-label="服务与资源">
+            {showRun ? <section className="h1-group dash-card dash-summary" aria-label="服务与资源">
               <header className="dash-card-heading" data-workspace-content><h2>服务</h2>
                 <span>{active ? `${listeningCount} 个运行中` : `${services.length} 个服务`}</span>
               </header>
@@ -441,13 +443,20 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
                 <ResourceSummary active={active} uptime={uptime} usage={snapshot?.total}
                   external={snapshot?.external ?? runtime?.external ?? false} history={snapshot?.history.project} />
               </div></div>
-            </section>
+            </section> : <section className="h1-group dash-card" aria-label="运行" data-dashboard-no-run>
+              <header className="dash-card-heading" data-workspace-content><h2>运行</h2></header>
+              <div className="dash-no-run" data-workspace-content>
+                <strong>无需运行</strong>
+                <p>此项目不由 Bento 启动，可以直接在终端中开发。需要启动服务时，请在编辑配置中勾选「需要运行」。</p>
+              </div>
+            </section>}
             <ProjectQuickActions git={git} unconfigured={unconfigured} terminalLimit={terminalLimit}
               onEditor={onOpenEditor} onTerminal={() => { void onNewTerminal(); }} onGit={() => onSelectView('git')}
               onReveal={() => onRevealPath(project.path)} onEdit={() => onEdit()} />
           </div>
-          <DashboardOutput project={project} services={services} active={active} last={last} now={now}
+          {showRun ? <DashboardOutput project={project} services={services} active={active} last={last} now={now}
             onJump={onOpenLogs} onClear={onClearLogs} />
+            : git && <div className="h1-project-scroll" data-workspace-content><DashboardGitCard git={git} now={now} onEditor={onOpenEditor} /></div>}
         </div>
       </div>
       <div className="workspace-view" data-workspace-view="git" {...{ inert: shown !== 'git' || view !== 'git' ? '' : undefined }}>

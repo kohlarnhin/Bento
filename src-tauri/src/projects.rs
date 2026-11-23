@@ -78,6 +78,10 @@ pub fn parse_list<T: serde::de::DeserializeOwned>(
     }
 }
 
+pub fn default_runnable() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectDraft {
@@ -85,6 +89,8 @@ pub struct ProjectDraft {
     pub display_name: Option<String>,
     pub description: Option<String>,
     pub path: String,
+    #[serde(default = "default_runnable")]
+    pub runnable: bool,
     pub port: Option<i64>,
     #[serde(default)]
     pub services: Vec<Service>,
@@ -228,16 +234,22 @@ fn normalize_project(
     if name.is_empty() {
         return Err("请输入项目名称".into());
     }
-    let start_command = draft.start_command.trim().to_string();
-    let services = normalize_services(draft.services)?;
-    if start_command.is_empty() && !independent_commands(&services)? {
+    let runnable = draft.runnable;
+    let (start_command, services) = if runnable {
+        (draft.start_command.trim().to_string(), normalize_services(draft.services)?)
+    } else {
+        (String::new(), Vec::new())
+    };
+    if runnable && start_command.is_empty() && !independent_commands(&services)? {
         return Err("请输入启动命令".into());
     }
     let project_type = draft.project_type.as_deref().unwrap_or("web").trim();
     if !matches!(project_type, "web" | "app") {
         return Err("项目类型必须为 Web 项目或桌面应用".into());
     }
-    let port = if services.is_empty() {
+    let port = if !runnable {
+        None
+    } else if services.is_empty() {
         match draft.port {
             Some(port) if (1..=65535).contains(&port) => Some(port as u16),
             Some(_) => return Err("端口必须是 1–65535 之间的整数".into()),
@@ -284,7 +296,8 @@ fn normalize_project(
         }
         commands.push(ExtraCommand { name, command });
     }
-    if draft.auto_open && (project_type != "web" || port.is_none()) {
+    let auto_open = runnable && draft.auto_open;
+    if auto_open && (project_type != "web" || port.is_none()) {
         return Err("仅填写端口的 Web 项目可在启动就绪后自动打开网页".into());
     }
     crate::sidebar::validate_group(conn, draft.group_id.as_deref())?;
@@ -299,6 +312,7 @@ fn normalize_project(
         display_name: optional_text(draft.display_name),
         description: optional_text(draft.description),
         path: stored_path(&path),
+        runnable,
         port,
         services,
         inject_ports: draft.inject_ports,
@@ -306,7 +320,7 @@ fn normalize_project(
         project_type: Some(project_type.into()),
         env: draft.env,
         commands,
-        auto_open: draft.auto_open,
+        auto_open,
         group_id: draft.group_id,
         pinned,
         archived,
@@ -363,8 +377,8 @@ pub fn insert_project(conn: &Connection, draft: ProjectDraft) -> Result<ProjectC
     }
     project.id = id;
     transaction.execute(
-        "INSERT INTO projects (id, name, display_name, description, path, port, start_command, type, sort_order, env, commands, auto_open, group_id, services, inject_ports) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects), ?9, ?10, ?11, ?12, ?13, ?14)",
-        params![project.id, project.name, project.display_name, project.description, project.path, project.port, project.start_command, project.project_type, serde_json::to_string(&project.env).map_err(|err| err.to_string())?, serde_json::to_string(&project.commands).map_err(|err| err.to_string())?, project.auto_open, project.group_id, serde_json::to_string(&project.services).map_err(|err| err.to_string())?, project.inject_ports],
+        "INSERT INTO projects (id, name, display_name, description, path, port, start_command, type, sort_order, env, commands, auto_open, group_id, services, inject_ports, runnable) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM projects), ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![project.id, project.name, project.display_name, project.description, project.path, project.port, project.start_command, project.project_type, serde_json::to_string(&project.env).map_err(|err| err.to_string())?, serde_json::to_string(&project.commands).map_err(|err| err.to_string())?, project.auto_open, project.group_id, serde_json::to_string(&project.services).map_err(|err| err.to_string())?, project.inject_ports, project.runnable],
     ).map_err(|e| format!("新增项目失败：{e}"))?;
     transaction
         .commit()
@@ -426,8 +440,8 @@ pub fn update_project_row(
     }
     let project = normalize_project(&transaction, draft, Some(id))?;
     transaction.execute(
-        "UPDATE projects SET name=?1, display_name=?2, description=?3, path=?4, port=?5, start_command=?6, type=?7, env=?9, commands=?10, auto_open=?11, group_id=?12, services=?13, inject_ports=?14, updated_at=CURRENT_TIMESTAMP WHERE id=?8",
-        params![project.name, project.display_name, project.description, project.path, project.port, project.start_command, project.project_type, id, serde_json::to_string(&project.env).map_err(|err| err.to_string())?, serde_json::to_string(&project.commands).map_err(|err| err.to_string())?, project.auto_open, project.group_id, serde_json::to_string(&project.services).map_err(|err| err.to_string())?, project.inject_ports],
+        "UPDATE projects SET name=?1, display_name=?2, description=?3, path=?4, port=?5, start_command=?6, type=?7, env=?9, commands=?10, auto_open=?11, group_id=?12, services=?13, inject_ports=?14, runnable=?15, updated_at=CURRENT_TIMESTAMP WHERE id=?8",
+        params![project.name, project.display_name, project.description, project.path, project.port, project.start_command, project.project_type, id, serde_json::to_string(&project.env).map_err(|err| err.to_string())?, serde_json::to_string(&project.commands).map_err(|err| err.to_string())?, project.auto_open, project.group_id, serde_json::to_string(&project.services).map_err(|err| err.to_string())?, project.inject_ports, project.runnable],
     ).map_err(|e| format!("更新项目失败：{e}"))?;
     transaction
         .commit()
@@ -1074,6 +1088,7 @@ mod tests {
                 display_name: Some("  ".into()),
                 description: Some("  描述  ".into()),
                 path: format!("{}/", self.0.display()),
+                runnable: true,
                 port: Some(5199),
                 services: Vec::new(),
                 inject_ports: true,
@@ -1346,6 +1361,38 @@ mod tests {
     }
 
     #[test]
+    fn projects_without_running_need_no_command_or_port_and_keep_terminal_settings() {
+        let conn = database();
+        let fixture = Fixture::new();
+        let mut draft = fixture.draft();
+        draft.runnable = false;
+        draft.start_command = "  ".into();
+        draft.port = Some(70000);
+        draft.services = vec![Service { key: "WEB".into(), id: "web".into(), name: "前端".into(), dir: "web".into(), port: Some(5199), kind: Some("web".into()), open_web: true, start_command: None }];
+        draft.auto_open = true;
+        draft.env = vec![EnvVar { key: "MODE".into(), value: "local".into() }];
+        draft.commands = vec![ExtraCommand { name: "test".into(), command: "pnpm test".into() }];
+        let saved = insert_project(&conn, draft.clone()).unwrap();
+        let read = crate::read_projects(&conn).unwrap().remove(0);
+        assert!(!read.runnable && read.start_command.is_empty() && read.port.is_none() && read.services.is_empty() && !read.auto_open);
+        assert_eq!((read.env, read.commands), (draft.env.clone(), vec![ExtraCommand { name: "test".into(), command: "pnpm test".into() }]));
+        let other = insert_project(&conn, fixture.draft()).unwrap();
+        assert_eq!(other.port, Some(5199));
+        assert!(crate::calculate_conflicts(&crate::read_projects(&conn).unwrap()).is_empty());
+        draft.runnable = true;
+        draft.services.clear();
+        draft.auto_open = false;
+        assert!(update_project_row(&conn, &saved.id, draft.clone()).unwrap_err().contains("启动命令"));
+        draft.start_command = "pnpm dev".into();
+        draft.port = Some(5199);
+        assert!(update_project_row(&conn, &saved.id, draft.clone()).unwrap_err().contains("5199"));
+        draft.port = None;
+        let running = update_project_row(&conn, &saved.id, draft).unwrap();
+        assert!(running.runnable && running.start_command == "pnpm dev");
+        assert!(crate::read_projects(&conn).unwrap().iter().all(|project| project.runnable));
+    }
+
+    #[test]
     fn parses_json_lists_and_defaults_older_payloads() {
         for raw in [
             None,
@@ -1370,9 +1417,9 @@ mod tests {
         let config: ProjectConfig = serde_json::from_value(old.clone()).unwrap();
         let draft: ProjectDraft = serde_json::from_value(old).unwrap();
         assert!(config.env.is_empty() && config.commands.is_empty() && !config.auto_open);
-        assert!(config.services.is_empty() && config.inject_ports);
+        assert!(config.services.is_empty() && config.inject_ports && config.runnable);
         assert!(draft.env.is_empty() && draft.commands.is_empty() && !draft.auto_open);
-        assert!(draft.services.is_empty() && draft.inject_ports);
+        assert!(draft.services.is_empty() && draft.inject_ports && draft.runnable);
     }
 
     #[test]

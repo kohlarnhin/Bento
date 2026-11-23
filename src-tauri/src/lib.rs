@@ -45,6 +45,8 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub description: Option<String>,
     pub path: String,
+    #[serde(default = "projects::default_runnable")]
+    pub runnable: bool,
     #[serde(default)]
     pub port: Option<u16>,
     #[serde(default)]
@@ -192,6 +194,7 @@ pub fn init_db(conn: &Connection) -> Result<(), rusqlite::Error> {
         ("group_id", "TEXT REFERENCES groups(id) ON DELETE SET NULL"),
         ("pinned", "INTEGER NOT NULL DEFAULT 0"), ("archived", "INTEGER NOT NULL DEFAULT 0"),
         ("services", "TEXT NOT NULL DEFAULT '[]'"), ("inject_ports", "INTEGER NOT NULL DEFAULT 1"),
+        ("runnable", "INTEGER NOT NULL DEFAULT 1"),
     ] {
         if !columns.contains(column) {
             transaction.execute(&format!("ALTER TABLE projects ADD COLUMN {column} {definition}"), [])?;
@@ -276,7 +279,7 @@ pub fn get_projects_sync() -> Result<ProjectsResponse, String> {
 
 fn read_projects(conn: &Connection) -> Result<Vec<ProjectConfig>, String> {
     let mut stmt = conn
-        .prepare("SELECT id, name, display_name, description, path, port, start_command, type, env, commands, auto_open, group_id, pinned, archived, services, inject_ports FROM projects ORDER BY sort_order IS NULL, sort_order, created_at, id")
+        .prepare("SELECT id, name, display_name, description, path, port, start_command, type, env, commands, auto_open, group_id, pinned, archived, services, inject_ports, runnable FROM projects ORDER BY sort_order IS NULL, sort_order, created_at, id")
         .map_err(|e| format!("查询失败: {}", e))?;
 
     let project_iter = stmt
@@ -292,6 +295,7 @@ fn read_projects(conn: &Connection) -> Result<Vec<ProjectConfig>, String> {
                 commands: projects::parse_list(commands.as_deref(), &id, "commands"),
                 services: projects::parse_list(Some(&services), &id, "services"),
                 inject_ports: row.get(15)?,
+                runnable: row.get(16)?,
                 auto_open: row.get::<_, i64>(10).unwrap_or(0) != 0,
                 group_id: row.get(11)?,
                 pinned: row.get(12)?,
@@ -745,7 +749,7 @@ mod tests {
         init_db(&conn).unwrap();
         let old = read_projects(&conn).unwrap().remove(0);
         assert!(old.env.is_empty() && old.commands.is_empty() && !old.auto_open);
-        assert!(old.services.is_empty() && old.inject_ports);
+        assert!(old.services.is_empty() && old.inject_ports && old.runnable);
         conn.execute("UPDATE projects SET env='[{\"key\":\"A\",\"value\":\"B\"}]', commands='broken', auto_open=1", []).unwrap();
         init_db(&conn).unwrap();
         init_db(&conn).unwrap();
@@ -854,6 +858,7 @@ mod tests {
                 display_name: None,
                 description: None,
                 path: "~/Projects/p1".to_string(),
+                runnable: true,
                 port: Some(5173),
                 services: Vec::new(),
                 inject_ports: true,
@@ -868,6 +873,7 @@ mod tests {
                 display_name: None,
                 description: None,
                 path: "~/Projects/p2".to_string(),
+                runnable: true,
                 port: Some(5174),
                 services: Vec::new(),
                 inject_ports: true,
@@ -890,6 +896,7 @@ mod tests {
                 display_name: Some("项目一".to_string()),
                 description: None,
                 path: "~/Projects/p1".to_string(),
+                runnable: true,
                 port: Some(5173),
                 services: Vec::new(),
                 inject_ports: true,
@@ -904,6 +911,7 @@ mod tests {
                 display_name: Some("项目二".to_string()),
                 description: None,
                 path: "~/Projects/p2".to_string(),
+                runnable: true,
                 port: Some(5173),
                 services: Vec::new(),
                 inject_ports: true,

@@ -18,6 +18,7 @@ Bento 基于 **Tauri 2 + React + Tailwind CSS**。像便当盒一样，每个项
 ## 项目管理
 
 - 要**新建项目**，可点击侧边栏底部的「添加项目」、侧栏空状态的「添加第一个项目」，或按 Cmd+N。也可在 Cmd+P 面板输入「添加 / 新建 / add / new」，选择「添加项目…」或「添加分组」。目录可以用系统文件夹选择器选择，也可以手动输入（支持 `~`）。选定后会自动识别名称、类型（有 `src-tauri` 即为桌面应用）、启动命令（根据 lock 文件判断 pnpm / yarn / bun / npm，以及 `dev`、`start`、`tauri` 脚本）和端口。端口扫描覆盖 Tauri、Vite / Next / Nuxt / Astro 配置、`angular.json` 的 serve 配置、`.env` / `.env.local` / `.env.development` 中的 `PORT` / `VITE_PORT`、`package.json` 各脚本和 `start.sh` 中的 `--port` / `-p` / `PORT=`、Compose 的宿主端口以及框架默认值。候选端口合并来源、按置信度排列，可点击填入。没有候选时推荐空闲端口。端口用于监测监听、打开网页和启动时的端口适配，可留空以使用项目默认值。
+- 「运行配置」中的**需要运行**默认勾选。库、文档或只在终端里开发的仓库可以取消勾选，这样无需填写端口和启动命令，类型、端口注入等运行设置也会隐藏。保存后，这类项目的概览不显示启动按钮、服务和输出，Git 项目改为显示改动；终端、AI CLI、其他命令和环境变量照常可用。
 - **从 Finder 拖入文件夹**时，侧栏的虚线提示区会显示文件夹名。松开后预填目录、启动命令与候选端口，确认表单后才保存。非文件夹、不存在的路径或已经添加的目录（含同一目录的符号链接）会提示原因，表单不会打开。一次拖入多项只处理首项并显示提示。
 - **端口检查**会阻止保存与其他 Bento 项目重复的端口。其他进程占用（含 PID / 命令）、macOS AirPlay 常用的 5000 / 7000、1024 以下端口则会显示提醒，仍可保存。编辑时会排除项目自身的配置和运行实例。有冲突或提醒时可点击「改用」填入下一个未被项目配置或进程监听的端口。启动时会按下节的规则适配所选端口。
 - 概览的**快捷操作**可以在编辑器打开项目、新建终端、查看改动、在 Finder 中显示或编辑配置。右键点击侧栏项目可复制路径、查看已有启动日志或删除项目。删除需先确认，会停止由 Bento 启动的进程并关闭该项目的终端，保留项目目录中的文件。
@@ -160,6 +161,8 @@ const proxy = {
 python3 scripts/manage_project.py list
 python3 scripts/manage_project.py check-port 5173
 python3 scripts/manage_project.py add --name my-app --path ~/Projects/my-app --command "pnpm dev" --port 3000 --type web
+python3 scripts/manage_project.py add --name notes --path ~/Projects/notes --no-run
+python3 scripts/manage_project.py update --id notes --run --command "pnpm dev"
 python3 scripts/manage_project.py update --id my-app --port 3001
 python3 scripts/manage_project.py update --id my-app --group "工作"
 python3 scripts/manage_project.py list --group "工作"
@@ -170,6 +173,8 @@ python3 scripts/manage_project.py delete my-app
 各项目的端口必须唯一。通过脚本修改后，从侧边栏顶部「项目筛选与操作」菜单选择「刷新项目状态」，即可重新加载项目列表。`.agents/skills/bento/SKILL.md` 是供 AI 助手使用的项目管理技能说明。
 
 `add / update --group "名称"` 会复用同名分组，名称不存在时新建；省略 `--group` 保持原有行为，`update` 保留当前分组。`list` 显示分组与置顶 / 归档标记，可用 `--group ""` 仅查看未分组项目。数据库新增 `groups(id, name, sort_order, collapsed)`，项目新增 `group_id / pinned / archived`；老项目默认未分组、未置顶、未归档。
+
+`add --no-run` 添加无需运行的项目，不能再带 `--command` 或 `--port`。`update --no-run` 会清空启动命令、端口和服务，`update --run` 需要已有启动命令或同时提供 `--command`。项目的 `runnable` 列默认为 1，老项目保持需要运行。
 
 ## 升级
 

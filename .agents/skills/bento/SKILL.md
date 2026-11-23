@@ -17,6 +17,7 @@ Bento (formerly AppHub) is a macOS desktop application that aggregates, manages,
 1. **Project Types**:
    - `web`: Frontend web projects that run dev servers with an HTTP port. These display the port and "Open in browser" buttons.
    - `app`: Desktop / native applications (like Tauri apps, Electron apps, etc.). These do NOT show "Open in browser" buttons.
+   - Projects that never run (libraries, docs, repos used only for terminal / AI CLI work) are added with `--no-run`: no start command, no port, and Bento hides start / stop for them (`runnable = 0`).
 2. **Port Uniqueness**:
    - For projects specifying a port, the port **MUST** be unique across all configured projects.
    - If a port is already taken, do **NOT** assign that port to another project. Suggest or assign an available port.
@@ -67,6 +68,14 @@ python3 /Users/zhujiangyong/Software/apphub/scripts/manage_project.py add \
   --type app
 ```
 
+- **Project that does not need to run**:
+```bash
+python3 /Users/zhujiangyong/Software/apphub/scripts/manage_project.py add \
+  --name "<project-name>" \
+  --path "<path-or-tilde-path>" \
+  --no-run
+```
+
 ### 4. Update an Existing Project
 ```bash
 python3 /Users/zhujiangyong/Software/apphub/scripts/manage_project.py update \
@@ -75,6 +84,8 @@ python3 /Users/zhujiangyong/Software/apphub/scripts/manage_project.py update \
   --command "<new-command>" \
   --type <web|app>
 ```
+
+Switch the run mode with `--no-run` (clears the start command, port and services) or `--run --command "<start-command>"`.
 
 ### 5. Remove a Project
 ```bash
@@ -101,4 +112,4 @@ VALUES ('my-web', 'my-web', '我的网页', '描述', '~/Projects/my-web', 3000,
 DELETE FROM projects WHERE id = 'my-web';
 ```
 
-Other columns: `env` (JSON array of `{"key","value"}`), `commands` (JSON array of `{"name","command"}`) and `auto_open` (0/1) hold the per-project launch settings; edit them in the Bento UI (编辑 → 高级设置) rather than by hand.
+Other columns: `env` (JSON array of `{"key","value"}`), `commands` (JSON array of `{"name","command"}`) and `auto_open` (0/1) hold the per-project launch settings; edit them in the Bento UI (编辑 → 高级设置) rather than by hand. `runnable` (0/1, default 1) marks whether the project needs to run; a project with `runnable = 0` keeps `start_command = ''`, `port = NULL` and `services = '[]'`.

@@ -10,7 +10,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from './ui/collap
 
 export interface AdvancedValues { env: EnvVar[]; commands: ExtraCommand[]; autoOpen: boolean }
 
-export function ProjectAdvancedFields({ values, onChange, errors, onBlur, open, onOpenChange, disabled, canAutoOpen }: {
+export function ProjectAdvancedFields({ values, onChange, errors, onBlur, open, onOpenChange, disabled, canAutoOpen, runnable }: {
   values: AdvancedValues;
   onChange: (value: Partial<AdvancedValues>) => void;
   errors: AdvancedErrors;
@@ -19,6 +19,7 @@ export function ProjectAdvancedFields({ values, onChange, errors, onBlur, open, 
   onOpenChange: (value: boolean) => void;
   disabled: boolean;
   canAutoOpen: boolean;
+  runnable: boolean;
 }) {
   const env = (index: number, patch: Partial<EnvVar>) => onChange({ env: values.env.map((row, position) => position === index ? { ...row, ...patch } : row) });
   const command = (index: number, patch: Partial<ExtraCommand>) => onChange({ commands: values.commands.map((row, position) => position === index ? { ...row, ...patch } : row) });
@@ -75,11 +76,11 @@ export function ProjectAdvancedFields({ values, onChange, errors, onBlur, open, 
           {error('command-limit-error', errors.commandLimit)}
           <Button type="button" variant="outline" size="sm" disabled={disabled || values.commands.length >= 10} onClick={() => onChange({ commands: [...values.commands, { name: '', command: '' }] })} data-add-command><Plus />添加命令</Button>
         </section>
-        <div className="space-y-2">
+        {runnable && <div className="space-y-2">
           <label className="flex items-center gap-2 text-xs"><input type="checkbox" className="size-3.5" checked={values.autoOpen} disabled={disabled || !canAutoOpen} onChange={event => onChange({ autoOpen: event.target.checked })} data-auto-open />启动就绪后自动打开网页</label>
           {!canAutoOpen && <p className="text-[11px] text-muted-foreground">仅填写端口的 Web 项目可用。</p>}
-        </div>
-        <p className="text-[11px] leading-relaxed text-muted-foreground">环境变量修改将在下次启动项目或重启终端后生效。其他命令仅在终端空闲时运行。</p>
+        </div>}
+        <p className="text-[11px] leading-relaxed text-muted-foreground">环境变量修改将在{runnable ? '下次启动项目或' : ''}重启终端后生效。其他命令仅在终端空闲时运行。</p>
       </CollapsibleContent>
     </Collapsible>
   );

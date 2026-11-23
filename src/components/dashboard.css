@@ -188,6 +188,17 @@
 .dash-launch-notice { white-space: nowrap; }
 .dash-launch-notice:hover { text-decoration: underline; text-underline-offset: 2px; }
 
+.dash-no-run {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px var(--dash-card-inset) 18px;
+}
+.dash-no-run strong { font-size: 13.5px; font-weight: 500; line-height: 18px; }
+.dash-no-run p { max-width: 34em; color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.65; }
+
 .dash-quick-list {
   --dash-quick-list-inset: 8px;
   display: flex;

@@ -673,6 +673,9 @@ async fn start(app: &AppHandle, id: &str, state: &ProcessMap) -> Result<(), Stri
             .into_iter()
             .find(|p| p.id == id_owned)
             .ok_or("未找到项目配置")?;
+        if !project.runnable {
+            return Err("此项目无需运行，如需启动请在编辑配置中勾选「需要运行」".into());
+        }
         if response
             .conflicts
             .iter()

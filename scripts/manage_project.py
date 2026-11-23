@@ -5,8 +5,8 @@ Bento SQLite Database Project Manager CLI for AI and Developers.
 Database: ~/.apphub/apphub.db
 Usage:
     python3 manage_project.py list [--group <name>]
-    python3 manage_project.py add --name <name> --path <path> --command <command> [--port <port>] [--type <web|app>] [--display <display>] [--desc <desc>] [--group <name>]
-    python3 manage_project.py update --id <id> [--name <name>] [--path <path>] [--port <port>] [--command <command>] [--type <web|app>] [--group <name>]
+    python3 manage_project.py add --name <name> --path <path> (--command <command> | --no-run) [--port <port>] [--type <web|app>] [--display <display>] [--desc <desc>] [--group <name>]
+    python3 manage_project.py update --id <id> [--name <name>] [--path <path>] [--port <port>] [--command <command>] [--type <web|app>] [--group <name>] [--run | --no-run]
     python3 manage_project.py delete <id>
     python3 manage_project.py check-port <port>
 """
@@ -69,6 +69,7 @@ def init_db(conn):
             ("archived", "INTEGER NOT NULL DEFAULT 0"),
             ("services", "TEXT NOT NULL DEFAULT '[]'"),
             ("inject_ports", "INTEGER NOT NULL DEFAULT 1"),
+            ("runnable", "INTEGER NOT NULL DEFAULT 1"),
         ]:
             if column not in cols:
                 conn.execute(f"ALTER TABLE projects ADD COLUMN {column} {definition}")
@@ -141,7 +142,8 @@ def cmd_list(args):
         ptype = r['type'] or 'web'
         group = r['group_name'] or '未分组'
         flags = (' · 置顶' if r['pinned'] else '') + (' · 已归档' if r['archived'] else '')
-        print(f"{r['id']:<20} | {ptype:<6} | {port_str:<6} | {display:<22} | {group:<12} | {r['start_command']}{flags}")
+        command = r['start_command'] if r['runnable'] else '（无需运行）'
+        print(f"{r['id']:<20} | {ptype:<6} | {port_str:<6} | {display:<22} | {group:<12} | {command}{flags}")
     print("-" * 92)
     print(f"共 {len(rows)} 个项目已配置。\n")
 
@@ -156,6 +158,12 @@ def cmd_check_port(args):
         print(f"✅ 端口 {args.port} 可用，未被任何 Bento 项目占用。")
 
 def cmd_add(args):
+    if args.no_run and (args.command is not None or args.port is not None):
+        print("❌ 错误：使用 --no-run 的项目无需运行，不能同时设置 --command 或 --port。", file=sys.stderr)
+        sys.exit(1)
+    if not args.no_run and not (args.command or "").strip():
+        print("❌ 错误：请用 --command 提供启动命令；无需运行的项目请使用 --no-run。", file=sys.stderr)
+        sys.exit(1)
     conn = get_connection()
     conn.execute("BEGIN IMMEDIATE")
     cur = conn.cursor()
@@ -176,8 +184,8 @@ def cmd_add(args):
 
     try:
         with conn:
-            columns = ["id", "name", "display_name", "description", "path", "port", "start_command", "type"]
-            values = [project_id, args.name, args.display or args.name, args.desc or "", args.path, args.port, args.command, project_type]
+            columns = ["id", "name", "display_name", "description", "path", "port", "start_command", "type", "runnable"]
+            values = [project_id, args.name, args.display or args.name, args.desc or "", args.path, args.port, args.command or "", project_type, 0 if args.no_run else 1]
             if args.group is not None:
                 columns.append("group_id")
                 values.append(resolve_group(conn, args.group))
@@ -195,7 +203,7 @@ def cmd_add(args):
         print(f"   类型: {project_type}")
         print(f"   端口: {args.port if args.port is not None else '无'}")
         print(f"   路径: {args.path}")
-        print(f"   启动命令: {args.command}")
+        print(f"   启动命令: {'无需运行' if args.no_run else args.command}")
     except sqlite3.IntegrityError as e:
         print(f"❌ 数据库写入失败 (唯一约束冲突): {e}", file=sys.stderr)
         sys.exit(1)
@@ -211,6 +219,10 @@ def cmd_update(args):
         print(f"❌ 未找到 ID 为「{args.id}」的项目！", file=sys.stderr)
         sys.exit(1)
 
+    runnable = bool(existing['runnable']) if args.runnable is None else args.runnable
+    if not runnable and (args.command is not None or args.port is not None):
+        print("❌ 错误：该项目无需运行，不能设置 --command 或 --port；如需启动请同时使用 --run。", file=sys.stderr)
+        sys.exit(1)
     new_name = args.name if args.name is not None else existing['name']
     new_display = args.display if args.display is not None else existing['display_name']
     new_desc = args.desc if args.desc is not None else existing['description']
@@ -219,11 +231,18 @@ def cmd_update(args):
     new_command = args.command if args.command is not None else existing['start_command']
     new_type = args.type if args.type is not None else (existing['type'] if 'type' in existing.keys() else 'web')
 
+    if runnable and not (new_command or "").strip():
+        print("❌ 错误：需要运行的项目必须有启动命令，请用 --command 提供。", file=sys.stderr)
+        sys.exit(1)
+
     try:
         services = json.loads(existing['services'])
     except (TypeError, ValueError):
         services = []
-    if services:
+    if not runnable:
+        new_port, new_command, services = None, "", []
+        services_json = "[]"
+    elif services:
         primary = next((service for service in services if service.get('openWeb')), None)
         if args.port is not None:
             if not primary:
@@ -236,20 +255,24 @@ def cmd_update(args):
             sys.exit(1)
         for port in ports:
             ensure_unique_port(conn, port, args.id)
+        services_json = json.dumps(services, ensure_ascii=False)
     else:
         ensure_unique_port(conn, new_port, args.id)
+        services_json = existing['services']
 
     with conn:
         group_id = resolve_group(conn, args.group) if args.group is not None else existing['group_id']
         conn.execute("""
             UPDATE projects
-            SET name = ?, display_name = ?, description = ?, path = ?, port = ?, start_command = ?, type = ?, group_id = ?, services = ?, updated_at = CURRENT_TIMESTAMP
+            SET name = ?, display_name = ?, description = ?, path = ?, port = ?, start_command = ?, type = ?, group_id = ?, services = ?, runnable = ?, updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
         """, (new_name, new_display, new_desc, new_path, new_port, new_command, new_type, group_id,
-              json.dumps(services, ensure_ascii=False) if services else existing['services'], args.id))
+              services_json, int(runnable), args.id))
+        if not runnable and "auto_open" in project_columns(conn):
+            conn.execute("UPDATE projects SET auto_open = 0 WHERE id = ?", (args.id,))
 
     print(f"✅ 成功更新项目「{args.id}」！")
-    print(f"   类型: {new_type}, 端口: {new_port}, 路径: {new_path}, 启动命令: {new_command}")
+    print(f"   类型: {new_type}, 端口: {new_port}, 路径: {new_path}, 启动命令: {new_command if runnable else '无需运行'}")
 
 def cmd_delete(args):
     conn = get_connection()
@@ -276,7 +299,8 @@ def main():
     p_add = subparsers.add_parser("add", help="新增项目")
     p_add.add_argument("--name", required=True, help="项目名称")
     p_add.add_argument("--path", required=True, help="项目路径（支持 ~）")
-    p_add.add_argument("--command", required=True, help="启动命令，如 'pnpm dev' 或 './start.sh dev'")
+    p_add.add_argument("--command", help="启动命令，如 'pnpm dev' 或 './start.sh dev'；使用 --no-run 时省略")
+    p_add.add_argument("--no-run", action="store_true", help="无需运行的项目：不填写启动命令和端口，只使用终端、Git 和其他命令")
     p_add.add_argument("--port", type=int, help="项目端口号（若提供则必须唯一）")
     p_add.add_argument("--type", choices=["web", "app"], default="web", help="项目类型：web (前端网页) 或 app (桌面/原生应用，默认 web)")
     p_add.add_argument("--display", help="显示别名")
@@ -295,6 +319,9 @@ def main():
     p_update.add_argument("--command", help="新启动命令")
     p_update.add_argument("--type", choices=["web", "app"], help="新项目类型")
     p_update.add_argument("--group", help="分组名称，不存在则新建；空字符串移回未分组，省略则保留")
+    run_mode = p_update.add_mutually_exclusive_group()
+    run_mode.add_argument("--run", dest="runnable", action="store_const", const=True, help="改为需要运行（需已有或同时提供 --command）")
+    run_mode.add_argument("--no-run", dest="runnable", action="store_const", const=False, help="改为无需运行，并清空启动命令、端口和服务")
 
     # delete
     p_del = subparsers.add_parser("delete", help="删除项目")

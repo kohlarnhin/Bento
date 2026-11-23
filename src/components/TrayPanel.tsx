@@ -4,7 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { projectInitial } from '../lib/sidebarModel';
 import { StatusDot } from './StatusDot';
 
-type Row = { id: string; name: string; port: number | null; status: 'starting' | 'running' | 'stopped' | 'error'; startedAt: number | null; agentDetail?: string | null };
+type Row = { id: string; name: string; runnable: boolean; port: number | null; status: 'starting' | 'running' | 'stopped' | 'error'; startedAt: number | null; agentDetail?: string | null };
 type Pane = { running: number; canStop: boolean; rows: Row[] };
 
 function duration(startedAt: number, now: number) {
@@ -64,7 +64,7 @@ export function TrayPanel() {
     <header><strong>Bento</strong><span>{view?.running ?? 0} 个运行中</span></header>
     <div className="tray-projects" aria-label="项目">
       {view?.rows.map(row => {
-        const detail = row.status === 'stopped' ? '已停止' : row.status === 'starting' ? '启动中' : row.status === 'error' ? '运行异常'
+        const detail = row.status === 'stopped' ? (row.runnable ? '已停止' : '无需运行') : row.status === 'starting' ? '启动中' : row.status === 'error' ? '运行异常'
           : [row.port == null ? undefined : ':' + row.port, row.startedAt == null ? undefined : duration(row.startedAt, time)].filter(Boolean).join(' · ');
         return <div className="tray-project" key={row.id} data-tray-project={row.id} data-tray-status={row.status}>
           <button type="button" className="tray-project-name" onClick={() => { void action('show', row.id); }}>
@@ -72,8 +72,8 @@ export function TrayPanel() {
             <span className="min-w-0"><b title={row.name}>{row.name}</b><small>{row.agentDetail ?? (detail || '运行中')}</small></span>
           </button>
           <StatusDot tone={row.status} aria-label={row.status === 'running' ? '运行中' : detail} />
-          <button type="button" className="h1-button" data-tray-toggle={row.id} disabled={busy != null}
-            onClick={() => { void toggle(row); }}>{row.status === 'stopped' ? '启动' : '停止'}</button>
+          {(row.runnable || row.status !== 'stopped') && <button type="button" className="h1-button" data-tray-toggle={row.id} disabled={busy != null}
+            onClick={() => { void toggle(row); }}>{row.status === 'stopped' ? '启动' : '停止'}</button>}
         </div>;
       })}
       {view?.rows.length === 0 && <p className="tray-empty">没有运行中的项目</p>}

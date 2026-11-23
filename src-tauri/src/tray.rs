@@ -39,6 +39,7 @@ pub struct TrayProject {
 pub struct PanelProject {
     id: String,
     name: String,
+    runnable: bool,
     port: Option<u16>,
     status: &'static str,
     started_at: Option<u64>,
@@ -188,21 +189,21 @@ fn panel_view(projects: &[ProjectConfig], managed: &[ManagedProject], recent: &[
     let agent_detail = |id: &str| by_project.get(id).map(|(_, agent)| {
         format!("{} · {}", agent.kind.label(), agent.state.label())
     });
-    let name = |id: &str| {
-        projects.iter().find(|project| project.id == id).map(|project| {
-            project.display_name.as_ref().filter(|name| !name.is_empty()).unwrap_or(&project.name).clone()
-        })
-    };
+    let project = |id: &str| projects.iter().find(|project| project.id == id);
+    let name = |id: &str| project(id).map(|project| {
+        project.display_name.as_ref().filter(|name| !name.is_empty()).unwrap_or(&project.name).clone()
+    });
+    let runnable = |id: &str| project(id).is_none_or(|project| project.runnable);
     let agent_projects = projects.iter().filter(|project| by_project.contains_key(project.id.as_str())).map(|project| &project.id);
     let mut seen: HashSet<_> = managed.iter().map(|project| project.id.as_str()).collect();
     let rows = active.into_iter().map(|info| PanelProject {
-        id: info.id.clone(), name: name(&info.id).unwrap_or_else(|| info.id.clone()), port: info.port,
+        id: info.id.clone(), name: name(&info.id).unwrap_or_else(|| info.id.clone()), runnable: runnable(&info.id), port: info.port,
         status: match info.phase { Phase::Running => "running", Phase::Starting => "starting", Phase::PortTimeout => "error" },
         started_at: Some(info.started_at),
         agent_detail: agent_detail(&info.id),
     }).chain(agent_projects.chain(recent.iter()).filter_map(|id| {
         if !seen.insert(id.as_str()) { return None; }
-        Some(PanelProject { id: id.clone(), name: name(id)?, port: None, status: "stopped", started_at: None,
+        Some(PanelProject { id: id.clone(), name: name(id)?, runnable: runnable(id), port: None, status: "stopped", started_at: None,
             agent_detail: agent_detail(id) })
     })).take(8).collect();
     PanelView { running: managed.iter().filter(|info| info.phase == Phase::Running).count(),
@@ -574,6 +575,7 @@ mod tests {
             display_name: display.map(String::from),
             description: None,
             path: "/tmp".into(),
+            runnable: true,
             port: None,
             services: Vec::new(),
             inject_ports: true,
@@ -604,7 +606,8 @@ mod tests {
 
     #[test]
     fn panel_caps_rows_and_puts_running_before_recent_stopped_projects() {
-        let projects: Vec<_> = (0..10).map(|index| config(&format!("p{index}"), None)).collect();
+        let mut projects: Vec<_> = (0..10).map(|index| config(&format!("p{index}"), None)).collect();
+        projects[7].runnable = false;
         let managed = [
             ManagedProject { id: "p2".into(), phase: Phase::Starting, port: None, started_at: 2000 },
             ManagedProject { id: "p5".into(), phase: Phase::Running, port: Some(5411), started_at: 1000 },
@@ -619,6 +622,7 @@ mod tests {
         assert_eq!(panel.rows[0].port, Some(5411));
         assert_eq!(panel.rows[0].started_at, Some(1000));
         assert_eq!(panel.rows[2].status, "stopped");
+        assert!(panel.rows[1].runnable && !panel.rows[2].runnable);
     }
 
     #[test]

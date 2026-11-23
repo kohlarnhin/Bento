@@ -51,6 +51,7 @@ export function QuickSwitcher({ projects, statuses, sessions, snippets, onRunSni
   const creationFirst = query.trim().length > 0 && creationActions.some(action => !action.pinyin);
   const target = matches.find(match => match.project.id === targetId)?.project ?? matches[0]?.project;
   const running = target && ['running', 'starting'].includes(statuses[target.id]);
+  const canToggle = !!target && (target.runnable || !!running);
   const name = target?.displayName || target?.name;
   const search = query.trim().toLowerCase();
   const matchesPinyin = useMemo(() => pinyinMatcher(query), [query]);
@@ -73,7 +74,7 @@ export function QuickSwitcher({ projects, statuses, sessions, snippets, onRunSni
   });
   const actions = [
     ...(target && !creationFirst ? [
-      { id: 'toggle', label: `${running ? '停止' : '启动'} ${name}`, icon: running ? Square : Play, key: '⌘↵', run: () => onToggle(target), indices: [] as number[] },
+      ...(canToggle ? [{ id: 'toggle', label: `${running ? '停止' : '启动'} ${name}`, icon: running ? Square : Play, key: '⌘↵', run: () => onToggle(target), indices: [] as number[] }] : []),
       { id: 'terminal', label: `在 ${name} 中新建终端`, icon: Terminal, key: '⌘T', run: () => onNewTerminal(target), indices: [] as number[] },
       ...target.commands.map((entry, index) => ({
         id: `command-${index}`, label: `运行 ${entry.name}`, icon: Terminal, key: '', run: () => onRunCommand(target, entry.command), indices: [],
@@ -171,7 +172,7 @@ export function QuickSwitcher({ projects, statuses, sessions, snippets, onRunSni
           if (!event.repeat) onCreate();
         } else if (command && (event.key === 'Enter' || event.key.toLowerCase() === 't')) {
           event.preventDefault(); event.stopPropagation();
-          if (!event.repeat && target) (event.key === 'Enter' ? onToggle : onNewTerminal)(target);
+          if (!event.repeat && target && (event.key !== 'Enter' || canToggle)) (event.key === 'Enter' ? onToggle : onNewTerminal)(target);
         } else if (!event.metaKey && !event.ctrlKey && !event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown' || (event.key === 'Enter' && !event.shiftKey))) {
           event.preventDefault(); event.stopPropagation();
           const next = quickSwitcherResultKey(event.key, event.repeat, activeIndex, options);

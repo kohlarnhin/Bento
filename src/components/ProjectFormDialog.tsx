@@ -41,7 +41,7 @@ interface Props {
   onSaved: (project: ProjectConfig) => Promise<void>;
 }
 type Values = Omit<ProjectDraft, 'port' | 'services' | 'groupId'> & { port: string; services: ServiceDraft[]; displayName: string; description: string };
-type Field = Exclude<keyof Values, 'env' | 'commands' | 'autoOpen' | 'services' | 'injectPorts'>;
+type Field = Exclude<keyof Values, 'env' | 'commands' | 'autoOpen' | 'services' | 'injectPorts' | 'runnable'>;
 type Errors = Partial<Record<Field, string>>;
 type Rescan = { status: 'scanning' } | { status: 'error'; message: string } |
   { status: 'ready'; result: ProjectDirInspection; unchecked: Set<RescanField> };
@@ -105,7 +105,7 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, scanO
   const groupOptions = [{ value: '', label: '未分组', count: counts.get('') },
     ...groups.map(group => ({ value: group.id, label: group.name, count: counts.get(group.id) }))];
   const [values, setValues] = useState<Values>(() => ({
-    path: project?.path ?? initialInspection?.path ?? '', name: project?.name ?? '',
+    path: project?.path ?? initialInspection?.path ?? '', name: project?.name ?? '', runnable: project?.runnable ?? true,
     displayName: project?.displayName ?? '', description: project?.description ?? '',
     type: project?.type === 'app' ? 'app' : 'web', port: project?.port?.toString() ?? '', startCommand: project?.startCommand ?? '',
     env: project?.env ?? [], commands: project?.commands ?? [], autoOpen: project?.autoOpen ?? false,
@@ -139,8 +139,9 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, scanO
   pathRef.current = values.path;
   const composing = useRef(false);
   const form = useRef<HTMLFormElement>(null);
-  const multiService = !!values.services.length;
-  const hasServiceCommands = values.services.some(service => !!service.startCommand?.trim());
+  const runnable = values.runnable;
+  const multiService = runnable && !!values.services.length;
+  const hasServiceCommands = multiService && values.services.some(service => !!service.startCommand?.trim());
   const launchPreview = useProjectLaunch({
     path: values.path,
     startCommand: values.startCommand,
@@ -148,8 +149,8 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, scanO
     services: savedServices(values.services),
     injectPorts: values.injectPorts,
     env: values.env,
-  }, !!values.startCommand.trim() || hasServiceCommands);
-  const checkedPortKey = (multiService ? [...new Set(values.services.map(service => portNumber(service.port)))].sort()
+  }, runnable && (!!values.startCommand.trim() || hasServiceCommands));
+  const checkedPortKey = (!runnable ? [] : multiService ? [...new Set(values.services.map(service => portNumber(service.port)))].sort()
     : [portNumber(values.port)]).filter(port => port != null).join(',');
 
   const inspect = useCallback(async (path: string) => {
@@ -207,14 +208,14 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, scanO
     return name ? `与「${name}」的端口 ${port} 重复` : undefined;
   };
   const checkedPort = portChecks[portNumber(values.port) ?? 0];
-  const portConflictMessage = !multiService ? conflictForPort(Number(values.port)) : undefined;
-  const serviceConflicts: ServiceErrors = Object.fromEntries(values.services.flatMap(service => {
+  const portConflictMessage = runnable && !multiService ? conflictForPort(Number(values.port)) : undefined;
+  const serviceConflicts: ServiceErrors = Object.fromEntries((multiService ? values.services : []).flatMap(service => {
     const port = portNumber(service.port);
     const conflict = port == null ? undefined : conflictForPort(port);
     return conflict ? [[service.id, { port: conflict }]] : [];
   }));
-  const serviceErrors = validateServiceFields ? validateServices(values.services, conflictForPort) : serviceConflicts;
-  const canAutoOpen = values.type === 'web' && portNumber(values.services.find(service => service.openWeb)?.port ?? values.port) != null;
+  const serviceErrors = validateServiceFields ? validateServices(multiService ? values.services : [], conflictForPort) : serviceConflicts;
+  const canAutoOpen = runnable && values.type === 'web' && portNumber(values.services.find(service => service.openWeb)?.port ?? values.port) != null;
 
   const rescanResult = rescan?.status === 'ready' ? rescan.result : undefined;
   const rescanError = rescan?.status === 'error' ? rescan.message : undefined;
@@ -241,7 +242,7 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, scanO
   }, [unchanged, rescanResult, showStandard]);
 
   const scanAgain = async () => {
-    if (!project || scanning || saving) return;
+    if (!project || scanning || saving || !values.runnable) return;
     const version = ++rescanVersion.current;
     const path = values.path;
     setAppliedServiceDiff(undefined);
@@ -305,12 +306,22 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, scanO
     setValues((current) => ({ ...current, [field]: value, ...((field === 'type' && value !== 'web') || (field === 'port' && !value.trim()) ? { autoOpen: false } : {}) }));
     setErrors((current) => ({ ...current, [field]: undefined, ...(field === 'type' ? { port: undefined } : {}) }));
   };
+  const changeRunnable = (next: boolean) => {
+    if (!next) {
+      ++rescanVersion.current;
+      setRescan(undefined);
+      setAppliedServiceDiff(undefined);
+    }
+    setValues(current => ({ ...current, runnable: next }));
+    setErrors(current => ({ ...current, port: undefined, startCommand: undefined }));
+  };
   const validate = (current: Values, directory?: ProjectDirInspection): Errors => {
     const next: Errors = {};
     if (!current.path.trim()) next.path = '请输入项目目录';
     else if (directory && !directory.exists) next.path = '目录不存在';
     else if (directory && !directory.isDir) next.path = '不是文件夹';
     if (!current.name.trim()) next.name = '请输入项目名称';
+    if (!current.runnable) return next;
     if (!current.startCommand.trim() && !current.services.some(service => service.startCommand?.trim())) next.startCommand = '请输入启动命令';
     if (!current.services.length && current.port.trim()) {
       if (portNumber(current.port) == null) next.port = '端口必须是 1–65535 之间的整数';
@@ -355,7 +366,7 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, scanO
         : undefined;
       const next = validate(values, directory);
       const advanced = validateAdvanced(values.env, values.commands);
-      const invalidServices = validateServices(values.services, conflictForPort);
+      const invalidServices = validateServices(values.runnable ? values.services : [], conflictForPort);
       setErrors(next);
       setValidateServiceFields(true);
       setAdvancedErrors(advanced);
@@ -371,8 +382,9 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, scanO
         });
         return;
       }
-      const services = savedServices(values.services);
-      const draft: ProjectDraft = { ...values, services, port: services.length ? services.find(service => service.openWeb)?.port ?? null : portNumber(values.port),
+      const services = values.runnable ? savedServices(values.services) : [];
+      const port = !values.runnable ? null : services.length ? services.find(service => service.openWeb)?.port ?? null : portNumber(values.port);
+      const draft: ProjectDraft = { ...values, services, port, startCommand: values.runnable ? values.startCommand : '',
         groupId: groupId || null, autoOpen: canAutoOpen && values.autoOpen };
       const saved = await invoke<ProjectConfig>(project ? 'update_project' : 'add_project', { ...(project ? { id: project.id } : {}), project: draft });
       toast.success(project ? '已保存修改' : `已添加项目「${saved.displayName || saved.name}」`);
@@ -464,11 +476,20 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, scanO
           search={{ placeholder: '搜索或新建分组…', creating: groupSaving, onCreate: createGroup }} />
       </div>
       <div className="space-y-2"><Label htmlFor="project-description">描述 <span className="font-normal text-muted-foreground">（可选）</span></Label><Textarea {...fieldProps('description')} rows={2} className="resize-none" placeholder="项目用途或备注" /></div>
-      <div className="space-y-2">
+      {runnable && <div className="space-y-2">
         <Label id="project-type-label">类型{updated.type && <UpdatedBadge />}</Label>
         <SegmentedControl labelledBy="project-type-label" options={types} value={values.type} onChange={type => change('type', type)}
           className={cn('border', updated.type && updatedInput)} disabled={saving} />
-      </div>
+      </div>}
+  </div>;
+  const runnableToggle = <div>
+    <label className="flex cursor-pointer items-center gap-2.5" data-project-runnable>
+      <input id="project-runnable" type="checkbox" checked={runnable} disabled={saving} className="size-3.5 shrink-0"
+        aria-describedby="project-runnable-hint" onChange={event => changeRunnable(event.target.checked)} />
+      <span className="shrink-0 text-[length:var(--text-control)] font-semibold">需要运行</span>
+      <span id="project-runnable-hint" className="min-w-0 text-[11px] leading-relaxed text-muted-foreground">{runnable
+        ? '由 Bento 启动，并显示端口与运行状态' : '无需填写端口和启动命令，终端、Git 和其他命令照常可用'}</span>
+    </label>
   </div>;
   const singlePort = (
       <div className="space-y-2">
@@ -529,7 +550,7 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, scanO
               <DialogTitle className={cn('min-w-0 truncate', serviceLayout && '!text-[17px]')} data-project-form-title>
                 {project ? '编辑项目' + (serviceLayout ? ' · ' + (project.displayName || project.name) : '') : '新建项目'}
               </DialogTitle>
-              {project && <Button ref={rescanButton} type="button" variant="outline" size="sm" disabled={saving || scanning} onClick={() => { void scanAgain(); }}>
+              {project && runnable && <Button ref={rescanButton} type="button" variant="outline" size="sm" disabled={saving || scanning} onClick={() => { void scanAgain(); }}>
                 {scanning ? <Loader2 aria-hidden="true" className="!size-3.5 animate-spin" /> : <RotateCw aria-hidden="true" className="!size-3.5" />}
                 {scanning ? '扫描中…' : '重新扫描'}
               </Button>}
@@ -537,7 +558,7 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, scanO
             <DialogDescription className={serviceLayout ? 'sr-only' : undefined}>{project ? '调整本地目录与运行配置。' : '选择本地项目目录，自动识别运行配置。'}</DialogDescription>
           </DialogHeader>
           <div className={cn('min-h-0 space-y-4 overflow-y-auto px-6 pb-5 pt-1', serviceLayout && 'space-y-[18px] px-[26px]')} data-project-form-body>
-            {project && (status === 'running' || status === 'starting') && <Alert><AlertDescription>项目正在运行，修改将在重启后生效</AlertDescription></Alert>}
+            {project && (status === 'running' || status === 'starting') && <Alert><AlertDescription>{runnable ? '项目正在运行，修改将在重启后生效' : '项目正在运行，保存后仍可在概览中停止'}</AlertDescription></Alert>}
             {saveError && <Alert variant="destructive"><AlertCircle /><AlertDescription>{saveError}</AlertDescription></Alert>}
             {(diff || appliedServiceDiff || rescanError) && <div ref={rescanCard} className="scroll-my-3" data-project-rescan-result>
               <ProjectRescanCard rows={diff?.rows} sourceFiles={diff?.sourceFiles} serviceChanges={(diff || appliedServiceDiff)?.serviceChanges}
@@ -562,6 +583,8 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, scanO
             <section className="h1-form-section" aria-labelledby="project-run-heading">
               <h2 id="project-run-heading" className="h1-group-title">运行配置</h2>
               <div className="h1-group h1-form-group">
+            {runnableToggle}
+            {runnable && <>
             {!multiService && singlePort}
             <div className="space-y-[7px]">
               <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
@@ -611,13 +634,14 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, scanO
                   : '按启动方式自动适配已填写的端口'}</span>
               </label>
             </div>
+            </>}
               </div>
             </section>
             {serviceLayout && <details className="h1-form-section" data-project-basic-details>
               <summary className="h1-group-title px-1.5">项目资料 <span aria-hidden="true">›</span></summary>
               {projectDetails}
             </details>}
-            <ProjectAdvancedFields values={canAutoOpen ? values : { ...values, autoOpen: false }} open={advancedOpen} onOpenChange={setAdvancedOpen} disabled={saving} canAutoOpen={canAutoOpen}
+            <ProjectAdvancedFields values={canAutoOpen ? values : { ...values, autoOpen: false }} open={advancedOpen} onOpenChange={setAdvancedOpen} disabled={saving} canAutoOpen={canAutoOpen} runnable={runnable}
               errors={advancedErrors} onBlur={() => setAdvancedErrors(validateAdvanced(values.env, values.commands))}
               onChange={patch => { setValues(current => ({ ...current, ...patch })); setAdvancedErrors({ env: [], commands: [] }); }} />
           </div>
