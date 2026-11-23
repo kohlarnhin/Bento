@@ -889,11 +889,6 @@ export function App() {
                   onSetDefaultService={setDefaultService}
                   onRevealPath={handleRevealPath}
                   onOpenEditor={() => openProjectEditor(selectedProject.id)}
-                  onOpenTerminal={() => {
-                    const slot = slots.includes(activeSlot) ? activeSlot : slots[0];
-                    if (slot === undefined) void openTerminal(selectedProject.id);
-                    else selectTerminalSlot(selectedProject.id, slot);
-                  }}
                   onOpenLogs={id => openProjectLogs(selectedProject, id)}
                   onClearLogs={() => handleClearLogs(selectedProject.id)}
                   onEdit={focusPort => openProjectConfig(selectedProject, focusPort)}

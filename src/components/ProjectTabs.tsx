@@ -72,6 +72,7 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
   }, [agentMenuOpen, terminalView, projectId, closeAgentMenu]);
 
   function create() {
+    if (atLimit || creating) return;
     setCreating(true);
     void onNewTerminal().finally(() => setCreating(false));
   }
@@ -134,6 +135,7 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
   const agentCounts = { claude: 0, codex: 0 };
   const tabs = [
     { value: 'overview', label: <TabLabel label="概览" /> },
+    ...(slots.length === 0 ? [{ value: 'new-terminal', label: <TabLabel label="终端" /> }] : []),
     ...slots.map((slot, index) => {
       const status = terminals[terminalKey(projectId, slot)];
       const agent = status?.agent;
@@ -163,6 +165,7 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
       <SegmentedControl className="h1-workspace-tabs" label="项目视图" options={tabs}
         value={terminalView ? `terminal:${activeSlot}` : view} onChange={next => {
           if (next === 'overview' || next === 'git') onSelectView(next);
+          else if (next === 'new-terminal') create();
           else onSelectTerminal(Number(next.slice('terminal:'.length)));
         }} />
       {add}

@@ -58,7 +58,6 @@ interface ProjectCardProps {
   onSetDefaultService: (serviceId: string) => Promise<void>;
   onRevealPath: (path: string) => void;
   onOpenEditor: () => void;
-  onOpenTerminal: () => void;
   onOpenLogs: (id?: string) => void;
   onClearLogs: () => void;
   onEdit: (conflict?: DashboardConflict) => void;
@@ -252,7 +251,7 @@ function ConflictDialog({ conflict, onClose, onConfirm }: {
 export function ProjectCard({ project, view, slots, activeSlot, terminals, terminalControls, onFocusedTerminal, onJumpToAttention, onSelectView, onSelectTerminal,
   focused, maxTerminals, showQuickCommands, snippets, onRunSnippet, onChangeSnippet, onToggleFocus, onNewTerminal, onOpenAgent, closeActiveTab,
   status: runtimeStatus, runtime, conflicts, onStart, onStop, onRestart, onOpenBrowser,
-  onSetDefaultService, onRevealPath, onOpenEditor, onOpenTerminal, onOpenLogs, onClearLogs, onEdit }: ProjectCardProps) {
+  onSetDefaultService, onRevealPath, onOpenEditor, onOpenLogs, onClearLogs, onEdit }: ProjectCardProps) {
   const { snapshot, snapshotError, git, health, now, refresh } = useDashboard(project, runtime, view);
   const launch = useProjectLaunch(project);
   const auditLaunch = launch?.data?.mode === 'shared' && project.injectPorts && project.services.some(service => service.port != null);
@@ -448,7 +447,7 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
               onReveal={() => onRevealPath(project.path)} onEdit={() => onEdit()} />
           </div>
           <DashboardOutput project={project} services={services} active={active} last={last} now={now}
-            onTerminal={onOpenTerminal} onJump={onOpenLogs} onClear={onClearLogs} />
+            onJump={onOpenLogs} onClear={onClearLogs} />
         </div>
       </div>
       <div className="workspace-view" data-workspace-view="git" {...{ inert: shown !== 'git' || view !== 'git' ? '' : undefined }}>

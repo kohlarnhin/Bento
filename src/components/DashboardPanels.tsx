@@ -1,18 +1,16 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ArrowRight } from 'lucide-react';
 import { dashboardLog, logTime, recentLogCounts, relativeTime } from '../lib/dashboard';
 import { useProjectLogLines } from '../lib/useProjectLogs';
 import type { DashboardGit, DashboardRun, ProjectConfig, Service } from '../types';
 import { LogText } from './LogText';
 import { SegmentedControl } from './ui/segmented-control';
 
-export function DashboardOutput({ project, services, active, last, now, onTerminal, onJump, onClear }: {
+export function DashboardOutput({ project, services, active, last, now, onJump, onClear }: {
   project: ProjectConfig;
   services: Service[];
   active: boolean;
   last?: DashboardRun | null;
   now: number;
-  onTerminal: () => void;
   onJump: (id: string) => void;
   onClear: () => void;
 }) {
@@ -48,7 +46,6 @@ export function DashboardOutput({ project, services, active, last, now, onTermin
     <header className="dash-output-heading" data-workspace-content>
       <h2 className="h1-group-title" id="dash-output-heading">{active ? '输出' : '上次输出'}</h2>
       {!active && logs.length > 0 && <span className="dash-faint">· 停止前最后 {logs.length} 行</span>}
-      <button type="button" className="h1-tag dash-right" onClick={onTerminal}>打开终端 <ArrowRight size={13} aria-hidden="true" /></button>
     </header>
     <div className="dash-output-panel terminal-chrome">
       <div className="dash-log-toolbar" data-workspace-content>
