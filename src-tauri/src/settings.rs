@@ -7,7 +7,6 @@ const FONT_SIZE: &str = "terminal.fontSize";
 const MAX_PER_PROJECT: &str = "terminal.maxPerProject";
 const DEFAULT_APPLIED: &str = "autostart.defaultApplied";
 const APPEARANCE: &str = "appearance.theme";
-pub const RESTORE_TERMINALS: &str = "terminal.restore";
 const QUICK_COMMANDS: &str = "terminal.quickCommands";
 pub const COMMAND_NOTICES: &str = "terminal.commandNotices";
 pub const AGENT_NOTICES: &str = "terminal.agentNotices";
@@ -61,8 +60,6 @@ pub struct Settings {
     pub autostart_default_applied: bool,
     #[serde(rename = "appearance.theme")]
     appearance: Appearance,
-    #[serde(rename = "terminal.restore")]
-    restore_terminals: bool,
     #[serde(rename = "terminal.quickCommands")]
     quick_commands: bool,
     #[serde(rename = "terminal.commandNotices")]
@@ -91,7 +88,6 @@ pub fn read(conn: &Connection) -> Result<Settings, String> {
         terminal_max_per_project: max_per_project(conn)?,
         autostart_default_applied: default_applied(conn)?,
         appearance: read_appearance(conn)?,
-        restore_terminals: enabled(conn, RESTORE_TERMINALS)?,
         quick_commands: enabled(conn, QUICK_COMMANDS)?,
         command_notices: enabled(conn, COMMAND_NOTICES)?,
         agent_notices: enabled(conn, AGENT_NOTICES)?,
@@ -160,7 +156,7 @@ pub fn set(conn: &Connection, key: &str, value: Value) -> Result<(), String> {
                 .ok_or("外观必须是跟随系统、浅色或深色")?;
             save(conn, key, choice)
         }
-        RESTORE_TERMINALS | QUICK_COMMANDS | COMMAND_NOTICES | AGENT_NOTICES | SHOW_TRAY => {
+        QUICK_COMMANDS | COMMAND_NOTICES | AGENT_NOTICES | SHOW_TRAY => {
             let enabled = value.as_bool().ok_or("该设置只能开启或关闭")?;
             save(conn, key, if enabled { "true" } else { "false" })
         }
@@ -196,18 +192,6 @@ pub fn set_setting(app: AppHandle, key: String, value: Value) -> Result<(), Stri
     if key == AGENT_NOTICES {
         set(&conn, &key, value)?;
         app.state::<crate::terminal::TerminalManager>().set_agent_notices(enabled(&conn, AGENT_NOTICES)?);
-        return Ok(());
-    }
-    if key == RESTORE_TERMINALS {
-        let transaction = conn.transaction().map_err(|error| error.to_string())?;
-        let previous = enabled(&transaction, RESTORE_TERMINALS)?;
-        set(&transaction, &key, value)?;
-        let manager = app.state::<crate::terminal::TerminalManager>();
-        manager.set_restore(enabled(&transaction, RESTORE_TERMINALS)?)?;
-        if let Err(error) = transaction.commit() {
-            let _ = manager.set_restore(previous);
-            return Err(format!("保存终端恢复设置失败：{error}"));
-        }
         return Ok(());
     }
     if key != APPEARANCE {
@@ -250,7 +234,7 @@ mod tests {
         crate::init_db(&conn).unwrap();
         assert_eq!(project_rows(&conn), before);
         assert_eq!(read(&conn).unwrap(), Settings { terminal_font_size: 14, terminal_max_per_project: 2,
-            autostart_default_applied: false, appearance: Appearance::System, restore_terminals: true,
+            autostart_default_applied: false, appearance: Appearance::System,
             quick_commands: true, command_notices: true, agent_notices: true, show_tray: true });
         set(&conn, FONT_SIZE, json!(18)).unwrap();
         assert_eq!(read(&conn).unwrap().terminal_font_size, 18);
@@ -285,6 +269,29 @@ mod tests {
         assert!(set(&conn, legacy_key, json!(true)).is_err());
         let saved: String = conn.query_row("SELECT value FROM settings WHERE key = ?1", [legacy_key], |row| row.get(0)).unwrap();
         assert_eq!(saved, "false");
+    }
+
+    #[test]
+    fn legacy_terminal_restore_key_is_ignored_without_losing_other_settings() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::init_db(&conn).unwrap();
+        set(&conn, FONT_SIZE, json!(18)).unwrap();
+        set(&conn, MAX_PER_PROJECT, json!(4)).unwrap();
+        set(&conn, APPEARANCE, json!("dark")).unwrap();
+        for key in [QUICK_COMMANDS, COMMAND_NOTICES, AGENT_NOTICES, SHOW_TRAY] {
+            set(&conn, key, json!(false)).unwrap();
+        }
+        record_default_applied(&conn).unwrap();
+        let expected = read(&conn).unwrap();
+
+        for legacy in ["true", "false"] {
+            save(&conn, "terminal.restore", legacy).unwrap();
+            crate::init_db(&conn).unwrap();
+            let settings = read(&conn).unwrap();
+            assert_eq!(settings, expected);
+            assert!(serde_json::to_value(settings).unwrap().get("terminal.restore").is_none());
+        }
+        assert!(set(&conn, "terminal.restore", json!(true)).is_err());
     }
 
     #[test]

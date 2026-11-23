@@ -158,14 +158,13 @@ mod tests {
 
     #[test]
     fn split_osc_133_boundaries_report_exit_codes_at_ten_seconds_only() {
-        use crate::terminal_escape::EscapeStream;
+        use crate::terminal_escape::{EscapeEvent, EscapeStream};
         let mut parser = EscapeStream::default();
         let mut commands = Boundaries::default();
         let now = Instant::now();
         let mut feed = |data: &[u8], offset| {
             data.iter().find_map(|&byte| {
-                let (_, message) = parser.push(byte);
-                let data = message?;
+                let EscapeEvent::Osc(data) = parser.event(byte) else { return None; };
                 let text = std::str::from_utf8(&data).ok()?.strip_prefix("133;")?;
                 commands.observe(text, now + Duration::from_millis(offset))
             })

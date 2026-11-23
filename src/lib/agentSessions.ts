@@ -1,7 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { TerminalAgentKind, TerminalSessionInfo } from '../types';
-import type { TerminalStatus } from './terminalRegistry';
 
 export interface AgentHistorySession {
   tool: TerminalAgentKind;
@@ -19,16 +17,14 @@ export interface ProjectAgentSession extends AgentHistorySession {
 }
 
 export type AgentArgv = ['claude' | 'codex'] | ['claude', '--resume', string] | ['codex', 'resume', string];
-export type AgentRecoveryTarget = { slot: number; sessionId: string };
-export type OpenAgent = (argv: AgentArgv, recovery?: AgentRecoveryTarget) => Promise<void>;
-export type AgentRecoveries = Record<string, AgentHistorySession>;
+export type OpenAgent = (argv: AgentArgv) => Promise<void>;
 
 export interface AgentMenuData {
   tools: TerminalAgentKind[];
   sessions: AgentHistorySession[];
 }
 
-export async function loadAgentIndex<T>(command: 'terminal_agent_project_sessions' | 'terminal_agent_menu' | 'terminal_agent_recoveries',
+export async function loadAgentIndex<T>(command: 'terminal_agent_project_sessions' | 'terminal_agent_menu',
   args: Record<string, string>, receive: (data: T) => void, cachedOnly = false) {
   try {
     receive(await invoke<T>(command, { ...args, cached: true }));
@@ -44,10 +40,9 @@ export function agentArgv(tool: TerminalAgentKind, id?: string): AgentArgv {
 }
 
 export async function activateAgentTerminal(projectId: string, argv: AgentArgv,
-  select: (terminal: TerminalSessionInfo) => void, prepare: (terminal: TerminalSessionInfo) => Promise<void>,
-  recovery?: AgentRecoveryTarget) {
+  select: (terminal: TerminalSessionInfo) => void, prepare: (terminal: TerminalSessionInfo) => Promise<void>) {
   const { session, launchId } = await invoke<{ session: TerminalSessionInfo; launchId: string | null }>(
-    'terminal_agent_start', { projectId, argv, recovery });
+    'terminal_agent_start', { projectId, argv });
   select(session);
   if (!launchId) return session;
   await prepare(session);
@@ -65,39 +60,4 @@ export function agentSessionDate(timestamp: number, now = new Date()) {
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
   return date.toDateString() === yesterday.toDateString() ? `昨天 ${clock.format(date)}` : calendar.format(date);
-}
-
-export function useAgentRecoveries(terminals: Record<string, TerminalStatus>) {
-  const batch = useMemo(() => Object.values(terminals).filter(terminal => terminal.hasAgentRecovery)
-    .map(terminal => terminal.sessionId).sort().join(','), [terminals]);
-  const [resolved, setResolved] = useState<AgentRecoveries>({});
-  const [dismissed, setDismissed] = useState<ReadonlySet<string>>(new Set());
-  const dismiss = useCallback((sessionId: string) => setDismissed(previous => new Set(previous).add(sessionId)), []);
-  useEffect(() => {
-    const pending = new Set(batch.split(','));
-    setDismissed(previous => {
-      const remaining = new Set([...previous].filter(id => pending.has(id)));
-      return remaining.size === previous.size ? previous : remaining;
-    });
-    if (!batch) {
-      setResolved(previous => Object.keys(previous).length ? {} : previous);
-      return;
-    }
-    let current = true;
-    void loadAgentIndex<AgentRecoveries>('terminal_agent_recoveries', {}, result => {
-      if (current) setResolved(result);
-    }).catch(() => {});
-    return () => { current = false; };
-  }, [batch]);
-
-  return useMemo(() => {
-    const recoveries: AgentRecoveries = {};
-    const counts = new Map<string, number>();
-    for (const { projectId, sessionId, alive, agent, hasAgentRecovery } of Object.values(terminals)) {
-      if (!sessionId || !alive || agent || !hasAgentRecovery || dismissed.has(sessionId) || !resolved[sessionId]) continue;
-      recoveries[sessionId] = resolved[sessionId];
-      counts.set(projectId, (counts.get(projectId) ?? 0) + 1);
-    }
-    return { recoveries, counts, dismiss };
-  }, [terminals, resolved, dismissed, dismiss]);
 }

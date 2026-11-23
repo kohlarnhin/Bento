@@ -53,26 +53,6 @@
 .terminal-agent-menu button:focus-visible { background: var(--h1-hover); outline: 1px solid var(--hairline-selection); outline-offset: -1px; }
 .terminal-agent-session-option > svg { color: var(--h1-label); }
 
-.terminal-agent-recovery {
-  display: flex;
-  flex: none;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 12px;
-  margin-top: 10px;
-  border: 1px solid var(--hairline-card);
-  border-radius: 12px;
-  padding: 10px 12px;
-  background: color-mix(in srgb, var(--h1-surface), white 4%);
-  color: hsl(var(--foreground));
-  font: 13px/1.45 var(--font-ui);
-}
-.terminal-agent-recovery > svg { flex: none; }
-.terminal-agent-recovery-copy { flex: 1 1 175px; min-width: 0; }
-.terminal-agent-recovery-copy p { color: var(--h1-label); font-size: 11.5px; }
-.terminal-agent-recovery-actions { display: flex; flex: none; gap: 8px; margin-inline-start: auto; }
-.terminal-agent-recovery-actions .h1-button { min-height: 30px; border-radius: 8px; padding-inline: 11px; font-size: 12px; }
-
 .terminal-workspace {
   display: flex;
   flex: 1;

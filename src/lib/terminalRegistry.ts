@@ -62,7 +62,6 @@ interface Entry {
 interface Registry {
   entries: Map<string, Entry>;
   inactiveHost?: HTMLDivElement;
-  restoredSlots: Map<string, number>;
   snapshot: Record<string, TerminalStatus>;
   subscribers: Set<() => void>;
   initialized?: Promise<void>;
@@ -74,7 +73,7 @@ interface Registry {
 
 // Retain instances and listeners through module HMR as well as React StrictMode remounts.
 const registry: Registry = import.meta.hot?.data.terminalRegistry ?? {
-  entries: new Map(), snapshot: {}, subscribers: new Set(), closedSessions: new Set(), restoredSlots: new Map(),
+  entries: new Map(), snapshot: {}, subscribers: new Set(), closedSessions: new Set(),
   agentEvents: new Map(), fontSize: DEFAULT_TERMINAL_FONT_SIZE, showError: () => {},
 };
 if (import.meta.hot) {
@@ -102,12 +101,6 @@ export function subscribeTerminals(subscriber: () => void) {
 export const getTerminalSnapshot = () => registry.snapshot;
 export const getTerminal = (projectId: string, slot: number) => registry.entries.get(terminalKey(projectId, slot))?.terminal;
 export const getTerminalSearch = (projectId: string, slot: number) => registry.entries.get(terminalKey(projectId, slot))?.search;
-
-export function takeRestoredSlot(projectId: string) {
-  const slot = registry.restoredSlots.get(projectId);
-  registry.restoredSlots.delete(projectId);
-  return slot !== undefined && registry.snapshot[terminalKey(projectId, slot)]?.sessionId ? slot : undefined;
-}
 
 let lastAttentionAt = 0;
 function attentionTime(attention: boolean, previous?: TerminalStatus) {
@@ -220,7 +213,6 @@ function receiveClosed(event: TerminalClosed) {
   // A delayed close of the old session must never dispose its replacement.
   const knownSession = entry?.expectedSessionId ?? current?.sessionId;
   if (knownSession && knownSession !== event.sessionId) return;
-  if (registry.restoredSlots.get(event.projectId) === event.slot) registry.restoredSlots.delete(event.projectId);
   if (entry) {
     entry.disposed = true;
     entry.input = [];
@@ -269,10 +261,7 @@ export function initTerminalRegistry(showError: (message: string) => void): Prom
         unlisteners.push(await listen<TerminalSessionInfo>('terminal-opened', ({ payload }) => dispatch(() => receiveOpened(payload))));
         unlisteners.push(await listen<TerminalClosed>('terminal-closed', ({ payload }) => dispatch(() => receiveClosed(payload))));
         const sessions = await invoke<TerminalSessionInfo[]>('terminal_list');
-        for (const session of sessions) {
-          if (session.restoredActive) registry.restoredSlots.set(session.projectId, session.slot);
-          receiveOpened(session);
-        }
+        sessions.forEach(receiveOpened);
         listing = false;
         pending.forEach(apply => apply());
         unlisteners.push(await getCurrentWebview().onDragDropEvent(({ payload }) => handleTerminalDragDrop(payload)));
@@ -679,7 +668,7 @@ export function attachTerminal(projectId: string, slot: number, host: HTMLDivEle
     if (!onReady) return;
     await entry.opening;
     if (!attached() || !entry.opened) return;
-    // Let xterm consume the restored writes and draw rows before revealing its layer.
+    // Let xterm draw the initial PTY output before revealing its layer.
     entry.terminal.write('', () => {
       if (!attached()) return;
       entry.terminal.refresh(0, entry.terminal.rows - 1);
@@ -730,9 +719,6 @@ export async function createTerminal(projectId: string): Promise<number> {
 export function registerTerminalResult(session: TerminalSessionInfo) {
   const current = registry.snapshot[terminalKey(session.projectId, session.slot)];
   if (!current?.sessionId) receiveOpened(session);
-  else if (current.sessionId === session.sessionId && current.hasAgentRecovery !== session.hasAgentRecovery) {
-    publish({ ...current, hasAgentRecovery: session.hasAgentRecovery });
-  }
 }
 
 export async function closeTerminal(projectId: string, slot: number, sessionId: string) {

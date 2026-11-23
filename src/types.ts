@@ -173,8 +173,6 @@ export interface TerminalSessionInfo {
   agent?: TerminalAgent | null;
   agentRevision?: number;
   title?: string;
-  restoredActive?: boolean;
-  hasAgentRecovery?: boolean;
   completion?: TerminalCompletion | null;
   exitCode?: number | null;
   pid?: number | null;

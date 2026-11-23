@@ -8,7 +8,6 @@ interface Settings {
   'terminal.maxPerProject': number;
   'autostart.defaultApplied': boolean;
   'appearance.theme': Appearance;
-  'terminal.restore': boolean;
   'terminal.quickCommands'?: boolean;
   'terminal.commandNotices': boolean;
   'terminal.agentNotices': boolean;
@@ -16,7 +15,6 @@ interface Settings {
 }
 
 const defaults = {
-  'terminal.restore': true,
   'terminal.quickCommands': true,
   'terminal.commandNotices': true,
   'terminal.agentNotices': true,
@@ -88,7 +86,6 @@ export function useSettings() {
       setMaxPerProject(settings['terminal.maxPerProject']);
       setAppearance(settings['appearance.theme'] ?? 'system');
       setFeatures({
-        'terminal.restore': settings['terminal.restore'] ?? true,
         'terminal.quickCommands': settings['terminal.quickCommands'] ?? defaults['terminal.quickCommands'],
         'terminal.commandNotices': settings['terminal.commandNotices'] ?? true,
         'terminal.agentNotices': settings['terminal.agentNotices'] ?? true,

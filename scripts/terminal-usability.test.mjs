@@ -118,7 +118,7 @@ test('Attention ordering selects the newest, then the next remaining terminal wi
   assert.deepEqual(terminalsNeedingAttention([]), []);
 });
 
-test('Attention ties and restored timestamps have a stable order', () => {
+test('Attention targets without timestamps have a stable order', () => {
   const targets = [
     { projectId: 'b', slot: 1, attention: true },
     { projectId: 'a', slot: 2, attention: true },

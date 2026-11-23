@@ -13,7 +13,7 @@ import { usePortStandard } from '../lib/usePortStandard';
 import { useReducedMotion } from '../lib/motion';
 import { dashboardEntranceLimit, readyProjectView } from '../lib/motionMath';
 import type { TerminalStatus } from '../lib/terminalRegistry';
-import type { AgentRecoveries, OpenAgent } from '../lib/agentSessions';
+import type { OpenAgent } from '../lib/agentSessions';
 import { useProjectViewMotion } from '../hooks/useProjectViewMotion';
 import { DashboardGitCard, DashboardOutput } from './DashboardPanels';
 import { OpenServiceButton, ProjectWebMenu } from './ProjectServices';
@@ -42,8 +42,6 @@ interface ProjectCardProps {
   onToggleFocus: () => void;
   onNewTerminal: () => Promise<void>;
   onOpenAgent: OpenAgent;
-  agentRecoveries: AgentRecoveries;
-  onDismissAgentRecovery: (sessionId: string) => void;
   closeActiveTab: RefObject<() => void>;
   terminalControls: RefObject<TerminalWorkspaceControls>;
   onFocusedTerminal: (projectId: string, slot: number, left: number, right?: number) => void;
@@ -252,7 +250,7 @@ function ConflictDialog({ conflict, onClose, onConfirm }: {
 }
 
 export function ProjectCard({ project, view, slots, activeSlot, terminals, terminalControls, onFocusedTerminal, onJumpToAttention, onSelectView, onSelectTerminal,
-  focused, maxTerminals, showQuickCommands, snippets, onRunSnippet, onChangeSnippet, onToggleFocus, onNewTerminal, onOpenAgent, agentRecoveries, onDismissAgentRecovery, closeActiveTab,
+  focused, maxTerminals, showQuickCommands, snippets, onRunSnippet, onChangeSnippet, onToggleFocus, onNewTerminal, onOpenAgent, closeActiveTab,
   status: runtimeStatus, runtime, conflicts, onStart, onStop, onRestart, onOpenBrowser,
   onSetDefaultService, onRevealPath, onOpenEditor, onOpenTerminal, onOpenLogs, onClearLogs, onEdit }: ProjectCardProps) {
   const { snapshot, snapshotError, git, health, now, refresh } = useDashboard(project, runtime, view);
@@ -462,7 +460,6 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
       </div>
       <div className="workspace-view terminal-chrome" data-workspace-view="terminal" {...{ inert: !terminalInteractive ? '' : undefined }}>
         {mountTerminal && <TerminalWorkspace ref={terminalControls} project={project} activeSlot={activeSlot} slots={slots} terminals={terminals}
-          agentRecoveries={agentRecoveries} onOpenAgent={onOpenAgent} onDismissAgentRecovery={onDismissAgentRecovery}
           showQuickCommands={showQuickCommands} snippets={snippets} onRunSnippet={onRunSnippet} onChangeSnippet={onChangeSnippet}
           onJumpToAttention={onJumpToAttention}
           focused={focused} interactive={terminalInteractive} ready={terminalReady} onReady={setReadySlot} onFocusedSlot={onFocusedTerminal} />}

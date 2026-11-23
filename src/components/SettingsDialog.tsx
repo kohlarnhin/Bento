@@ -120,8 +120,6 @@ function TerminalSettings({ settings }: { settings: SettingsController }) {
     <SettingsGroup id="settings-terminal-features-group" title="功能">
       <FeatureRow settings={settings} feature="terminal.quickCommands" label="常用命令"
         description="终端底部的命令栏。关闭后不再显示，已保存的命令会保留" />
-      <FeatureRow settings={settings} feature="terminal.restore" label="重启后恢复终端"
-        description="重新打开 Bento 时恢复上次的终端和输出" />
     </SettingsGroup>
   </>;
 }

@@ -66,7 +66,7 @@ fn both_cli_formats_use_cwd_and_extract_title_duration_and_distinct_edits() {
     );
     let mut catalog = fixture.catalog();
     catalog.refresh();
-    let sessions = catalog.project_sessions(Path::new(ROOT), &HashSet::new());
+    let sessions = catalog.project_sessions(Path::new(ROOT));
     assert_eq!(sessions.len(), 2);
     let [claude, codex] = sessions.as_slice() else {
         unreachable!()
@@ -87,16 +87,13 @@ fn both_cli_formats_use_cwd_and_extract_title_duration_and_distinct_edits() {
     assert_eq!(codex.file_count, Some(2));
     assert_eq!(
         catalog
-            .project_sessions(
-                Path::new("/sample/projects/current/nested"),
-                &HashSet::new()
-            )
+            .project_sessions(Path::new("/sample/projects/current/nested"))
             .len(),
         1
     );
     assert_eq!(
         catalog
-            .project_sessions(Path::new("/sample/projects/current-other"), &HashSet::new())
+            .project_sessions(Path::new("/sample/projects/current-other"))
             .len(),
         1
     );
@@ -144,14 +141,11 @@ fn batch_search_uses_registered_roots_and_assigns_nested_sessions_once() {
     );
     let mut catalog = fixture.catalog();
     catalog.refresh();
-    let sessions = catalog.all_project_sessions(
-        [
+    let sessions = catalog.all_project_sessions([
             ("root", PathBuf::from(ROOT)),
             ("nested", Path::new(ROOT).join("nested")),
             ("invalid", PathBuf::new()),
-        ],
-        &HashSet::new(),
-    );
+    ]);
     assert_eq!(sessions.len(), 2);
     assert_eq!(sessions[0].project_id, "root");
     assert_eq!(sessions[0].session.reference.id, CLAUDE_ID);
@@ -161,13 +155,10 @@ fn batch_search_uses_registered_roots_and_assigns_nested_sessions_once() {
     assert_eq!(value["projectId"], "nested");
     assert_eq!(value["id"], CODEX_ID);
     assert_eq!(value["tool"], "codex");
-    let other = catalog.all_project_sessions(
-        [("other", PathBuf::from("/sample/projects/current-other"))],
-        &HashSet::new(),
-    );
+    let other = catalog.all_project_sessions([("other", PathBuf::from("/sample/projects/current-other"))]);
     assert_eq!(other.len(), 1);
     assert_eq!(other[0].session.reference.id, other_id);
-    assert!(catalog.all_project_sessions([], &HashSet::new()).is_empty());
+    assert!(catalog.all_project_sessions([]).is_empty());
 }
 
 #[test]
@@ -176,7 +167,7 @@ fn missing_directories_bad_files_and_old_logs_are_ignored() {
     let mut catalog = fixture.catalog();
     catalog.refresh();
     assert!(catalog
-        .project_sessions(Path::new(ROOT), &HashSet::new())
+        .project_sessions(Path::new(ROOT))
         .is_empty());
     let old = fixture.write(AgentKind::Claude, CLAUDE_ID, CLAUDE);
     File::options()
@@ -200,7 +191,7 @@ fn missing_directories_bad_files_and_old_logs_are_ignored() {
     );
     catalog.refresh();
     assert!(catalog
-        .project_sessions(Path::new(ROOT), &HashSet::new())
+        .project_sessions(Path::new(ROOT))
         .is_empty());
     assert_eq!(catalog.files.len(), 2);
 }
@@ -218,9 +209,9 @@ fn cache_tracks_mtime_and_removals_and_lists_only_the_latest_twenty() {
         last = fixture.write(AgentKind::Claude, &id, &data);
     }
     catalog.refresh();
-    let list = catalog.project_sessions(Path::new(ROOT), &HashSet::new());
+    let list = catalog.project_sessions(Path::new(ROOT));
     assert_eq!(list.len(), PROJECT_LIMIT);
-    let searchable = catalog.all_project_sessions([("root", PathBuf::from(ROOT))], &HashSet::new());
+    let searchable = catalog.all_project_sessions([("root", PathBuf::from(ROOT))]);
     assert_eq!(searchable.len(), 25);
     assert!(searchable[24].session.reference.id.ends_with("0000"));
     assert!(list[0].reference.id.ends_with("0024"));
@@ -238,13 +229,13 @@ fn cache_tracks_mtime_and_removals_and_lists_only_the_latest_twenty() {
         .unwrap();
     catalog.refresh();
     assert_eq!(
-        catalog.project_sessions(Path::new(ROOT), &HashSet::new())[0].title,
+        catalog.project_sessions(Path::new(ROOT))[0].title,
         "新的标题进 URL"
     );
     fs::remove_file(last).unwrap();
     catalog.refresh();
     assert!(
-        !catalog.project_sessions(Path::new(ROOT), &HashSet::new())[0]
+        !catalog.project_sessions(Path::new(ROOT))[0]
             .reference
             .id
             .ends_with("0024")
@@ -262,7 +253,7 @@ fn bounded_samples_keep_tail_time_and_omit_incomplete_file_counts() {
     writeln!(file, "{{\"timestamp\":\"2026-11-20T14:12:00Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_complete\"}}}}").unwrap();
     let mut catalog = fixture.catalog();
     catalog.refresh();
-    let result = catalog.project_sessions(Path::new(ROOT), &HashSet::new());
+    let result = catalog.project_sessions(Path::new(ROOT));
     assert_eq!(result[0].title, "导出 CSV 加时间范围");
     assert_eq!(result[0].duration_ms, 60 * 60_000);
     assert_eq!(result[0].file_count, None);
@@ -282,7 +273,7 @@ fn fallback_user_events_and_legacy_patch_arguments_are_supported() {
     );
     let mut catalog = fixture.catalog();
     catalog.refresh();
-    let result = catalog.project_sessions(Path::new(ROOT), &HashSet::new());
+    let result = catalog.project_sessions(Path::new(ROOT));
     assert_eq!(result[0].title, format!("{}…", "字".repeat(100)));
     assert_eq!(result[0].file_count, Some(2));
 }
@@ -326,23 +317,21 @@ fn claude_short_history_requires_one_user_under_a_minute_and_no_edit_call() {
         json!([{"type":"tool_result","content":"fixture"}]),
     );
     let mut records = vec![user.clone(), read.clone(), tools];
-    let empty = HashSet::new();
     let short = parse_rows(AgentKind::Claude, &records, true);
     assert_eq!(short.evidence.user_messages, Some(1));
     assert_eq!(short.evidence.duration_ms, Some(59_999));
-    assert!(!short.in_history(&empty));
-    assert!(short.in_history(&HashSet::from([short.summary.reference.clone()])));
-    assert!(parse_rows(AgentKind::Claude, &records, false).in_history(&empty));
+    assert!(!short.in_history());
+    assert!(parse_rows(AgentKind::Claude, &records, false).in_history());
 
     records[1]["timestamp"] = json!(MINUTE);
-    assert!(parse_rows(AgentKind::Claude, &records, true).in_history(&empty));
+    assert!(parse_rows(AgentKind::Claude, &records, true).in_history());
     records[1] = claude_message("user", SHORT, json!("再问一个问题"));
-    assert!(parse_rows(AgentKind::Claude, &records, true).in_history(&empty));
+    assert!(parse_rows(AgentKind::Claude, &records, true).in_history());
 
     for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit"] {
         records[1] = claude_message("assistant", SHORT, json!([{"type":"tool_use","name":tool}]));
         let edited = parse_rows(AgentKind::Claude, &records, true);
-        assert!(edited.in_history(&empty), "{tool}");
+        assert!(edited.in_history(), "{tool}");
         assert_eq!(edited.evidence.file_edit, Some(true));
         assert_eq!(edited.summary.file_count, None);
     }
@@ -351,12 +340,12 @@ fn claude_short_history_requires_one_user_under_a_minute_and_no_edit_call() {
         let mut incomplete = vec![user.clone(), read.clone()];
         incomplete[index].as_object_mut().unwrap().remove(field);
         assert!(
-            parse_rows(AgentKind::Claude, &incomplete, true).in_history(&empty),
+            parse_rows(AgentKind::Claude, &incomplete, true).in_history(),
             "{field}"
         );
     }
     records[1] = claude_message("assistant", SHORT, json!([{"type":"tool_use"}]));
-    assert!(parse_rows(AgentKind::Claude, &records, true).in_history(&empty));
+    assert!(parse_rows(AgentKind::Claude, &records, true).in_history());
 }
 
 #[test]
@@ -368,10 +357,9 @@ fn codex_user_event_duplicates_and_distinct_turns_are_counted_and_edits_kept() {
     let event = json!({"timestamp": START, "type":"event_msg","payload":{"type":"user_message","message":"检查一下"}});
     let end = json!({"timestamp": SHORT, "type":"event_msg","payload":{"type":"task_complete"}});
     let mut records = vec![head, user, event, end];
-    let empty = HashSet::new();
     let short = parse_rows(AgentKind::Codex, &records, true);
     assert_eq!(short.evidence.user_messages, Some(1));
-    assert!(!short.in_history(&empty));
+    assert!(!short.in_history());
     records[2]["payload"]["message"] = json!("还有一件事");
     assert_eq!(
         parse_rows(AgentKind::Codex, &records, true)
@@ -381,12 +369,12 @@ fn codex_user_event_duplicates_and_distinct_turns_are_counted_and_edits_kept() {
     );
     records[2]["payload"]["message"] = json!("检查一下");
     records[3]["timestamp"] = json!(MINUTE);
-    assert!(parse_rows(AgentKind::Codex, &records, true).in_history(&empty));
+    assert!(parse_rows(AgentKind::Codex, &records, true).in_history());
     records[3]["timestamp"] = json!(SHORT);
     let unclassified =
         json!({"timestamp": SHORT, "type":"response_item","payload":{"type":"custom_tool_call"}});
     records.push(unclassified);
-    assert!(parse_rows(AgentKind::Codex, &records, true).in_history(&empty));
+    assert!(parse_rows(AgentKind::Codex, &records, true).in_history());
     for kind in ["custom_tool_call", "function_call"] {
         records[4]["payload"] = json!({"type":kind,"name":"apply_patch"});
         assert_eq!(
@@ -397,11 +385,11 @@ fn codex_user_event_duplicates_and_distinct_turns_are_counted_and_edits_kept() {
         );
     }
     records[4] = json!({"timestamp": SHORT,"type":"event_msg","payload":{"type":"patch_apply_end","success":false}});
-    assert!(parse_rows(AgentKind::Codex, &records, true).in_history(&empty));
+    assert!(parse_rows(AgentKind::Codex, &records, true).in_history());
 }
 
 #[test]
-fn both_history_queries_hide_short_sessions_but_keep_pending_recoveries() {
+fn both_history_queries_hide_short_sessions() {
     let fixture = Fixture::new();
     let records = [
         claude_message("user", START, serde_json::json!("很短的请求")),
@@ -416,18 +404,8 @@ fn both_history_queries_hide_short_sessions_but_keep_pending_recoveries() {
     catalog.refresh();
     let reference = SessionRef::new(AgentKind::Claude, CLAUDE_ID).unwrap();
     assert!(catalog.find(&reference, Some(Path::new(ROOT))).is_some());
-    for (protected, expected) in [(HashSet::new(), 0), (HashSet::from([reference]), 1)] {
-        assert_eq!(
-            catalog.project_sessions(Path::new(ROOT), &protected).len(),
-            expected
-        );
-        assert_eq!(
-            catalog
-                .all_project_sessions([("root", PathBuf::from(ROOT))], &protected)
-                .len(),
-            expected
-        );
-    }
+    assert!(catalog.project_sessions(Path::new(ROOT)).is_empty());
+    assert!(catalog.all_project_sessions([("root", PathBuf::from(ROOT))]).is_empty());
 }
 
 #[test]
@@ -488,8 +466,7 @@ fn disk_cache_hits_before_refresh_and_reparses_only_changed_mtime_or_size() {
     let claude = fixture.write(AgentKind::Claude, CLAUDE_ID, CLAUDE);
     let codex = fixture.write(AgentKind::Codex, CODEX_ID, CODEX);
     let open = || SharedCatalog::new(Some(fixture.0.clone()), Some(&data));
-    let empty = HashSet::new();
-    let list = |catalog: &Catalog| catalog.project_sessions(Path::new(ROOT), &empty);
+    let list = |catalog: &Catalog| catalog.project_sessions(Path::new(ROOT));
     let initial = open();
     assert!(list(&initial.snapshot()).is_empty());
     assert_eq!(list(&initial.refresh()).len(), 2);
@@ -547,7 +524,7 @@ fn wrong_version_and_corrupt_disk_cache_rebuild_from_the_source_logs() {
     let data = fixture.0.join("app-data");
     fixture.write(AgentKind::Claude, CLAUDE_ID, CLAUDE);
     let open = || SharedCatalog::new(Some(fixture.0.clone()), Some(&data));
-    let list = |catalog: &Catalog| catalog.project_sessions(Path::new(ROOT), &HashSet::new());
+    let list = |catalog: &Catalog| catalog.project_sessions(Path::new(ROOT));
     assert_eq!(list(&open().refresh()).len(), 1);
     let disk = data.join("agent-sessions.json");
     let mut wrong: Value = serde_json::from_reader(File::open(&disk).unwrap()).unwrap();

@@ -53,24 +53,3 @@ export function AgentSessionMenuItems({ data, atLimit, onTerminal, onAgent }: {
     </>}
   </>;
 }
-
-export function AgentRecoveryCard({ session, busy, onContinue, onIgnore }: {
-  session: AgentHistorySession;
-  busy: boolean;
-  onContinue: (argv: AgentArgv) => void;
-  onIgnore: () => void;
-}) {
-  const heading = `这里上次是 ${agentNames[session.tool]} 会话「${session.title}」`;
-  return <div className="terminal-agent-recovery" data-agent-recovery-card>
-    <Sparkle size={15} aria-hidden="true" />
-    <div className="terminal-agent-recovery-copy">
-      <div className="truncate" title={heading}>{heading}</div>
-      <p>重启后终端只恢复了输出 · 继续会带上完整对话上下文</p>
-    </div>
-    <div className="terminal-agent-recovery-actions">
-      <button type="button" className="h1-button h1-button-primary" data-agent-recovery-continue disabled={busy}
-        onClick={() => onContinue(agentArgv(session.tool, session.id))}>继续会话 <span aria-hidden="true">↵</span></button>
-      <button type="button" className="h1-button" data-agent-recovery-ignore disabled={busy} onClick={onIgnore}>忽略</button>
-    </div>
-  </div>;
-}

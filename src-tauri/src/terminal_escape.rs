@@ -29,14 +29,6 @@ pub enum EscapeEvent<'a> {
 }
 
 impl EscapeStream {
-    pub fn push(&mut self, byte: u8) -> (bool, Option<Vec<u8>>) {
-        match self.event(byte) {
-            EscapeEvent::Text => (true, None),
-            EscapeEvent::Osc(osc) => (false, Some(osc)),
-            _ => (false, None),
-        }
-    }
-
     pub fn event(&mut self, byte: u8) -> EscapeEvent<'_> {
         use State::*;
         let text = matches!(self.state, Text)
@@ -118,79 +110,6 @@ pub fn osc_cwd(value: &str) -> Option<std::path::PathBuf> {
     url.to_file_path().ok()
 }
 
-pub fn history_text(raw: &str) -> String {
-    let mut stream = EscapeStream::default();
-    let mut result = String::new();
-    let mut line = Vec::new();
-    let mut cursor = 0usize;
-    let mut alternate = false;
-    let mut csi = String::new();
-    for ch in raw.chars() {
-        let previous = stream.state;
-        let mut bytes = [0; 4];
-        let printable = ch
-            .encode_utf8(&mut bytes)
-            .bytes()
-            .fold(false, |text, byte| stream.push(byte).0 || text);
-        if matches!(previous, State::Csi) {
-            if matches!(stream.state, State::Csi) {
-                if csi.len() < 40 {
-                    csi.push(ch);
-                }
-                continue;
-            }
-            match (ch, csi.as_str()) {
-                ('h', "?1049" | "?1047" | "?47") => alternate = true,
-                ('l', "?1049" | "?1047" | "?47") => alternate = false,
-                _ if alternate => (),
-                ('K', "" | "0") => line.truncate(cursor),
-                ('K', "2") => line.clear(),
-                ('D', count) => cursor = cursor.saturating_sub(count.parse().unwrap_or(1)),
-                ('C', count) => {
-                    cursor = cursor
-                        .saturating_add(count.parse().unwrap_or(1))
-                        .min(16_384)
-                }
-                ('G', at) => {
-                    cursor = at
-                        .parse::<usize>()
-                        .unwrap_or(1)
-                        .saturating_sub(1)
-                        .min(16_384)
-                }
-                _ => (),
-            }
-            csi.clear();
-        } else if !alternate && matches!(previous, State::Text) {
-            match ch {
-                '\r' => cursor = 0,
-                '\u{8}' => cursor = cursor.saturating_sub(1),
-                '\n' => {
-                    append_line(&mut result, &line);
-                    result.push('\n');
-                    line.clear();
-                    cursor = 0;
-                }
-                ch if printable && (!ch.is_control() || ch == '\t') => {
-                    if cursor >= line.len() {
-                        line.resize(cursor + 1, ' ');
-                    }
-                    line[cursor] = ch;
-                    cursor += 1;
-                }
-                _ => (),
-            }
-        }
-    }
-    append_line(&mut result, &line);
-    result
-}
-
-fn append_line(result: &mut String, line: &[char]) {
-    let end = line.iter().rposition(|ch| *ch != ' ').map_or(0, |i| i + 1);
-    result.extend(line[..end].iter().copied());
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,14 +123,5 @@ mod tests {
             Some("/tmp/账 单")
         );
         assert!(osc_cwd("https://host/tmp").is_none());
-    }
-
-    #[test]
-    fn saved_history_cannot_replay_terminal_control_sequences() {
-        assert_eq!(history_text("a\x1b[?1049hvim\x1b[?1049lb\x1b]52;c;secret\x07c\x1bPabc\x1b\\d\r\n\x1b(0e\x1b[31m"), "abcd\ne");
-        assert_eq!(
-            history_text("first\rprompt\x1b[K\r\np\x08printf"),
-            "prompt\nprintf"
-        );
     }
 }

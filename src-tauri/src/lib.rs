@@ -10,7 +10,6 @@ mod terminal;
 mod terminal_attention;
 mod terminal_agent;
 mod terminal_escape;
-mod terminal_persistence;
 mod terminal_shell;
 mod terminal_notifications;
 mod shell_env;
@@ -539,7 +538,6 @@ pub fn run() {
         .manage(terminal_notifications::PendingNotification::default())
         .setup(|app| {
             app.manage(terminal::TerminalManager::for_app(app.handle().clone()));
-            app.state::<terminal::TerminalManager>().restore();
             terminal_notifications::install(app.handle());
             quit::install_menu(app.handle())?;
             tray::install(app.handle())?;
@@ -621,7 +619,6 @@ pub fn run() {
         terminal::terminal_create,
         terminal::agent_sessions::terminal_agent_menu,
         terminal::agent_sessions::terminal_agent_project_sessions,
-        terminal::agent_sessions::terminal_agent_recoveries,
         terminal::agent_sessions::terminal_agent_start,
         terminal::agent_sessions::terminal_agent_launch,
         terminal::terminal_close,
@@ -717,7 +714,6 @@ fn handle_run_event(app: &AppHandle, event: tauri::RunEvent) {
     match event {
         tauri::RunEvent::Reopen { .. } => reopen_main_window(app),
         tauri::RunEvent::Exit => {
-            app.state::<terminal::TerminalManager>().save_before_exit();
             let terminal_roots = app.state::<terminal::TerminalManager>().list().into_iter()
                 .filter(|session| session.alive).filter_map(|session| session.pid)
                 .map(|pid| processes::ManagedRoot { pid, pgid: unsafe { libc::getpgid(pid as i32) }, identity: processes::identity(pid) })

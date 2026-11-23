@@ -27,7 +27,7 @@ const hooks = registerHooks({
     return next(url, context);
   },
 });
-const { AgentSessionMenuItems, AgentRecoveryCard } = await import('../src/components/AgentSessionActions.tsx');
+const { AgentSessionMenuItems } = await import('../src/components/AgentSessionActions.tsx');
 const { activateAgentTerminal, agentSessionDate, loadAgentIndex } = await import('../src/lib/agentSessions.ts');
 const { quickSwitcherResultKey, quickSwitcherSessionOptions } = await import('../src/lib/quickSwitcher.ts');
 hooks.deregister();
@@ -87,14 +87,13 @@ test('history selection at the limit activates the already-running terminal repo
   assert.equal(options[1].props.disabled, true);
   assert.ok(!options[2].props.disabled);
   await options[2].props.onClick();
-  assert.deepEqual(invoked, [{ command: 'terminal_agent_start', args: { projectId: 'project', argv: ['codex', 'resume', codex.id], recovery: undefined } }]);
+  assert.deepEqual(invoked, [{ command: 'terminal_agent_start', args: { projectId: 'project', argv: ['codex', 'resume', codex.id] } }]);
   assert.deepEqual(activated, [current]);
 });
 
-test('the recovery card continues in the original tab or dismisses without resuming', async t => {
+test('the plus menu prepares a new terminal before starting a history session', async t => {
   const invoked = [], selected = [], prepared = [];
-  const recovery = { slot: 2, sessionId: 'restored-tab' };
-  const session = { ...recovery, projectId: 'project' };
+  const session = { projectId: 'project', slot: 2, sessionId: 'new-tab', alive: true };
   let finishPreparing;
   const ready = new Promise(resolve => { finishPreparing = resolve; });
   Object.defineProperty(globalThis, 'window', { configurable: true, value: { __TAURI_INTERNALS__: {
@@ -106,28 +105,21 @@ test('the recovery card continues in the original tab or dismisses without resum
     },
   } } });
   t.after(() => { delete globalThis.window; });
-  let visible = true;
-  const card = AgentRecoveryCard({ session: claude, busy: false,
-    onContinue: argv => activateAgentTerminal('project', argv, terminal => selected.push(terminal), async terminal => {
+  const entries = menu({ sessions: [claude], tools: ['claude'] }, argv =>
+    activateAgentTerminal('project', argv, terminal => selected.push(terminal), async terminal => {
       assert.deepEqual(selected, [terminal]);
       await ready;
       prepared.push(terminal);
-    }, recovery),
-    onIgnore: () => { visible = false; },
-  });
-  assert.match(renderToStaticMarkup(card), /这里上次是 Claude 会话「筛选条件进 URL」/);
-  const [continueButton, ignoreButton] = buttons(card);
-  ignoreButton.props.onClick();
-  assert.equal(visible, false);
-  assert.deepEqual(invoked, []);
-  const continuing = continueButton.props.onClick();
+    }));
+  const history = buttons(entries).find(button => 'data-agent-session-option' in button.props);
+  const continuing = history.props.onClick();
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(invoked.map(({ command }) => command), ['terminal_agent_start']);
   finishPreparing();
   await continuing;
   assert.deepEqual(invoked, [
-    { command: 'terminal_agent_start', args: { projectId: 'project', argv: ['claude', '--resume', claude.id], recovery } },
-    { command: 'terminal_agent_launch', args: { projectId: 'project', ...recovery, launchId: 'prepared-launch' } },
+    { command: 'terminal_agent_start', args: { projectId: 'project', argv: ['claude', '--resume', claude.id] } },
+    { command: 'terminal_agent_launch', args: { projectId: 'project', slot: 2, sessionId: 'new-tab', launchId: 'prepared-launch' } },
   ]);
   assert.deepEqual(selected, [session]);
 });
@@ -222,7 +214,7 @@ test('palette arrows cross groups and Enter calls the same resume path as the pl
   menuRow.props.onClick();
   await Promise.all(pending);
 
-  const invocation = { command: 'terminal_agent_start', args: { projectId: 'reports', argv: ['codex', 'resume', codex.id], recovery: undefined } };
+  const invocation = { command: 'terminal_agent_start', args: { projectId: 'reports', argv: ['codex', 'resume', codex.id] } };
   assert.deepEqual(invoked, [invocation, invocation]);
   assert.deepEqual(selected, [running, running]);
 });

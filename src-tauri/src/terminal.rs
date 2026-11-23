@@ -13,8 +13,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::terminal_agent::{AgentSession, AgentStatus, Probe};
 use crate::terminal_agent::sessions::SharedCatalog as AgentCatalog;
 use crate::terminal_attention::{AttentionManager, Sinks as AttentionSinks};
-use crate::terminal_escape::{osc_cwd, EscapeStream};
-use crate::terminal_persistence::{self as persistence, SavedProject, SavedSessions, SavedTerminal, Store};
+use crate::terminal_escape::{osc_cwd, EscapeEvent, EscapeStream};
 use crate::terminal_shell::{self, Boundaries, Completion};
 
 const SCROLLBACK_BYTES: usize = 2 * 1024 * 1024;
@@ -49,9 +48,7 @@ pub struct TerminalSessionInfo {
     pub pid: Option<u32>,
     pub attention: bool,
     pub title: Option<String>,
-    pub restored_active: bool,
     pub completion: Option<Completion>,
-    pub has_agent_recovery: bool,
     #[serde(flatten)]
     pub agent_status: AgentStatus,
 }
@@ -157,11 +154,10 @@ impl Utf8Decoder {
 }
 
 struct Scrollback {
-    chunks: VecDeque<(u64, String)>,
+    chunks: VecDeque<String>,
     bytes: usize,
     seq: u64,
     cap: usize,
-    saved: Option<(String, u64)>,
 }
 
 impl Scrollback {
@@ -171,53 +167,24 @@ impl Scrollback {
             bytes: 0,
             seq: 0,
             cap,
-            saved: None,
         }
-    }
-
-    fn defer_replay(&mut self, history: String, saved_at: u64) {
-        // Reserve the first sequence before live PTY output arrives.
-        self.seq = 1;
-        self.saved = Some((history, saved_at));
     }
 
     fn append(&mut self, data: String) -> u64 {
         self.seq += 1;
         self.bytes += data.len();
-        self.chunks.push_back((self.seq, data));
+        self.chunks.push_back(data);
         while self.bytes > self.cap {
-            // The replay prefix is older than every live chunk.
-            self.saved = None;
-            if let Some((_, oldest)) = self.chunks.pop_front() {
+            if let Some(oldest) = self.chunks.pop_front() {
                 self.bytes -= oldest.len();
             }
         }
         self.seq
     }
 
-    fn open_snapshot(&mut self) -> Snapshot {
-        if let Some((history, saved_at)) = self.saved.take() {
-            let data = persistence::replay(&history, saved_at);
-            if self.bytes + data.len() <= self.cap {
-                self.bytes += data.len();
-                self.chunks.push_front((1, data));
-            }
-        }
-        self.snapshot()
-    }
-
-    fn history_for_save(&self) -> String {
-        let current = self.snapshot().data;
-        if let Some((saved, timestamp)) = &self.saved {
-            let marker = persistence::restore_marker(*timestamp);
-            return persistence::bounded_history(&format!("{saved}\n{marker}\n{current}"));
-        }
-        persistence::bounded_history(&current)
-    }
-
     fn snapshot(&self) -> Snapshot {
         Snapshot {
-            data: self.chunks.iter().map(|(_, text)| text.as_str()).collect(),
+            data: self.chunks.iter().map(String::as_str).collect(),
             seq: self.seq,
         }
     }
@@ -252,7 +219,6 @@ struct Session {
     attention: Arc<AttentionManager>,
     project_dir: PathBuf,
     metadata: Arc<Mutex<ShellMetadata>>,
-    restored_active: bool,
     agent_link: Arc<Mutex<agent_sessions::AgentLink>>,
 }
 
@@ -287,15 +253,13 @@ impl Session {
             pid: self.pid,
             attention,
             title: metadata.title.clone(),
-            restored_active: self.restored_active,
             completion: metadata.completion.clone(),
-            has_agent_recovery: lock(&self.agent_link).recovery.is_some(),
             agent_status,
         }
     }
 
     fn result(&self) -> OpenResult {
-        let snapshot = lock(&self.scrollback).open_snapshot();
+        let snapshot = lock(&self.scrollback).snapshot();
         OpenResult {
             snapshot,
             session: self.info(),
@@ -400,8 +364,6 @@ pub struct TerminalManager {
     closed: ClosedSink,
     limit: LimitSource,
     attention: Arc<AttentionManager>,
-    store: Option<Arc<Mutex<Store>>>,
-    active_slots: Arc<Mutex<HashMap<String, u8>>>,
     integration: Option<PathBuf>,
     completion_enabled: Arc<AtomicBool>,
     agent_notices: Arc<AtomicBool>,
@@ -427,8 +389,6 @@ impl TerminalManager {
             closed,
             limit,
             attention: AttentionManager::new(sinks),
-            store: None,
-            active_slots: Arc::new(Mutex::new(HashMap::new())),
             integration: None,
             completion_enabled: Arc::new(AtomicBool::new(true)),
             agent_notices: Arc::new(AtomicBool::new(true)),
@@ -455,7 +415,6 @@ impl TerminalManager {
         });
         let notification_app = app.clone();
         let directory = terminal_data_dir(&app);
-        let restore = crate::open_project_db().and_then(|db| crate::settings::enabled(&db, crate::settings::RESTORE_TERMINALS)).unwrap_or(true);
         let agent_notices = Arc::new(AtomicBool::new(crate::open_project_db()
             .and_then(|db| crate::settings::enabled(&db, crate::settings::AGENT_NOTICES)).unwrap_or(true)));
         let notify_agent = agent_notices.clone();
@@ -503,7 +462,6 @@ impl TerminalManager {
             Err(error) => { eprintln!("初始化终端 shell 集成失败：{error}"); None }
         });
         manager.agent_catalog = Arc::new(AgentCatalog::new(dirs::home_dir(), directory.as_deref()));
-        manager.store = directory.map(|path| Arc::new(Mutex::new(Store::new(path.join("terminals"), restore))));
         manager.inactive = inactive;
         manager.agent_notices = agent_notices;
         let enabled = crate::open_project_db().and_then(|db| crate::settings::enabled(&db, crate::settings::COMMAND_NOTICES)).unwrap_or(true);
@@ -515,55 +473,6 @@ impl TerminalManager {
             }
         });
         manager
-    }
-
-    pub fn restore(&self) {
-        let Some(store) = &self.store else { return; };
-        let _mutation = lock(&self.mutation);
-        let sessions = {
-            let mut store = lock(store);
-            if store.enabled { store.load() } else { Ok(SavedSessions::new()) }
-        };
-        match (sessions, crate::get_projects_sync()) {
-            (Ok(mut saved), Ok(projects)) => {
-                for project in projects.projects {
-                    let Some(saved) = saved.remove(&project.id) else { continue; };
-                    let root = PathBuf::from(crate::expand_tilde(&project.path));
-                    if !root.is_dir() { continue; }
-                    for tab in saved.terminals {
-                        if validate_slot(tab.slot).is_err() || self.get(&project.id, tab.slot).is_ok() { continue; }
-                        let cwd = if tab.cwd.is_absolute() && tab.cwd.is_dir() { tab.cwd.clone() } else { root.clone() };
-                        let slot = tab.slot;
-                        let active = saved.active == Some(tab.slot);
-                        match self.spawn(&project.id, slot, &cwd, 80, 24, &project.env, None, Some((tab, saved.saved_at, active))) {
-                            Ok(session) => {
-                                if active { lock(&self.active_slots).insert(project.id.clone(), slot); }
-                                lock(&self.sessions).insert(session.key.clone(), session);
-                            }
-                            Err(error) => eprintln!("恢复终端失败 ({} #{slot})：{error}", project.id),
-                        }
-                    }
-                }
-            }
-            (Err(error), _) => eprintln!("读取终端历史失败：{error}"),
-            (_, Err(error)) => eprintln!("读取待恢复的项目失败：{error}"),
-        }
-        let manager = self.clone();
-        tauri::async_runtime::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(10)).await;
-                let manager = manager.clone();
-                let _ = tauri::async_runtime::spawn_blocking(move || manager.save_sessions()).await;
-            }
-        });
-    }
-
-    pub fn set_restore(&self, enabled: bool) -> Result<(), String> {
-        let Some(store) = &self.store else { return Ok(()); };
-        let mut store = lock(store);
-        if !enabled { store.clear().map_err(|error| format!("清除终端历史失败：{error}"))?; }
-        store.enabled = enabled;
-        Ok(())
     }
 
     pub fn set_command_notices(&self, enabled: bool) {
@@ -583,51 +492,6 @@ impl TerminalManager {
 
     pub fn agents(&self) -> Vec<(TerminalKey, AgentSession)> {
         self.attention.agents()
-    }
-
-    pub fn save_sessions(&self) {
-        self.prepare_agent_links();
-        let _mutation = lock(&self.mutation);
-        self.save_sessions_locked();
-    }
-
-    pub fn save_before_exit(&self) {
-        let _mutation = lock(&self.mutation);
-        self.save_sessions_locked();
-        if let Some(store) = &self.store {
-            // A periodic write must not replace the final snapshot after PTY cleanup.
-            lock(store).enabled = false;
-        }
-    }
-
-    fn save_sessions_locked(&self) {
-        let Some(store) = &self.store else { return; };
-        let mut store = lock(store);
-        if !store.enabled { return; }
-        let mut snapshot = SavedSessions::new();
-        let mut sessions: Vec<_> = lock(&self.sessions).values().cloned().collect();
-        sessions.sort_unstable_by_key(|session| session.tab_order);
-        let active = lock(&self.active_slots).clone();
-        for session in sessions {
-            if !lock(&session.state.0).alive { continue; }
-            let entry = snapshot.entry(session.key.project_id.clone()).or_insert_with(|| SavedProject {
-                active: active.get(&session.key.project_id).copied(),
-                saved_at: persistence::now_secs(),
-                terminals: Vec::new(),
-            });
-            let history = lock(&session.scrollback).history_for_save();
-            entry.terminals.push(SavedTerminal {
-                slot: session.key.slot, cwd: session.current_directory(), title: lock(&session.metadata).title.clone(),
-                history,
-                agent_session: session.saved_agent_reference(),
-            });
-        }
-        for entry in snapshot.values_mut() {
-            entry.active = entry.active.filter(|slot| entry.terminals.iter().any(|tab| tab.slot == *slot));
-        }
-        if let Err(error) = store.save(snapshot) {
-            eprintln!("保存终端历史失败：{error}");
-        }
     }
 
     fn get(&self, project_id: &str, slot: u8) -> Result<Session, String> {
@@ -673,7 +537,7 @@ impl TerminalManager {
         if !cwd.is_dir() {
             return Err(format!("项目目录不存在：{}", cwd.display()));
         }
-        let session = self.spawn(project_id, slot, cwd, cols.max(1), rows.max(1), env, tab_order, None)?;
+        let session = self.spawn(project_id, slot, cwd, cols.max(1), rows.max(1), env, tab_order)?;
         let result = session.result();
         lock(&self.sessions).insert(session.key.clone(), session);
         (self.opened)(result.session.clone());
@@ -704,7 +568,6 @@ impl TerminalManager {
         rows: u16,
         env: &[crate::projects::EnvVar],
         tab_order: Option<u64>,
-        restore: Option<(SavedTerminal, u64, bool)>,
     ) -> Result<Session, String> {
         crate::projects::validate_env(env)?;
         let pair = native_pty_system()
@@ -727,14 +590,6 @@ impl TerminalManager {
         let pid = child.process_id();
         let killer = child.clone_killer();
         let (sender, receiver) = mpsc::channel::<Input>();
-        let mut history = Scrollback::new(SCROLLBACK_BYTES);
-        let (title, recovery, restored_active) = match restore {
-            Some((tab, timestamp, active)) => {
-                history.defer_replay(tab.history, timestamp);
-                (tab.title, tab.agent_session, active)
-            }
-            None => (None, None, false),
-        };
         let sequence = NEXT_SESSION.fetch_add(1, Ordering::Relaxed);
         let session = Session {
             session_id: format!("{}-{sequence}", std::process::id()),
@@ -751,12 +606,11 @@ impl TerminalManager {
             master: Arc::new(Mutex::new(Some(pair.master))),
             writer: sender,
             killer: Arc::new(Mutex::new(killer)),
-            scrollback: Arc::new(Mutex::new(history)),
+            scrollback: Arc::new(Mutex::new(Scrollback::new(SCROLLBACK_BYTES))),
             attention: self.attention.clone(),
             project_dir: cwd.to_owned(),
-            metadata: Arc::new(Mutex::new(ShellMetadata { title, ..Default::default() })),
-            restored_active,
-            agent_link: Arc::new(Mutex::new(agent_sessions::AgentLink::new(recovery))),
+            metadata: Arc::new(Mutex::new(ShellMetadata::default())),
+            agent_link: Arc::new(Mutex::new(agent_sessions::AgentLink::default())),
         };
         let master = Arc::downgrade(&session.master);
         let probe = Probe::new(move || {
@@ -896,7 +750,7 @@ impl TerminalManager {
                             Ok(len) => {
                                 let mut consumed = 0;
                                 for (index, &byte) in buffer[..len].iter().enumerate() {
-                                    if let (_, Some(osc)) = escapes.push(byte) {
+                                    if let EscapeEvent::Osc(osc) = escapes.event(byte) {
                                         let text = String::from_utf8_lossy(&osc);
                                         match text.split_once(';') {
                                             Some(("7", value)) => lock(&metadata).cwd = osc_cwd(value),
@@ -1053,22 +907,10 @@ impl TerminalManager {
         if removed.is_empty() { return; }
         {
             let mut visible = lock(&self.visible_tabs);
-            let mut active = lock(&self.active_slots);
-            let sessions = lock(&self.sessions);
             for session in &removed {
-                let key = &session.key;
-                visible.remove(key);
-                if active.get(&key.project_id) != Some(&key.slot) { continue; }
-                let next = sessions.values().filter(|tab| tab.key.project_id == key.project_id && lock(&tab.state.0).alive)
-                    .min_by_key(|tab| (tab.tab_order < session.tab_order, tab.tab_order.abs_diff(session.tab_order)));
-                if let Some(next) = next {
-                    active.insert(key.project_id.clone(), next.key.slot);
-                } else {
-                    active.remove(&key.project_id);
-                }
+                visible.remove(&session.key);
             }
         }
-        self.save_sessions_locked();
         for session in &removed {
             self.emit_closed(session);
         }
@@ -1093,14 +935,12 @@ impl TerminalManager {
 
     fn focus_visible(&self, key: Option<TerminalKey>, visible_slots: Option<Vec<u8>>, session_id: Option<&str>) {
         let mut visible = lock(&self.visible_tabs);
-        let mut active = lock(&self.active_slots);
         let sessions = lock(&self.sessions);
         let key = key.filter(|key| sessions.get(key).is_some_and(|session| {
             session_id.is_none_or(|id| session.session_id == id) && lock(&session.state.0).alive
         }));
         visible.clear();
         if let Some(key) = &key {
-            active.insert(key.project_id.clone(), key.slot);
             visible.insert(key.clone());
             if let Some(slots) = visible_slots {
                 visible.extend(slots.into_iter().filter(|slot| validate_slot(*slot).is_ok())
@@ -1519,42 +1359,29 @@ mod tests {
     }
 
     #[test]
-    fn close_and_shell_exit_remove_the_saved_tab_and_its_recovery_before_relaunch() {
-        use crate::terminal_agent::{sessions::SessionRef, AgentKind};
-        let mut fixture = Fixture::new();
-        let directory = fixture.dir.join("terminals");
-        fixture.manager.store = Some(Arc::new(Mutex::new(Store::new(directory.clone(), true))));
+    fn close_and_shell_exit_renumber_the_remaining_tabs_and_allow_slot_reuse() {
+        let fixture = Fixture::new();
         fixture.limit(3);
         let tabs: Vec<_> = (0..3).map(|_| fixture.create("a").session).collect();
-        let recovery = SessionRef::new(AgentKind::Claude, "383c4fef-fd6e-452a-9130-bdbdea62bc01").unwrap();
-        lock(&fixture.manager.get("a", 1).unwrap().agent_link).recovery = Some(recovery.clone());
-        lock(&fixture.manager.get("a", 3).unwrap().agent_link).recovery = Some(recovery.clone());
-        fixture.manager.focus(Some(TerminalKey::new("a", 1)));
-        fixture.manager.save_sessions();
-        let load = || Store::new(directory.clone(), true).load().unwrap();
-        assert_eq!(load()["a"].terminals[0].agent_session, Some(recovery.clone()));
+        let slots = || fixture.manager.list().into_iter().map(|tab| tab.slot).collect::<Vec<_>>();
 
         fixture.manager.close_terminal("a", 1, Some(&tabs[0].session_id)).unwrap();
-        let after = load();
-        assert_eq!(after["a"].active, Some(2));
-        assert_eq!(after["a"].terminals.iter().map(|tab| tab.slot).collect::<Vec<_>>(), [2, 3]);
-        assert_eq!(after["a"].terminals[1].agent_session, Some(recovery));
+        assert_eq!(slots(), [2, 3]);
         assert_eq!(fixture.manager.display_number("a", 2, &tabs[1].session_id), Some(1));
         assert_eq!(fixture.manager.display_number("a", 3, &tabs[2].session_id), Some(2));
 
         fixture.exit("a", 2);
-        assert_eq!(load()["a"].terminals.iter().map(|tab| tab.slot).collect::<Vec<_>>(), [3]);
-        assert_eq!(load()["a"].active, Some(3));
+        assert_eq!(slots(), [3]);
+        assert_eq!(fixture.manager.display_number("a", 3, &tabs[2].session_id), Some(1));
         let new = fixture.create("a").session;
         assert_eq!(new.slot, 1);
         fixture.manager.close_terminal("a", 1, Some(&tabs[0].session_id)).unwrap();
         assert_eq!(fixture.manager.display_number("a", 1, &tabs[0].session_id), None);
         assert_eq!(fixture.manager.display_number("a", 1, &new.session_id), Some(2));
-        fixture.manager.save_sessions();
-        assert_eq!(load()["a"].terminals.iter().map(|tab| tab.slot).collect::<Vec<_>>(), [3, 1]);
+        assert_eq!(slots(), [3, 1]);
         fixture.manager.close_terminal("a", 1, Some(&new.session_id)).unwrap();
         fixture.manager.close_terminal("a", 3, Some(&tabs[2].session_id)).unwrap();
-        assert!(load().is_empty());
+        assert!(slots().is_empty());
     }
 
     #[test]
@@ -1743,31 +1570,11 @@ mod tests {
         assert_eq!(buffer.append("def".into()), 3);
         assert_eq!(buffer.snapshot().data, "你好def");
         assert_eq!(buffer.snapshot().seq, 3);
-        assert_eq!(buffer.chunks.front().unwrap().0, 2);
+        assert_eq!(buffer.chunks.front().map(String::as_str), Some("你好"));
         assert!(buffer.bytes <= 10);
         buffer.append("this chunk exceeds the cap".into());
         assert_eq!(buffer.snapshot().data, "");
         assert_eq!(buffer.snapshot().seq, 4);
-    }
-
-    #[test]
-    fn dormant_history_is_saved_without_replay_and_prepended_once_on_attach() {
-        let mut buffer = Scrollback::new(4096);
-        buffer.defer_replay("saved output".into(), 1_795_123_400);
-        assert_eq!(buffer.append("live prompt".into()), 2);
-        assert_eq!(buffer.snapshot().data, "live prompt");
-        let saved_again = buffer.history_for_save();
-        assert!(saved_again.starts_with("saved output\n"));
-        assert!(saved_again.ends_with("\nlive prompt"));
-        assert!(buffer.saved.is_some());
-        let snapshot = buffer.open_snapshot();
-        assert_eq!(snapshot.seq, 2);
-        assert!(snapshot.data.starts_with("saved output\r\n"));
-        assert!(snapshot.data.ends_with("live prompt"));
-        assert_eq!(snapshot.data.matches("已恢复").count(), 1);
-        assert_eq!(persistence::bounded_history(&snapshot.data), saved_again);
-        assert_eq!(buffer.open_snapshot().data, snapshot.data);
-        assert_eq!(buffer.append("more".into()), 3);
     }
 
     #[test]

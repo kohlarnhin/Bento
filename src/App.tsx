@@ -28,8 +28,8 @@ import Button from './components/ui/button';
 import { Toaster } from './components/ui/sonner';
 import { MotionPresence } from './components/ui/motion-presence';
 import { Empty, EmptyTitle, EmptyDescription } from './components/ui/empty';
-import { createTerminal, getProjectTerminalSlots, getTerminal, getTerminalSnapshot, initTerminalRegistry, prepareTerminalInput, registerTerminalResult, subscribeTerminals, takeRestoredSlot, terminalKey } from './lib/terminalRegistry';
-import { activateAgentTerminal, loadAgentIndex, useAgentRecoveries, type AgentArgv, type AgentRecoveryTarget, type ProjectAgentSession } from './lib/agentSessions';
+import { createTerminal, getProjectTerminalSlots, getTerminal, getTerminalSnapshot, initTerminalRegistry, prepareTerminalInput, registerTerminalResult, subscribeTerminals, terminalKey } from './lib/terminalRegistry';
+import { activateAgentTerminal, loadAgentIndex, type AgentArgv, type ProjectAgentSession } from './lib/agentSessions';
 import { projectLogs } from './lib/useProjectLogs';
 import { recordRender } from './lib/renderMetrics';
 import { DEFAULT_TERMINAL_FONT_SIZE, TERMINAL_THEME } from './lib/terminalAppearance';
@@ -136,7 +136,6 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsCategory, setSettingsCategory] = useState<SettingsCategory>('general');
   const terminals = useSyncExternalStore(subscribeTerminals, getTerminalSnapshot);
-  const { recoveries: agentRecoveries, counts: agentRecoveryCounts, dismiss: dismissAgentRecovery } = useAgentRecoveries(terminals);
   const terminalCount = Object.values(terminals).filter(terminal => terminal.alive).length;
   const [projects, setProjects] = useState<ProjectConfig[]>([]);
   const [groups, setGroups] = useState<ProjectGroup[]>([]);
@@ -220,7 +219,7 @@ export function App() {
   }, []);
   const selectProject = useCallback((projectId: string) => {
     setActiveLogProject(null);
-    const slot = takeRestoredSlot(projectId) ?? firstOpenedTerminalSlot(projectId, Object.values(getTerminalSnapshot()));
+    const slot = firstOpenedTerminalSlot(projectId, Object.values(getTerminalSnapshot()));
     if (slot === undefined) setSelection({ projectId, view: 'overview' });
     else selectTerminalSlot(projectId, slot);
   }, [selectTerminalSlot, setSelection]);
@@ -380,23 +379,21 @@ export function App() {
     }
   }, [selectTerminalSlot]);
 
-  const openAgent = useCallback(async (projectId: string, argv: AgentArgv, recovery?: AgentRecoveryTarget) => {
+  const openAgent = useCallback(async (projectId: string, argv: AgentArgv) => {
     if (dialogOpen.current || creatingTerminals.current.has(projectId)) return;
     creatingTerminals.current.add(projectId);
     try {
-      const terminal = await activateAgentTerminal(projectId, argv, terminal => {
+      await activateAgentTerminal(projectId, argv, terminal => {
         registerTerminalResult(terminal);
         selectTerminalSlot(terminal.projectId, terminal.slot);
         requestAnimationFrame(() => getTerminal(terminal.projectId, terminal.slot)?.focus());
-      }, prepareTerminalInput, recovery);
-      registerTerminalResult(terminal);
-      if (recovery) dismissAgentRecovery(recovery.sessionId);
+      }, prepareTerminalInput);
     } catch (error) {
       toast.error(String(error));
     } finally {
       creatingTerminals.current.delete(projectId);
     }
-  }, [dismissAgentRecovery, selectTerminalSlot]);
+  }, [selectTerminalSlot]);
 
   const openQuickAgent = useCallback((projectId: string, argv: AgentArgv) => {
     closeQuickSwitcher();
@@ -576,7 +573,7 @@ export function App() {
       setConflicts(res.conflicts);
       const first = sidebarNavigation(res.projects, res.groups)[0] ?? res.projects[0];
       const preserved = res.projects.some(project => project.id === navigation.current.selection?.projectId);
-      const slot = !preserved && first ? takeRestoredSlot(first.id) ?? firstOpenedTerminalSlot(first.id, Object.values(getTerminalSnapshot())) : undefined;
+      const slot = !preserved && first ? firstOpenedTerminalSlot(first.id, Object.values(getTerminalSnapshot())) : undefined;
       setProjectNavigation(previous => {
         if (res.projects.some(project => project.id === previous.selection?.projectId)) return previous;
         return {
@@ -817,7 +814,6 @@ export function App() {
             onFilterChange={setFilter}
             attentionProjects={attentionProjects}
             projectAgents={projectAgents}
-            agentRecoveryCounts={agentRecoveryCounts}
             completions={completions}
             snippets={visibleSnippets}
             onRunSnippet={(id, command) => { void handleRunCommand(id, command, true); }}
@@ -877,9 +873,7 @@ export function App() {
                   focused={focusActive}
                   onToggleFocus={toggleFocusMode}
                   onNewTerminal={() => openTerminal(selectedProject.id)}
-                  onOpenAgent={(argv, recovery) => openAgent(selectedProject.id, argv, recovery)}
-                  agentRecoveries={agentRecoveries}
-                  onDismissAgentRecovery={dismissAgentRecovery}
+                  onOpenAgent={argv => openAgent(selectedProject.id, argv)}
                   closeActiveTab={closeActiveTab}
                   terminalControls={terminalControls}
                   onFocusedTerminal={onFocusedTerminal}

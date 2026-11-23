@@ -82,12 +82,11 @@ struct SessionEvidence {
 }
 
 impl IndexedSession {
-    fn in_history(&self, protected: &HashSet<SessionRef>) -> bool {
-        protected.contains(&self.summary.reference)
-            || !matches!(
-                (self.evidence.user_messages, self.evidence.duration_ms, self.evidence.file_edit),
-                (Some(1), Some(duration), Some(false)) if duration < 60_000
-            )
+    fn in_history(&self) -> bool {
+        !matches!(
+            (self.evidence.user_messages, self.evidence.duration_ms, self.evidence.file_edit),
+            (Some(1), Some(duration), Some(false)) if duration < 60_000
+        )
     }
 }
 
@@ -174,15 +173,11 @@ impl Catalog {
             .filter_map(|file| Some((file.parsed.as_ref()?, unix_millis(file.modified))))
     }
 
-    pub fn project_sessions(
-        &self,
-        project: &Path,
-        protected: &HashSet<SessionRef>,
-    ) -> Vec<SessionSummary> {
+    pub fn project_sessions(&self, project: &Path) -> Vec<SessionSummary> {
         let project = ProjectPath::new(project);
         let mut matches: Vec<_> = self
             .sessions()
-            .filter(|(session, _)| project.contains(session) && session.in_history(protected))
+            .filter(|(session, _)| project.contains(session) && session.in_history())
             .collect();
         matches.sort_unstable_by(|left, right| most_recent(*left, *right));
         let mut seen = HashSet::new();
@@ -197,7 +192,6 @@ impl Catalog {
     pub fn all_project_sessions<'a>(
         &self,
         projects: impl IntoIterator<Item = (&'a str, PathBuf)>,
-        protected: &HashSet<SessionRef>,
     ) -> Vec<ProjectSessionSummary> {
         let roots: Vec<_> = projects
             .into_iter()
@@ -205,7 +199,7 @@ impl Catalog {
             .collect();
         let mut matches: Vec<_> = self
             .sessions()
-            .filter(|(session, _)| session.in_history(protected))
+            .filter(|(session, _)| session.in_history())
             .filter_map(|(session, modified)| {
                 let cwd = absolute_path(&session.summary.cwd);
                 // A session in a nested project belongs to its closest registered root.

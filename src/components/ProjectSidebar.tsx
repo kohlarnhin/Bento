@@ -30,7 +30,6 @@ interface Props {
   onFilterChange: (filter: SidebarFilter) => void;
   attentionProjects: ReadonlySet<string>;
   projectAgents: ReadonlyMap<string, ProjectAgent>;
-  agentRecoveryCounts: ReadonlyMap<string, number>;
   completions: ReadonlyMap<string, TerminalCompletion>;
   snippets: Record<string, Snippet[]>;
   onRunSnippet: (id: string, command: string) => void;
@@ -105,7 +104,7 @@ function ProjectRowStatus({ projectId, status, conflict, attention, completion }
     tone={conflict ? 'error' : status} />;
 }
 
-export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive, folderDropName, groups: projectGroups, filter, onFilterChange, attentionProjects, projectAgents, agentRecoveryCounts, completions, snippets, onRunSnippet, onQuickSwitch, onUpdateGroup, onReorderGroups, onGroupAction, onProjectFlags, visibleProjects, searchQuery, searchInputRef, onSearchChange, onReorder, reordering, statuses, conflicts, selection, maxPerProject, loading, projectsLoaded, onSelectProject, onCreateTerminal, onOpenProjectLogs, onDeleteProject, onRefresh, onCreate, managedCount, onStopAll, currentVersion, availableVersion, onCheckUpdates, onOpenSettings }: Props) {
+export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive, folderDropName, groups: projectGroups, filter, onFilterChange, attentionProjects, projectAgents, completions, snippets, onRunSnippet, onQuickSwitch, onUpdateGroup, onReorderGroups, onGroupAction, onProjectFlags, visibleProjects, searchQuery, searchInputRef, onSearchChange, onReorder, reordering, statuses, conflicts, selection, maxPerProject, loading, projectsLoaded, onSelectProject, onCreateTerminal, onOpenProjectLogs, onDeleteProject, onRefresh, onCreate, managedCount, onStopAll, currentVersion, availableVersion, onCheckUpdates, onOpenSettings }: Props) {
   recordRender('projectSidebar');
   const [archivedCollapsed, setArchivedCollapsed] = useState(() => {
     try { return JSON.parse(localStorage.getItem(ARCHIVED_COLLAPSED_KEY) ?? 'true') !== false; } catch { return true; }
@@ -343,9 +342,6 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
       choice.agent.state === 'done' && (minutesSinceCompletion ? `${minutesSinceCompletion} 分钟前` : '刚刚'),
       choice.agent.state === 'thinking' && !choice.multiple && agentStateLabels.thinking,
     ].filter(Boolean).join(' · ');
-    const recoveryCount = status === 'stopped' && !agent && !conflict && !attentionProjects.has(project.id) && !completions.has(project.id)
-      ? agentRecoveryCounts.get(project.id) : undefined;
-    const detail = agentDetail ?? (recoveryCount ? `${recoveryCount} 个 AI 会话可继续` : undefined);
     return <div key={project.id} ref={node => { if (node) rows.current.set(project.id, node); else rows.current.delete(project.id); }}
       data-project-id={project.id} data-project-dragging={draggingId === project.id || undefined} className={cn('flex flex-col', draggingId === project.id && 'opacity-40')}>
       <div className="sidebar-project-item sidebar-project-surface relative flex items-center"
@@ -374,12 +370,12 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
             onSelectProject(project.id);
           }}
           title={`${name}${shortcutIndex >= 0 && shortcutIndex < 9 ? ` · ⌘${shortcutIndex + 1}` : ''}\n${filtering ? '清除搜索和筛选后可拖动排序' : '拖动排序 · ⌥↑ / ⌥↓'}`}
-          data-project-row={project.id} data-project-agent={agent?.state} data-agent-recovery-count={recoveryCount} aria-current={selected ? 'page' : undefined}
+          data-project-row={project.id} data-project-agent={agent?.state} aria-current={selected ? 'page' : undefined}
           aria-haspopup="menu" data-search-highlighted={searchFocused && highlighted === project.id || undefined} data-reorder-draggable={canReorder || undefined}>
           <ProjectAvatar project={project} status={status} conflict={conflict} />
           <span className="min-w-0 flex-1">
             <span className="block truncate">{name}</span>
-            {detail && <span className="sidebar-agent-detail block truncate" title={detail}>{detail}</span>}
+            {agentDetail && <span className="sidebar-agent-detail block truncate" title={agentDetail}>{agentDetail}</span>}
           </span>
           {agent ? <span className="agent-status-chip" data-agent-state={agent.state}>
             {agent.state === 'thinking' ? <>
