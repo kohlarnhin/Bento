@@ -8,6 +8,7 @@ const MAX_PER_PROJECT: &str = "terminal.maxPerProject";
 const DEFAULT_APPLIED: &str = "autostart.defaultApplied";
 const APPEARANCE: &str = "appearance.theme";
 pub const RESTORE_TERMINALS: &str = "terminal.restore";
+const QUICK_COMMANDS: &str = "terminal.quickCommands";
 pub const COMMAND_NOTICES: &str = "terminal.commandNotices";
 pub const AGENT_NOTICES: &str = "terminal.agentNotices";
 pub const SHOW_TRAY: &str = "tray.enabled";
@@ -62,6 +63,8 @@ pub struct Settings {
     appearance: Appearance,
     #[serde(rename = "terminal.restore")]
     restore_terminals: bool,
+    #[serde(rename = "terminal.quickCommands")]
+    quick_commands: bool,
     #[serde(rename = "terminal.commandNotices")]
     command_notices: bool,
     #[serde(rename = "terminal.agentNotices")]
@@ -89,6 +92,7 @@ pub fn read(conn: &Connection) -> Result<Settings, String> {
         autostart_default_applied: default_applied(conn)?,
         appearance: read_appearance(conn)?,
         restore_terminals: enabled(conn, RESTORE_TERMINALS)?,
+        quick_commands: enabled(conn, QUICK_COMMANDS)?,
         command_notices: enabled(conn, COMMAND_NOTICES)?,
         agent_notices: enabled(conn, AGENT_NOTICES)?,
         show_tray: enabled(conn, SHOW_TRAY)?,
@@ -156,7 +160,7 @@ pub fn set(conn: &Connection, key: &str, value: Value) -> Result<(), String> {
                 .ok_or("外观必须是跟随系统、浅色或深色")?;
             save(conn, key, choice)
         }
-        RESTORE_TERMINALS | COMMAND_NOTICES | AGENT_NOTICES | SHOW_TRAY => {
+        RESTORE_TERMINALS | QUICK_COMMANDS | COMMAND_NOTICES | AGENT_NOTICES | SHOW_TRAY => {
             let enabled = value.as_bool().ok_or("该设置只能开启或关闭")?;
             save(conn, key, if enabled { "true" } else { "false" })
         }
@@ -247,7 +251,7 @@ mod tests {
         assert_eq!(project_rows(&conn), before);
         assert_eq!(read(&conn).unwrap(), Settings { terminal_font_size: 14, terminal_max_per_project: 2,
             autostart_default_applied: false, appearance: Appearance::System, restore_terminals: true,
-            command_notices: true, agent_notices: true, show_tray: true });
+            quick_commands: true, command_notices: true, agent_notices: true, show_tray: true });
         set(&conn, FONT_SIZE, json!(18)).unwrap();
         assert_eq!(read(&conn).unwrap().terminal_font_size, 18);
         assert_eq!(project_rows(&conn), before);
@@ -281,6 +285,37 @@ mod tests {
         assert!(set(&conn, legacy_key, json!(true)).is_err());
         let saved: String = conn.query_row("SELECT value FROM settings WHERE key = ?1", [legacy_key], |row| row.get(0)).unwrap();
         assert_eq!(saved, "false");
+    }
+
+    #[test]
+    fn quick_commands_default_on_for_existing_settings_and_persist_across_connections() {
+        let created = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "bento-quick-commands-{}-{}.db", std::process::id(), created.as_nanos()
+        ));
+        let quick_commands = |conn: &Connection| {
+            serde_json::to_value(read(conn).unwrap()).unwrap()[QUICK_COMMANDS].as_bool().unwrap()
+        };
+
+        let conn = Connection::open(&path).unwrap();
+        crate::init_db(&conn).unwrap();
+        set(&conn, COMMAND_NOTICES, json!(false)).unwrap();
+        assert!(quick_commands(&conn));
+        assert!(set(&conn, QUICK_COMMANDS, json!("false")).is_err());
+        set(&conn, QUICK_COMMANDS, json!(false)).unwrap();
+        drop(conn);
+
+        let conn = Connection::open(&path).unwrap();
+        crate::init_db(&conn).unwrap();
+        assert!(!quick_commands(&conn));
+        assert!(!read(&conn).unwrap().command_notices);
+        set(&conn, QUICK_COMMANDS, json!(true)).unwrap();
+        drop(conn);
+
+        let conn = Connection::open(&path).unwrap();
+        assert!(quick_commands(&conn));
+        drop(conn);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

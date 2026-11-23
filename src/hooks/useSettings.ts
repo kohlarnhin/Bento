@@ -9,12 +9,19 @@ interface Settings {
   'autostart.defaultApplied': boolean;
   'appearance.theme': Appearance;
   'terminal.restore': boolean;
+  'terminal.quickCommands'?: boolean;
   'terminal.commandNotices': boolean;
   'terminal.agentNotices': boolean;
   'tray.enabled': boolean;
 }
 
-const defaults = { 'terminal.restore': true, 'terminal.commandNotices': true, 'terminal.agentNotices': true, 'tray.enabled': true };
+const defaults = {
+  'terminal.restore': true,
+  'terminal.quickCommands': true,
+  'terminal.commandNotices': true,
+  'terminal.agentNotices': true,
+  'tray.enabled': true,
+};
 type Feature = keyof typeof defaults;
 type Appearance = 'system' | 'light' | 'dark';
 
@@ -54,7 +61,7 @@ export function useSettings() {
   const [maxError, setMaxError] = useState<string | null>(null);
   const [features, setFeatures] = useState(defaults);
   const [featureSaving, setFeatureSaving] = useState<Feature>();
-  const [featureError, setFeatureError] = useState('');
+  const [featureError, setFeatureError] = useState<{ key: Feature; message: string } | null>(null);
   const featurePending = useRef(false);
   const [autostart, setAutostart] = useState<AutostartStatus | null>(null);
   const [autostartSaving, setAutostartSaving] = useState(false);
@@ -82,6 +89,7 @@ export function useSettings() {
       setAppearance(settings['appearance.theme'] ?? 'system');
       setFeatures({
         'terminal.restore': settings['terminal.restore'] ?? true,
+        'terminal.quickCommands': settings['terminal.quickCommands'] ?? defaults['terminal.quickCommands'],
         'terminal.commandNotices': settings['terminal.commandNotices'] ?? true,
         'terminal.agentNotices': settings['terminal.agentNotices'] ?? true,
         'tray.enabled': settings['tray.enabled'] ?? true,
@@ -179,12 +187,12 @@ export function useSettings() {
     if (featurePending.current) return;
     featurePending.current = true;
     setFeatureSaving(key);
-    setFeatureError('');
+    setFeatureError(null);
     try {
       await invoke('set_setting', { key, value });
       setFeatures(previous => ({ ...previous, [key]: value }));
     } catch (error) {
-      setFeatureError(String(error));
+      setFeatureError({ key, message: String(error) });
     } finally {
       featurePending.current = false;
       setFeatureSaving(undefined);

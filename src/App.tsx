@@ -21,7 +21,7 @@ import { useUpdater } from './hooks/useUpdater';
 import { useSettings } from './hooks/useSettings';
 import { useWindowMotion } from './hooks/useWindowMotion';
 import { useButtonPressMotion } from './hooks/useButtonPressMotion';
-import { SettingsDialog } from './components/SettingsDialog';
+import { SettingsDialog, type SettingsCategory } from './components/SettingsDialog';
 import { QuickSwitcher } from './components/QuickSwitcher';
 import { GroupDialog } from './components/GroupDialog';
 import Button from './components/ui/button';
@@ -62,6 +62,7 @@ let sidebarDropContext: {
 let sidebarDragPaths: string[] = [];
 let sidebarDropPending = false;
 const noSnippets: Snippet[] = [];
+const noProjectSnippets: Record<string, Snippet[]> = {};
 
 export async function handleSidebarDragDrop(event: DragDropEvent) {
   const sidebar = document.querySelector<HTMLElement>('aside.app-sidebar');
@@ -133,12 +134,15 @@ export function App() {
   const toggleSplit = useCallback(() => terminalControls.current?.toggleSplit(), []);
   const changeFontSize = settings.changeFontSize;
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsCategory, setSettingsCategory] = useState<SettingsCategory>('general');
   const terminals = useSyncExternalStore(subscribeTerminals, getTerminalSnapshot);
   const { recoveries: agentRecoveries, counts: agentRecoveryCounts, dismiss: dismissAgentRecovery } = useAgentRecoveries(terminals);
   const terminalCount = Object.values(terminals).filter(terminal => terminal.alive).length;
   const [projects, setProjects] = useState<ProjectConfig[]>([]);
   const [groups, setGroups] = useState<ProjectGroup[]>([]);
   const [snippets, setSnippets] = useState<Record<string, Snippet[]>>({});
+  const showQuickCommands = !settings.fontLoading && settings.features['terminal.quickCommands'];
+  const visibleSnippets = showQuickCommands ? snippets : noProjectSnippets;
   const [filter, setFilter] = useState(() => {
     try { return savedSidebarFilter(localStorage.getItem(SIDEBAR_FILTER_KEY)); }
     catch { return 'all' as const; }
@@ -815,7 +819,7 @@ export function App() {
             projectAgents={projectAgents}
             agentRecoveryCounts={agentRecoveryCounts}
             completions={completions}
-            snippets={snippets}
+            snippets={visibleSnippets}
             onRunSnippet={(id, command) => { void handleRunCommand(id, command, true); }}
             onQuickSwitch={openQuickSwitcher}
             onUpdateGroup={updateGroup}
@@ -866,6 +870,7 @@ export function App() {
                   terminals={terminals}
                   onJumpToAttention={jumpToAttention}
                   maxTerminals={settings.maxPerProject}
+                  showQuickCommands={showQuickCommands}
                   snippets={snippets[selectedProject.id] ?? noSnippets}
                   onRunSnippet={command => { void handleRunCommand(selectedProject.id, command, true); }}
                   onChangeSnippet={change => changeSnippet(selectedProject.id, change)}
@@ -904,7 +909,7 @@ export function App() {
 
         <UpdateDialog updater={updater} projects={managedProjects} terminalCount={terminalCount} />
         <MotionPresence>{quickOpen && <QuickSwitcher projects={quickProjects} statuses={projectStatuses} sessions={quickSessions} onOpenAgent={openQuickAgent}
-          snippets={snippets} onRunSnippet={(project, command) => {
+          snippets={visibleSnippets} onRunSnippet={(project, command) => {
             closeQuickSwitcher(); void handleRunCommand(project.id, command, true);
           }}
           terminalActions={inTerminal ? {
@@ -927,6 +932,7 @@ export function App() {
             else { await invoke('delete_group', { id: groupForm.group!.id }); await loadProjects(); }
           }} />}</MotionPresence>
         <MotionPresence>{settingsOpen && !updater.isModalOpen && <SettingsDialog settings={settings} updater={updater}
+          category={settingsCategory} onCategoryChange={setSettingsCategory}
           onClose={() => setSettingsOpen(false)}
           onCheckUpdates={() => { setSettingsOpen(false); void updater.checkNow(); }} />}</MotionPresence>
 

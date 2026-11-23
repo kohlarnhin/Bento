@@ -74,6 +74,7 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
   focused: boolean;
   interactive: boolean;
   ready: boolean;
+  showQuickCommands: boolean;
   snippets: Snippet[];
   onRunSnippet: (command: string) => void;
   onChangeSnippet: (change: SnippetChange) => Promise<void>;
@@ -81,7 +82,7 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
   onFocusedSlot: (projectId: string, slot: number, left: number, right?: number) => void;
   onJumpToAttention: () => void;
 }>(function TerminalWorkspace({ project, activeSlot, slots, terminals, focused, interactive, ready,
-  agentRecoveries, onOpenAgent, onDismissAgentRecovery, snippets, onRunSnippet, onChangeSnippet, onReady, onFocusedSlot, onJumpToAttention }, ref) {
+  agentRecoveries, onOpenAgent, onDismissAgentRecovery, showQuickCommands, snippets, onRunSnippet, onChangeSnippet, onReady, onFocusedSlot, onJumpToAttention }, ref) {
   const [split, setSplit] = useState(false);
   const [source, setSource] = useState<string>();
   const [splitWidth, setSplitWidth] = useState(50);
@@ -190,7 +191,7 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
         </div>
       </>}
     </div>
-    <TerminalSnippets projectId={project.id} entries={snippets} onRun={onRunSnippet} onChange={onChangeSnippet} />
+    {showQuickCommands && <TerminalSnippets projectId={project.id} entries={snippets} onRun={onRunSnippet} onChange={onChangeSnippet} />}
     <footer className="terminal-status" data-terminal-status data-terminal-agent={agent?.state}>
       {agent ? <>
         <span className="agent-status-chip" data-agent-state={agent.state}>

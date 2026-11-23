@@ -343,6 +343,12 @@
   .h1-form-section > .h1-group-title { padding-inline: 6px; }
   .h1-form-footer { border-top: 1px solid var(--hairline-divider); }
 
+  .settings-sidebar { background: color-mix(in srgb, var(--h1-surface), hsl(var(--foreground)) 4%); }
+  .settings-tab[aria-selected="false"]:hover { background: var(--h1-hover); }
+  .settings-tab[aria-selected="true"] { background: color-mix(in srgb, var(--h1-surface), hsl(var(--foreground)) 10%); }
+  .settings-group { border: .5px solid var(--control-line); border-radius: 10px; }
+  .settings-row + .settings-row { border-top: .5px solid var(--h1-line); }
+
   .h1-palette-options {
     overflow: hidden;
     border: .5px solid var(--card-border);

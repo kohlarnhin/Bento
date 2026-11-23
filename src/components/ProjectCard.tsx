@@ -34,6 +34,7 @@ interface ProjectCardProps {
   activeSlot: number;
   terminals: Record<string, TerminalStatus>;
   maxTerminals: number;
+  showQuickCommands: boolean;
   snippets: Snippet[];
   onRunSnippet: (command: string) => void;
   onChangeSnippet: (change: SnippetChange) => Promise<void>;
@@ -251,7 +252,7 @@ function ConflictDialog({ conflict, onClose, onConfirm }: {
 }
 
 export function ProjectCard({ project, view, slots, activeSlot, terminals, terminalControls, onFocusedTerminal, onJumpToAttention, onSelectView, onSelectTerminal,
-  focused, maxTerminals, snippets, onRunSnippet, onChangeSnippet, onToggleFocus, onNewTerminal, onOpenAgent, agentRecoveries, onDismissAgentRecovery, closeActiveTab,
+  focused, maxTerminals, showQuickCommands, snippets, onRunSnippet, onChangeSnippet, onToggleFocus, onNewTerminal, onOpenAgent, agentRecoveries, onDismissAgentRecovery, closeActiveTab,
   status: runtimeStatus, runtime, conflicts, onStart, onStop, onRestart, onOpenBrowser,
   onSetDefaultService, onRevealPath, onOpenEditor, onOpenTerminal, onOpenLogs, onClearLogs, onEdit }: ProjectCardProps) {
   const { snapshot, snapshotError, git, health, now, refresh } = useDashboard(project, runtime, view);
@@ -462,7 +463,7 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
       <div className="workspace-view terminal-chrome" data-workspace-view="terminal" {...{ inert: !terminalInteractive ? '' : undefined }}>
         {mountTerminal && <TerminalWorkspace ref={terminalControls} project={project} activeSlot={activeSlot} slots={slots} terminals={terminals}
           agentRecoveries={agentRecoveries} onOpenAgent={onOpenAgent} onDismissAgentRecovery={onDismissAgentRecovery}
-          snippets={snippets} onRunSnippet={onRunSnippet} onChangeSnippet={onChangeSnippet}
+          showQuickCommands={showQuickCommands} snippets={snippets} onRunSnippet={onRunSnippet} onChangeSnippet={onChangeSnippet}
           onJumpToAttention={onJumpToAttention}
           focused={focused} interactive={terminalInteractive} ready={terminalReady} onReady={setReadySlot} onFocusedSlot={onFocusedTerminal} />}
       </div>

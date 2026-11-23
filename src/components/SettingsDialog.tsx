@@ -1,3 +1,5 @@
+import type { KeyboardEvent, ReactNode } from 'react';
+import { Bell, Info, SlidersHorizontal, SquareTerminal } from 'lucide-react';
 import type { SettingsController } from '../hooks/useSettings';
 import type { UpdaterController } from '../hooks/useUpdater';
 import { DEFAULT_TERMINAL_FONT_SIZE } from '../lib/terminalAppearance';
@@ -7,6 +9,15 @@ import { Select } from './ui/select';
 import { SegmentedControl } from './ui/segmented-control';
 import { Switch } from './ui/switch';
 
+const categories = [
+  { id: 'general', label: '通用', icon: SlidersHorizontal },
+  { id: 'terminal', label: '终端', icon: SquareTerminal },
+  { id: 'notifications', label: '通知', icon: Bell },
+  { id: 'about', label: '关于', icon: Info },
+] as const;
+
+export type SettingsCategory = typeof categories[number]['id'];
+
 const fontSizes = Array.from({ length: 9 }, (_, index) => ({ value: String(index + 12), label: `${index + 12} px` }));
 const terminalLimits = Array.from({ length: 6 }, (_, index) => ({ value: String(index + 1), label: `${index + 1} 个` }));
 const appearances = [
@@ -15,97 +26,175 @@ const appearances = [
   { value: 'dark', label: '深色' },
 ] as const;
 
-export function SettingsDialog({ settings, updater, onClose, onCheckUpdates }: {
+function SettingsGroup({ id, title, children }: { id: string; title: string; children: ReactNode }) {
+  return <section className="h1-form-section" aria-labelledby={id}>
+    <h3 id={id} className="h1-group-title">{title}</h3>
+    <div className="settings-group">{children}</div>
+  </section>;
+}
+
+function SettingsRow({ label, description, error, children }: {
+  label: ReactNode;
+  description?: ReactNode;
+  error?: ReactNode;
+  children: ReactNode;
+}) {
+  return <div className="settings-row">
+    <div className="h1-list-row max-[480px]:flex-wrap max-[480px]:gap-2">
+      <div className="min-w-0">
+        <div className="text-[13.5px] leading-[18px]">{label}</div>
+        {description && <div className="mt-1 space-y-1 text-xs leading-4 text-muted-foreground">{description}</div>}
+      </div>
+      {children}
+    </div>
+    {error}
+  </div>;
+}
+
+function FeatureRow({ settings, feature, id = feature, label, description }: {
+  settings: SettingsController;
+  feature: keyof SettingsController['features'];
+  id?: string;
+  label: string;
+  description?: string;
+}) {
+  const descriptionId = description ? `${id}-help` : undefined;
+  const error = settings.featureError?.key === feature ? settings.featureError.message : null;
+  return <SettingsRow label={<label htmlFor={id}>{label}</label>}
+    description={description && <p id={descriptionId}>{description}</p>}
+    error={error && <p role="alert" className="h1-list-note">{error}</p>}>
+    <Switch id={id} checked={settings.features[feature]} disabled={settings.fontLoading || !!settings.featureSaving}
+      aria-describedby={descriptionId} onCheckedChange={value => { void settings.changeFeature(feature, value); }} />
+  </SettingsRow>;
+}
+
+function GeneralSettings({ settings }: { settings: SettingsController }) {
+  const autostartReason = settings.autostart?.reason;
+  return <>
+    <SettingsGroup id="settings-appearance-group" title="外观">
+      <SettingsRow label={<span id="settings-appearance">主题</span>}
+        error={settings.appearanceError && <p role="alert" className="h1-list-note">{settings.appearanceError}</p>}>
+        <SegmentedControl labelledBy="settings-appearance" value={settings.appearance} options={appearances}
+          disabled={settings.fontLoading || settings.appearanceSaving}
+          className="max-w-full shrink-0 [&>button]:flex-none [&>button]:whitespace-nowrap [&>button]:px-3"
+          onChange={value => { void settings.changeAppearance(value); }} />
+      </SettingsRow>
+    </SettingsGroup>
+
+    <SettingsGroup id="settings-startup-group" title="启动">
+      <SettingsRow label={<label htmlFor="settings-autostart">登录时启动 Bento</label>}
+        description={<>
+          <p id="settings-autostart-help">登录 macOS 后在菜单栏中静默运行，不打开窗口</p>
+          {autostartReason && <p id="settings-autostart-reason">{autostartReason}</p>}
+        </>}
+        error={settings.autostartError && <p role="alert" className="h1-list-note" data-autostart-error>{settings.autostartError}</p>}>
+        <Switch id="settings-autostart" checked={settings.autostart?.enabled ?? false}
+          disabled={!settings.autostart?.available || settings.autostartSaving}
+          aria-describedby={autostartReason ? 'settings-autostart-help settings-autostart-reason' : 'settings-autostart-help'}
+          onCheckedChange={enabled => { void settings.changeAutostart(enabled); }} />
+      </SettingsRow>
+      <FeatureRow settings={settings} feature="tray.enabled" id="settings-show-tray" label="在菜单栏显示" />
+    </SettingsGroup>
+  </>;
+}
+
+function TerminalSettings({ settings }: { settings: SettingsController }) {
+  return <>
+    <SettingsGroup id="settings-display-group" title="显示">
+      <SettingsRow label={<label htmlFor="settings-font-size">字号</label>}
+        description={<p id="settings-font-help">立即应用到所有终端，默认 {DEFAULT_TERMINAL_FONT_SIZE} px</p>}
+        error={settings.fontError && <p role="alert" className="h1-list-note" data-font-size-error>{settings.fontError}</p>}>
+        <Select id="settings-font-size" label="字号" value={String(settings.fontSize)} options={fontSizes} clearRowsWhenAbove
+          disabled={settings.fontLoading || settings.fontSaving} aria-describedby="settings-font-help" data-settings-font-size
+          onValueChange={value => { void settings.changeFontSize(Number(value)); }} className="w-24 shrink-0 tabular-nums" />
+      </SettingsRow>
+      <SettingsRow label={<label htmlFor="settings-max-terminals">每个项目最多终端数</label>}
+        description={<p id="settings-max-terminals-help">调低不会关闭已打开的终端</p>}
+        error={settings.maxError && <p role="alert" className="h1-list-note" data-max-terminals-error>{settings.maxError}</p>}>
+        <Select id="settings-max-terminals" label="每个项目最多终端数" value={String(settings.maxPerProject)} options={terminalLimits} clearRowsWhenAbove
+          disabled={settings.fontLoading || settings.maxSaving} aria-describedby="settings-max-terminals-help" data-settings-max-terminals
+          onValueChange={value => { void settings.changeMaxPerProject(Number(value)); }} className="w-24 shrink-0 tabular-nums" />
+      </SettingsRow>
+    </SettingsGroup>
+
+    <SettingsGroup id="settings-terminal-features-group" title="功能">
+      <FeatureRow settings={settings} feature="terminal.quickCommands" label="常用命令"
+        description="终端底部的命令栏。关闭后不再显示，已保存的命令会保留" />
+      <FeatureRow settings={settings} feature="terminal.restore" label="重启后恢复终端"
+        description="重新打开 Bento 时恢复上次的终端和输出" />
+    </SettingsGroup>
+  </>;
+}
+
+export function SettingsDialog({ settings, updater, category, onCategoryChange, onClose, onCheckUpdates }: {
   settings: SettingsController;
   updater: UpdaterController;
+  category: SettingsCategory;
+  onCategoryChange: (category: SettingsCategory) => void;
   onClose: () => void;
   onCheckUpdates: () => void;
 }) {
+  const activeIndex = categories.findIndex(item => item.id === category);
+  const version = updater.currentVersion || '…';
+  const panels: Record<SettingsCategory, ReactNode> = {
+    general: <GeneralSettings settings={settings} />,
+    terminal: <TerminalSettings settings={settings} />,
+    notifications: <SettingsGroup id="settings-notification-group" title="通知">
+      <FeatureRow settings={settings} feature="terminal.commandNotices" label="命令完成通知" description="较长的命令跑完时提醒你" />
+      <FeatureRow settings={settings} feature="terminal.agentNotices" label="AI 会话提醒" description="Claude / Codex 一轮结束时提醒你" />
+    </SettingsGroup>,
+    about: <div className="settings-group">
+      <SettingsRow label={<>版本 <span className="tabular-nums">v{version}</span></>}>
+        <Button variant="outline" size="sm" className="shrink-0" onClick={onCheckUpdates}>检查更新</Button>
+      </SettingsRow>
+    </div>,
+  };
+
+  const onCategoryKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const count = categories.length;
+    let next: number;
+    switch (event.key) {
+      case 'ArrowUp': next = (activeIndex - 1 + count) % count; break;
+      case 'ArrowDown': next = (activeIndex + 1) % count; break;
+      case 'Home': next = 0; break;
+      case 'End': next = count - 1; break;
+      default: return;
+    }
+    event.preventDefault();
+    onCategoryChange(categories[next].id);
+    event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();
+  };
+
   return <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
-    <DialogContent className="flex max-h-[calc(100dvh-3rem)] max-w-lg flex-col gap-0 rounded-2xl p-0" data-settings-dialog>
-      <DialogHeader className="px-6 pb-4 pt-6">
-        <DialogTitle>设置</DialogTitle>
-        <DialogDescription className="sr-only">管理外观、登录时启动和终端偏好。</DialogDescription>
-      </DialogHeader>
+    <DialogContent className="h-[560px] max-h-[90dvh] w-[90vw] max-w-[780px] grid-cols-[clamp(112px,24.4%,190px)_minmax(0,1fr)] gap-0 rounded-2xl p-0"
+      closeClassName="right-5 top-5" data-settings-dialog>
+      <aside className="settings-sidebar flex min-h-0 flex-col overflow-y-auto rounded-l-[15px] px-3 py-5">
+        <p className="mb-5 px-2.5 text-[15px] font-semibold">设置</p>
+        <div role="tablist" aria-label="设置分类" aria-orientation="vertical" className="grid gap-1" onKeyDown={onCategoryKeyDown}>
+          {categories.map(({ id, label, icon: Icon }) => <button key={id} type="button" role="tab"
+            id={`settings-tab-${id}`} aria-controls={`settings-panel-${id}`} aria-selected={category === id}
+            tabIndex={category === id ? 0 : -1} onClick={event => {
+              event.currentTarget.focus();
+              onCategoryChange(id);
+            }}
+            className="settings-tab flex h-9 w-full items-center gap-2.5 rounded-[8px] px-2.5 text-left text-[13px] text-muted-foreground hover:text-foreground aria-selected:font-semibold aria-selected:text-foreground">
+            <Icon size={15} className="shrink-0" aria-hidden="true" />
+            {label}
+          </button>)}
+        </div>
+        <p className="mt-auto px-2.5 pt-5 text-[11px] tabular-nums text-muted-foreground">Bento v{version}</p>
+      </aside>
 
-      <div className="min-h-0 space-y-4 overflow-y-auto px-6 pb-6">
-      <section className="h1-form-section" aria-labelledby="settings-general">
-        <h3 id="settings-general" className="h1-group-title">通用</h3>
-        <div className="h1-group">
-        <div className="h1-list-row">
-          <span id="settings-appearance" className="text-sm font-medium">外观</span>
-          <SegmentedControl labelledBy="settings-appearance" value={settings.appearance} options={appearances}
-            disabled={settings.fontLoading || settings.appearanceSaving}
-            className="shrink-0 [&>button]:flex-none [&>button]:whitespace-nowrap [&>button]:px-3"
-            onChange={value => { void settings.changeAppearance(value); }} />
-        </div>
-        {settings.appearanceError && <p role="alert" className="h1-list-note">{settings.appearanceError}</p>}
-        <div className="h1-list-row">
-          <div className="min-w-0">
-            <label htmlFor="settings-autostart" className="text-sm font-medium">登录时启动 Bento</label>
-            <p id="settings-autostart-help" className="mt-1.5 max-w-72 text-xs leading-relaxed text-muted-foreground">登录 macOS 后在菜单栏中静默运行，不打开窗口</p>
-            {settings.autostart?.reason && <p id="settings-autostart-reason" className="mt-2 text-xs text-muted-foreground">{settings.autostart.reason}</p>}
-          </div>
-          <Switch id="settings-autostart" className="mt-0.5" checked={settings.autostart?.enabled ?? false}
-            disabled={!settings.autostart?.available || settings.autostartSaving}
-            aria-describedby={'settings-autostart-help' + (settings.autostart?.reason ? ' settings-autostart-reason' : '')}
-            onCheckedChange={enabled => { void settings.changeAutostart(enabled); }} />
-        </div>
-        {settings.autostartError && <p role="alert" className="h1-list-note" data-autostart-error>{settings.autostartError}</p>}
-        <div className="h1-list-row">
-          <label htmlFor="settings-show-tray" className="text-sm font-medium">在菜单栏显示</label>
-          <Switch id="settings-show-tray" checked={settings.features['tray.enabled']}
-            disabled={settings.fontLoading || !!settings.featureSaving}
-            onCheckedChange={value => { void settings.changeFeature('tray.enabled', value); }} />
-        </div>
-        </div>
-      </section>
-
-      <section className="h1-form-section" aria-labelledby="settings-terminal">
-        <h3 id="settings-terminal" className="h1-group-title">终端</h3>
-        <div className="h1-group">
-        <div className="h1-list-row">
-          <div>
-            <label htmlFor="settings-font-size" className="text-sm font-medium">字号</label>
-            <p id="settings-font-help" className="mt-1.5 text-xs text-muted-foreground">立即应用到所有终端，默认 {DEFAULT_TERMINAL_FONT_SIZE} px</p>
-          </div>
-          <Select id="settings-font-size" label="字号" value={String(settings.fontSize)} options={fontSizes} clearRowsWhenAbove
-            disabled={settings.fontLoading || settings.fontSaving} aria-describedby="settings-font-help" data-settings-font-size
-            onValueChange={value => { void settings.changeFontSize(Number(value)); }} className="w-24 shrink-0 tabular-nums" />
-        </div>
-        {settings.fontError && <p role="alert" className="h1-list-note" data-font-size-error>{settings.fontError}</p>}
-        <div className="h1-list-row">
-          <div>
-            <label htmlFor="settings-max-terminals" className="text-sm font-medium">每个项目最多终端数</label>
-            <p id="settings-max-terminals-help" className="mt-1.5 text-xs leading-relaxed text-muted-foreground">默认 2 个；调低不会关闭已打开的终端</p>
-          </div>
-          <Select id="settings-max-terminals" label="每个项目最多终端数" value={String(settings.maxPerProject)} options={terminalLimits} clearRowsWhenAbove
-            disabled={settings.fontLoading || settings.maxSaving} aria-describedby="settings-max-terminals-help" data-settings-max-terminals
-            onValueChange={value => { void settings.changeMaxPerProject(Number(value)); }} className="w-24 shrink-0 tabular-nums" />
-        </div>
-        {settings.maxError && <p role="alert" className="h1-list-note" data-max-terminals-error>{settings.maxError}</p>}
-        {([
-          ['terminal.restore', '重启后恢复终端'],
-          ['terminal.commandNotices', '命令完成通知'],
-          ['terminal.agentNotices', 'AI 会话提醒'],
-        ] as const).map(([key, label]) => <div key={key} className="h1-list-row">
-          <label htmlFor={key} className="text-sm font-medium">{label}</label>
-          <Switch id={key} checked={settings.features[key]} disabled={settings.fontLoading || !!settings.featureSaving}
-            onCheckedChange={value => { void settings.changeFeature(key, value); }} />
+      <div className="flex min-h-0 min-w-0 flex-col">
+        <DialogHeader className="shrink-0 pb-5 pl-[clamp(12px,3vw,30px)] pr-14 pt-6">
+          <DialogTitle className="text-[23px] leading-8"><span className="sr-only">设置 · </span>{categories[activeIndex].label}</DialogTitle>
+          <DialogDescription className="sr-only">管理外观、启动、终端、通知和更新设置。</DialogDescription>
+        </DialogHeader>
+        {categories.map(({ id }) => <div key={id} id={`settings-panel-${id}`} role="tabpanel"
+          aria-labelledby={`settings-tab-${id}`} hidden={category !== id} tabIndex={category === id ? 0 : undefined}
+          className="min-h-0 flex-1 space-y-[18px] overflow-y-auto overscroll-contain px-[clamp(12px,3vw,30px)] pb-6">
+          {category === id && panels[id]}
         </div>)}
-        {settings.featureError && <p role="alert" className="h1-list-note">{settings.featureError}</p>}
-        </div>
-      </section>
-
-      <section className="h1-form-section" aria-labelledby="settings-about">
-        <h3 id="settings-about" className="h1-group-title">关于</h3>
-        <div className="h1-group">
-        <div className="h1-list-row">
-          <p className="text-sm text-muted-foreground">版本 <span className="tabular-nums text-foreground">v{updater.currentVersion || '…'}</span></p>
-          <Button variant="outline" size="sm" onClick={onCheckUpdates}>检查更新</Button>
-        </div>
-        </div>
-      </section>
       </div>
     </DialogContent>
   </Dialog>;
