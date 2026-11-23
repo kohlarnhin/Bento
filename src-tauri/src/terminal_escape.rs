@@ -101,6 +101,29 @@ impl EscapeStream {
     }
 }
 
+/// Text of an OSC 9 or OSC 777 desktop notification. ConEmu and Ghostty use
+/// `9;<number>;…` for progress, which is not a notification.
+pub fn osc_notification(command: &str, value: &str) -> Option<String> {
+    let text = match command {
+        "9" => {
+            let first = value.split(';').next().unwrap_or_default();
+            if !first.is_empty() && first.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            value.to_owned()
+        }
+        "777" => {
+            let notice = value.strip_prefix("notify;")?;
+            let (title, body) = notice.split_once(';').unwrap_or((notice, ""));
+            [title.trim(), body.trim()].into_iter().filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" · ")
+        }
+        _ => return None,
+    };
+    let text: String = text.chars().filter(|ch| !ch.is_control()).take(200).collect();
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
 pub fn osc_cwd(value: &str) -> Option<std::path::PathBuf> {
     let mut url = tauri::Url::parse(value).ok()?;
     if url.scheme() != "file" {
@@ -113,6 +136,18 @@ pub fn osc_cwd(value: &str) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notifications_read_osc_9_and_777_but_not_progress_reports() {
+        assert_eq!(osc_notification("9", "Build finished").as_deref(), Some("Build finished"));
+        assert_eq!(osc_notification("777", "notify;Devin;Devin needs input").as_deref(), Some("Devin · Devin needs input"));
+        assert_eq!(osc_notification("777", "notify;Done").as_deref(), Some("Done"));
+        assert_eq!(osc_notification("9", "4;1;50"), None);
+        assert_eq!(osc_notification("9", " \u{7} "), None);
+        assert_eq!(osc_notification("777", "preexec;ls"), None);
+        assert_eq!(osc_notification("2", "title"), None);
+        assert_eq!(osc_notification("9", &"长".repeat(300)).map(|text| text.chars().count()), Some(200));
+    }
 
     #[test]
     fn cwd_decodes_spaces_and_unicode_from_osc7() {

@@ -1,4 +1,4 @@
-import type { TerminalAgent } from '../types';
+import type { TerminalAgent, TerminalAgentKind } from '../types';
 
 export const MIN_TERMINAL_FONT_SIZE = 12;
 export const MAX_TERMINAL_FONT_SIZE = 20;
@@ -58,7 +58,10 @@ export function terminalsNeedingAttention<T extends AttentionTarget>(terminals: 
   );
 }
 
-export const agentNames = { claude: 'Claude', codex: 'Codex' } as const;
+export const agentNames: Record<TerminalAgentKind, string> = {
+  claude: 'Claude', codex: 'Codex', devin: 'Devin', droid: 'Droid', gemini: 'Gemini', cursor: 'Cursor', copilot: 'Copilot',
+  opencode: 'OpenCode', aider: 'Aider', qwen: 'Qwen', kimi: 'Kimi', amp: 'Amp', crush: 'Crush', iflow: 'iFlow',
+};
 export const agentStateLabels = { waiting: '等你确认', done: '完成', thinking: '思考中' } as const;
 
 function agentPriority(agent: TerminalAgent): number {

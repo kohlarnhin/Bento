@@ -96,7 +96,7 @@ impl TerminalManager {
             let linked = lock(&session.agent_link).active(process.as_ref(), now);
             if let Some(reference) = linked {
                 claimed.insert(reference);
-            } else if let Some(process) = process {
+            } else if let Some(process) = process.filter(|process| process.kind.resumable()) {
                 unlinked.push((session, process));
             }
         }

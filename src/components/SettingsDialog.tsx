@@ -139,7 +139,8 @@ export function SettingsDialog({ settings, updater, category, onCategoryChange, 
     terminal: <TerminalSettings settings={settings} />,
     notifications: <SettingsGroup id="settings-notification-group" title="通知">
       <FeatureRow settings={settings} feature="terminal.commandNotices" label="命令完成通知" description="较长的命令跑完时提醒你" />
-      <FeatureRow settings={settings} feature="terminal.agentNotices" label="AI 会话提醒" description="Claude / Codex 一轮结束时提醒你" />
+      <FeatureRow settings={settings} feature="terminal.agentNotices" label="AI 会话提醒" description="Claude、Codex、Devin 等 AI CLI 等你确认或一轮结束时提醒你" />
+      <FeatureRow settings={settings} feature="terminal.programNotices" label="终端程序通知" description="终端里的其他程序发出系统通知时（OSC 9 / 777），在 Bento 后台转为通知" />
     </SettingsGroup>,
     about: <div className="settings-group">
       <SettingsRow label={<>版本 <span className="tabular-nums">v{version}</span></>}>

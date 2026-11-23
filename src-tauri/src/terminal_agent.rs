@@ -2,7 +2,7 @@ mod foreground;
 mod screen;
 pub(crate) mod sessions;
 
-use crate::terminal_escape::{EscapeEvent, EscapeStream};
+use crate::terminal_escape::{osc_notification, EscapeEvent, EscapeStream};
 pub(crate) use foreground::agent_log_paths;
 use foreground::{Detector, ForegroundAgent};
 use screen::Screen;
@@ -13,12 +13,36 @@ use std::sync::Mutex;
 const CODEX_QUIET_MS: u64 = 3_000;
 // Claude can stop animating its title just before it paints the approval panel.
 const CLAUDE_IDLE_SETTLE_MS: u64 = 500;
+// CLIs in GENERIC: a short-lived `--version` call never shows up as a session,
+// a startup animation cannot start a round, and a round ends after 3 s without
+// output unless a BEL / OSC 9 / OSC 777 notification ends it first.
+const GENERIC_READY_MS: u64 = 1_000;
+const GENERIC_STARTUP_MS: u64 = 5_000;
+const GENERIC_QUIET_MS: u64 = 3_000;
+const GENERIC_BELL_SETTLE_MS: u64 = 500;
+// Output continuing this long, with gaps shorter than GENERIC_BURST_GAP_MS and
+// not right after a keystroke, means the CLI is working again.
+const GENERIC_SUSTAIN_MS: u64 = 2_000;
+const GENERIC_BURST_GAP_MS: u64 = 700;
+const GENERIC_ECHO_MS: u64 = 400;
 
 #[derive(Clone, Copy, Debug, Deserialize, Hash, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
     Claude,
     Codex,
+    Devin,
+    Droid,
+    Gemini,
+    Cursor,
+    Copilot,
+    OpenCode,
+    Aider,
+    Qwen,
+    Kimi,
+    Amp,
+    Crush,
+    IFlow,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -75,6 +99,7 @@ struct Features {
     kind: AgentKind,
     command: &'static [u8],
     node_script: &'static [u8],
+    prompt: char,
     busy_titles: &'static [char],
     idle_title: Option<char>,
     waiting_notice: &'static [&'static str],
@@ -91,6 +116,7 @@ const FEATURES: [Features; 2] = [
         kind: AgentKind::Claude,
         command: b"claude",
         node_script: b"/@anthropic-ai/claude-code/cli.js",
+        prompt: '❯',
         busy_titles: &['◐', '◑'],
         idle_title: Some('✳'),
         waiting_notice: &["claude needs your permission"],
@@ -103,6 +129,7 @@ const FEATURES: [Features; 2] = [
         kind: AgentKind::Codex,
         command: b"codex",
         node_script: b"/@openai/codex/bin/codex.js",
+        prompt: '›',
         busy_titles: &[],
         idle_title: None,
         waiting_notice: &[],
@@ -130,24 +157,67 @@ const FEATURES: [Features; 2] = [
     },
 ];
 
+/// Agent CLIs tracked through the signals every TUI shares. `commands` match the
+/// executable or argv[0]; `scripts` match the entry script run by Node, Bun, Python
+/// or a shell, by file name or, when starting with '/', by a path fragment.
+struct Generic {
+    kind: AgentKind,
+    label: &'static str,
+    commands: &'static [&'static [u8]],
+    scripts: &'static [&'static [u8]],
+}
+
+const GENERIC: [Generic; 12] = [
+    Generic { kind: AgentKind::Devin, label: "Devin", commands: &[b"devin"], scripts: &[] },
+    Generic { kind: AgentKind::Droid, label: "Droid", commands: &[b"droid"], scripts: &[] },
+    Generic { kind: AgentKind::Gemini, label: "Gemini", commands: &[], scripts: &[b"gemini", b"/@google/gemini-cli/"] },
+    Generic { kind: AgentKind::Cursor, label: "Cursor", commands: &[b"cursor-agent"], scripts: &[b"cursor-agent", b"/cursor-agent/versions/"] },
+    // AWS Copilot is a native `copilot` binary, so only the npm CLI is matched.
+    Generic { kind: AgentKind::Copilot, label: "Copilot", commands: &[], scripts: &[b"copilot", b"/@github/copilot/"] },
+    Generic { kind: AgentKind::OpenCode, label: "OpenCode", commands: &[b"opencode"], scripts: &[b"opencode"] },
+    Generic { kind: AgentKind::Aider, label: "Aider", commands: &[], scripts: &[b"aider"] },
+    Generic { kind: AgentKind::Qwen, label: "Qwen", commands: &[], scripts: &[b"qwen", b"/@qwen-code/qwen-code/"] },
+    Generic { kind: AgentKind::Kimi, label: "Kimi", commands: &[], scripts: &[b"kimi"] },
+    Generic { kind: AgentKind::Amp, label: "Amp", commands: &[], scripts: &[b"amp", b"/@sourcegraph/amp/"] },
+    Generic { kind: AgentKind::Crush, label: "Crush", commands: &[b"crush"], scripts: &[] },
+    Generic { kind: AgentKind::IFlow, label: "iFlow", commands: &[], scripts: &[b"iflow", b"/@iflow-ai/iflow-cli/"] },
+];
+
+// Notification text that asks for a decision; anything else ends the round.
+const GENERIC_WAITING_WORDS: &[&str] = &[
+    "permission", "approv", "confirm", "allow", "authoriz", "needs input", "needs your", "requires your",
+    "批准", "确认", "授权", "权限",
+];
+
 impl AgentKind {
-    fn features(self) -> &'static Features {
-        match self {
-            Self::Claude => &FEATURES[0],
-            Self::Codex => &FEATURES[1],
-        }
+    fn features(self) -> Option<&'static Features> {
+        FEATURES.iter().find(|feature| feature.kind == self)
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
+            kind => GENERIC.iter().find(|agent| agent.kind == kind).map_or("AI", |agent| agent.label),
         }
+    }
+
+    /// Only Claude Code and Codex sessions can be listed and resumed.
+    pub fn resumable(self) -> bool {
+        matches!(self, Self::Claude | Self::Codex)
     }
 }
 
 fn basename(path: &[u8]) -> &[u8] {
     path.rsplit(|&byte| byte == b'/').next().unwrap_or_default()
+}
+
+fn script_matches(pattern: &[u8], script: &[u8]) -> bool {
+    if pattern.starts_with(b"/") {
+        script.windows(pattern.len()).any(|part| part == pattern)
+    } else {
+        basename(script) == pattern
+    }
 }
 
 fn identify<'a, I: Iterator<Item = &'a [u8]>>(
@@ -162,11 +232,22 @@ fn identify<'a, I: Iterator<Item = &'a [u8]>>(
     {
         return Some((feature.kind, argv.peekable()));
     }
+    if let Some(agent) = GENERIC.iter().find(|agent| {
+        agent.commands.iter().any(|name| *name == executable || *name == command)
+    }) {
+        return Some((agent.kind, argv.peekable()));
+    }
     let interpreter = if executable.is_empty() {
         command
     } else {
         executable
     };
+    let runtime = matches!(interpreter, b"node" | b"nodejs" | b"bun") || interpreter.starts_with(b"python");
+    let shell = matches!(interpreter, b"sh" | b"bash" | b"zsh" | b"fish");
+    // A Node or Python CLI that sets its process title replaces argv[0].
+    if let Some(agent) = GENERIC.iter().find(|agent| runtime && agent.scripts.contains(&command)) {
+        return Some((agent.kind, argv.peekable()));
+    }
     let mut args = argv.peekable();
     // Only inspect the entry script. A shell or Node program can have 'claude'
     // or 'codex' anywhere in its own arguments.
@@ -194,12 +275,21 @@ fn identify<'a, I: Iterator<Item = &'a [u8]>>(
             b"node" | b"nodejs" | b"bun" => {
                 script.ends_with(feature.node_script) || basename(script) == feature.command
             }
-            b"sh" | b"bash" | b"zsh" | b"fish" | b"python" | b"python3" => {
-                basename(script) == feature.command
-            }
+            _ if runtime || shell => basename(script) == feature.command,
             _ => false,
         })
-        .map(|feature| (feature.kind, args))
+        .map(|feature| feature.kind)
+        // Wrapper scripts keep the CLI's own name, like Cursor's Bash launcher.
+        .or_else(|| {
+            GENERIC
+                .iter()
+                .find(|agent| {
+                    (runtime || shell)
+                        && agent.commands.iter().chain(agent.scripts).any(|pattern| script_matches(pattern, script))
+                })
+                .map(|agent| agent.kind)
+        })
+        .map(|kind| (kind, args))
 }
 
 fn resume_arg<'a>(kind: AgentKind, mut args: impl Iterator<Item = &'a [u8]>) -> Option<SessionRef> {
@@ -259,6 +349,17 @@ fn osc(features: &Features, raw: &[u8]) -> (Option<Title>, Option<AgentState>) {
     (None, notice)
 }
 
+fn generic_notice(raw: &[u8]) -> Option<AgentState> {
+    let text = String::from_utf8_lossy(raw);
+    let (command, value) = text.split_once(';')?;
+    let message = osc_notification(command, value)?.to_lowercase();
+    Some(if GENERIC_WAITING_WORDS.iter().any(|word| message.contains(word)) {
+        AgentState::Waiting
+    } else {
+        AgentState::Done
+    })
+}
+
 fn approval(features: &Features, tail: &str) -> bool {
     let includes = |strings: &[&str]| strings.iter().any(|part| tail.contains(part));
     let question = includes(features.questions);
@@ -293,7 +394,10 @@ impl Output {
         for &byte in bytes {
             match self.stream.event(byte) {
                 EscapeEvent::Osc(raw) => {
-                    let (title, notice) = osc(features, &raw);
+                    let (title, notice) = match features {
+                        Some(features) => osc(features, &raw),
+                        None => (None, generic_notice(&raw)),
+                    };
                     seen.working_title |= title == Some(Title::Working);
                     seen.title = title.or(seen.title);
                     seen.notice = notice.or(seen.notice);
@@ -304,12 +408,9 @@ impl Output {
                 EscapeEvent::Other => (),
             }
         }
-        if seen.changed {
+        if let Some(features) = features.filter(|_| seen.changed) {
             self.approval = approval(features, &self.screen.tail());
-            seen.prompt = self.screen.has_prompt(match kind {
-                AgentKind::Claude => '❯',
-                AgentKind::Codex => '›',
-            });
+            seen.prompt = self.screen.has_prompt(features.prompt);
             seen.codex_working = kind == AgentKind::Codex && self.screen.codex_working();
         }
         seen.approval = self.approval;
@@ -325,6 +426,9 @@ pub struct Tracker {
     last_activity: u64,
     idle_at: Option<u64>,
     title: Option<Title>,
+    detected_at: u64,
+    typed_at: Option<u64>,
+    burst: Option<(u64, u64)>,
 }
 
 impl Tracker {
@@ -343,9 +447,20 @@ impl Tracker {
             last_activity: now,
             idle_at: None,
             title: None,
+            detected_at: now,
+            typed_at: None,
+            burst: None,
         };
         tracker.resize(cols, rows);
         tracker
+    }
+
+    fn generic(&self) -> bool {
+        self.session.kind.features().is_none()
+    }
+
+    fn typed(&mut self, now: u64) {
+        self.typed_at = Some(now);
     }
 
     pub fn acknowledge(&mut self) {
@@ -373,11 +488,13 @@ impl Tracker {
     }
 
     fn submit(&mut self, now: u64) {
+        self.ready |= self.generic();
         if !self.ready {
             return;
         }
         self.session.round_started_at = Some(now);
         self.idle_at = None;
+        self.burst = None;
         self.last_activity = now;
         self.output.screen.clear_text();
         self.output.approval = false;
@@ -387,6 +504,9 @@ impl Tracker {
     pub fn observe(&mut self, bytes: &[u8], now: u64, visible: bool) {
         let had_approval = self.output.approval;
         let seen = self.output.feed(self.session.kind, bytes);
+        if self.generic() {
+            return self.observe_generic(&seen, now, visible);
+        }
         self.ready |= seen.prompt
             || seen.approval
             || seen.title.is_some()
@@ -436,10 +556,13 @@ impl Tracker {
     }
 
     pub fn tick(&mut self, now: u64, visible: bool) {
+        self.ready |= self.generic() && now.saturating_sub(self.detected_at) >= GENERIC_READY_MS;
         if self.session.state == AgentState::Thinking
             && (match self.session.kind {
                 AgentKind::Claude => self.idle_at.is_some_and(|idle| now >= idle),
                 AgentKind::Codex => now.saturating_sub(self.last_activity) >= CODEX_QUIET_MS,
+                _ => self.idle_at.is_some_and(|idle| now >= idle)
+                    || now.saturating_sub(self.last_activity) >= GENERIC_QUIET_MS,
             })
         {
             self.idle_at = None;
@@ -450,6 +573,45 @@ impl Tracker {
     fn resize(&mut self, cols: u16, rows: u16) {
         if self.output.screen.resize(cols, rows) {
             self.output.approval = false;
+        }
+    }
+
+    fn observe_generic(&mut self, seen: &Observation, now: u64, visible: bool) {
+        self.ready |= seen.notice.is_some() || now.saturating_sub(self.detected_at) >= GENERIC_READY_MS;
+        if !self.ready {
+            return;
+        }
+        if let Some(state) = seen.notice {
+            self.idle_at = None;
+            self.burst = None;
+            self.state(state, now, visible);
+            return;
+        }
+        if seen.changed {
+            self.last_activity = now;
+            // A bell ends the round only once the screen has settled.
+            if let Some(idle) = self.idle_at.as_mut() {
+                *idle = now + GENERIC_BELL_SETTLE_MS;
+            }
+            // Echoed keystrokes and prompt editing are not the CLI working.
+            if self.typed_at.is_none_or(|typed| now.saturating_sub(typed) >= GENERIC_ECHO_MS) {
+                self.burst = match self.burst {
+                    Some((first, last)) if now.saturating_sub(last) < GENERIC_BURST_GAP_MS => Some((first, now)),
+                    _ => Some((now, now)),
+                };
+            }
+        }
+        if seen.bell && self.session.state == AgentState::Thinking {
+            self.idle_at.get_or_insert(now + GENERIC_BELL_SETTLE_MS);
+        }
+        let working = self.burst.is_some_and(|(first, last)| {
+            last.saturating_sub(first) >= GENERIC_SUSTAIN_MS && now.saturating_sub(last) < GENERIC_BURST_GAP_MS
+        });
+        if working && self.session.state != AgentState::Thinking
+            && now.saturating_sub(self.detected_at) >= GENERIC_STARTUP_MS
+        {
+            self.idle_at = None;
+            self.state(AgentState::Thinking, now, visible);
         }
     }
 }
@@ -516,6 +678,7 @@ impl Sample {
     }
 
     pub fn input(&mut self, tracker: &mut Tracker, mut bytes: &[u8], now: u64) {
+        tracker.typed(now);
         // xterm sends each bracketed paste as one write. Native Enter sends CR,
         // while Shift+Enter / Ctrl+J supply a literal LF to the prompt editor.
         while let Some((&byte, rest)) = bytes.split_first() {
@@ -606,8 +769,118 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_generic_agent_clis_by_command_entry_script_or_process_title() {
+        use AgentKind::{Aider, Copilot, Cursor, Devin, Droid, Gemini, Qwen};
+        let cursor = "/Users/me/.local/share/cursor-agent/versions/2025.10.28-0a91dc2";
+        for (executable, args, expected) in [
+            ("/Users/me/.local/share/devin/cli/_versions/3000.14/bin/devin", &["devin"][..], Some(Devin)),
+            ("/Users/me/.local/bin/droid", &["droid", "exec", "fix it"][..], Some(Droid)),
+            ("/usr/local/bin/node", &["node", "/usr/local/bin/gemini"][..], Some(Gemini)),
+            ("/usr/local/bin/node", &["node", "--max-old-space-size=8192", "/usr/local/lib/node_modules/@google/gemini-cli/dist/index.js"][..], Some(Gemini)),
+            ("/bin/bash", &["bash", "/Users/me/.local/bin/cursor-agent"][..], Some(Cursor)),
+            (&format!("{cursor}/node"), &[&format!("{cursor}/node")[..], "--use-system-ca", &format!("{cursor}/index.js")][..], Some(Cursor)),
+            ("/usr/local/bin/node", &["node", "/usr/local/bin/copilot"][..], Some(Copilot)),
+            ("/opt/homebrew/bin/python3.12", &["/opt/homebrew/bin/python3.12", "/Users/me/.local/bin/aider"][..], Some(Aider)),
+            ("/usr/local/bin/node", &["qwen"][..], Some(Qwen)),
+            ("/bin/sh", &["/bin/sh", "/tmp/fixture/devin"][..], Some(Devin)),
+            ("/usr/local/bin/copilot", &["copilot", "deploy"][..], None),
+            ("/usr/local/bin/node", &["node", "server.js", "/usr/local/bin/gemini"][..], None),
+            ("/usr/local/bin/goose", &["goose", "up"][..], None),
+            ("/usr/local/bin/devin-helper", &["devin-helper"][..], None),
+        ] {
+            assert_eq!(identify_args(executable, args), expected, "{executable} {args:?}");
+        }
+        assert_eq!((Devin.label(), Cursor.label(), AgentKind::IFlow.label()), ("Devin", "Cursor", "iFlow"));
+        assert!(Claude.resumable() && Codex.resumable() && !Devin.resumable());
+    }
+
+    #[test]
+    fn generic_notifications_ask_for_a_decision_or_end_the_round() {
+        for (raw, expected) in [
+            (&b"777;notify;Devin;Devin needs input"[..], Some(Waiting)),
+            (b"9;Droid needs permission to run a tool", Some(Waiting)),
+            (b"9;Droid is waiting for approval to run git push", Some(Waiting)),
+            ("9;需要你确认是否继续".as_bytes(), Some(Waiting)),
+            (b"777;notify;Devin;Devin finished", Some(Done)),
+            (b"9;Droid finished its turn", Some(Done)),
+            (b"9;4;1;50", None),
+            (b"9;", None),
+            (b"0;Devin", None),
+        ] {
+            assert_eq!(generic_notice(raw), expected, "{}", String::from_utf8_lossy(raw));
+        }
+    }
+
+    fn spin(tracker: &mut Tracker, from: u64, to: u64) {
+        for (index, at) in (from..=to).step_by(100).enumerate() {
+            let frame = ['|', '/', '-', '\\'][index % 4];
+            tracker.observe(format!("\r\x1b[2K{frame} working").as_bytes(), at, false);
+            tracker.tick(at, false);
+        }
+    }
+
+    #[test]
+    fn generic_cli_rounds_follow_enter_notifications_and_sustained_output() {
+        let probe = Probe::new(|| None, 80, 24);
+        let mut sample = probe.sampling.lock().unwrap();
+        let mut devin = Tracker::new(AgentKind::Devin, 0, 80, 24);
+        devin.observe(b"Devin CLI\r\n> ", 200, true);
+        assert_eq!(devin.status(), None);
+        devin.tick(GENERIC_READY_MS, true);
+        let idle = devin.status().unwrap();
+        assert_eq!((idle.state, idle.acknowledged), (Done, true));
+        sample.input(&mut devin, b"fix the build\r", 6_000);
+        assert_eq!((devin.session.state, devin.session.round_started_at), (Thinking, Some(6_000)));
+        spin(&mut devin, 6_400, 12_000);
+        assert_eq!(devin.session.state, Thinking);
+        devin.observe(b"\x07\x1b]9;Devin needs input\x07\x1b]777;notify;Devin;Devin needs input\x07", 12_050, false);
+        assert_eq!(devin.session.state, Waiting);
+        devin.tick(30_000, false);
+        assert_eq!(devin.session.state, Waiting);
+        sample.input(&mut devin, b"y", 30_000);
+        devin.observe(b"\r\x1b[2Ky", 30_050, false);
+        spin(&mut devin, 30_600, 32_500);
+        assert_eq!(devin.session.state, Waiting);
+        spin(&mut devin, 32_600, 32_700);
+        assert_eq!((devin.session.state, devin.session.round_started_at), (Thinking, Some(6_000)));
+        devin.tick(32_700 + GENERIC_QUIET_MS - 1, false);
+        assert_eq!(devin.session.state, Thinking);
+        devin.tick(32_700 + GENERIC_QUIET_MS, false);
+        assert_eq!(devin.session.state, Done);
+        assert!(devin.session.pending());
+    }
+
+    #[test]
+    fn generic_cli_ignores_startup_paint_typing_and_progress_and_settles_bells() {
+        let probe = Probe::new(|| None, 80, 24);
+        let mut sample = probe.sampling.lock().unwrap();
+        let mut droid = Tracker::new(AgentKind::Droid, 0, 80, 24);
+        spin(&mut droid, 1_000, 4_900);
+        assert_eq!(droid.status().unwrap().state, Done);
+        for (index, at) in (10_000..14_000).step_by(150).enumerate() {
+            sample.input(&mut droid, b"x", at);
+            droid.observe(format!("\r\x1b[2K> {}", "x".repeat(index + 1)).as_bytes(), at + 20, false);
+        }
+        assert_eq!((droid.session.state, droid.session.round_started_at), (Done, None));
+        sample.input(&mut droid, b"\r", 14_000);
+        assert_eq!(droid.session.state, Thinking);
+        droid.observe(b"\x1b]9;4;3;\x07", 14_100, false);
+        assert_eq!(droid.session.state, Thinking);
+        droid.observe(b"\x07", 15_000, false);
+        droid.observe(b"\r\x1b[2Kfinal answer", 15_200, false);
+        droid.tick(15_600, false);
+        assert_eq!(droid.session.state, Thinking);
+        droid.tick(15_200 + GENERIC_BELL_SETTLE_MS, false);
+        assert_eq!(droid.session.state, Done);
+        sample.input(&mut droid, b"next\r", 20_000);
+        droid.observe(b"\x1b]9;Droid finished its turn\x07", 21_000, true);
+        let done = droid.status().unwrap();
+        assert_eq!((done.state, done.acknowledged), (Done, true));
+    }
+
+    #[test]
     fn claude_working_titles_and_notifications_survive_fragmented_streams() {
-        let features = Claude.features();
+        let features = Claude.features().unwrap();
         assert_eq!(osc(features, b"9;4;50").1, None);
         assert_eq!(
             osc(

@@ -38,6 +38,7 @@ impl Fixture {
                 ".codex/sessions/{}/rollout-fixture-{id}.jsonl",
                 date.format("%Y/%m/%d")
             )),
+            _ => unreachable!("only Claude Code and Codex keep session logs"),
         };
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, data).unwrap();

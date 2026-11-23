@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, type RefObject } from 'react';
 import { ChevronDown, Plus, RotateCcw, Sparkle, X } from 'lucide-react';
 import { toast } from 'sonner';
-import type { ProjectView, TerminalAgent } from '../types';
+import type { ProjectView, TerminalAgent, TerminalAgentKind } from '../types';
 import { closeTerminal, getTerminalSnapshot, restartTerminal, terminalKey, type TerminalStatus } from '../lib/terminalRegistry';
 import { agentNames, terminalDisplayNumber } from '../lib/terminalUsability';
 import { loadAgentIndex, type AgentMenuData, type OpenAgent } from '../lib/agentSessions';
@@ -132,14 +132,14 @@ export function ProjectTabs({ projectId, view, activeSlot, slots, terminals, max
       }}><ChevronDown size={13} aria-hidden="true" /></button>
   </div>;
 
-  const agentCounts = { claude: 0, codex: 0 };
+  const agentCounts: Partial<Record<TerminalAgentKind, number>> = {};
   const tabs = [
     { value: 'overview', label: <TabLabel label="概览" /> },
     ...(slots.length === 0 ? [{ value: 'new-terminal', label: <TabLabel label="终端" /> }] : []),
     ...slots.map((slot, index) => {
       const status = terminals[terminalKey(projectId, slot)];
       const agent = status?.agent;
-      const number = agent ? ++agentCounts[agent.kind] : 0;
+      const number = agent ? agentCounts[agent.kind] = (agentCounts[agent.kind] ?? 0) + 1 : 0;
       const slotName = `终端 ${index + 1}`;
       const label = agent ? agentNames[agent.kind] + (number > 1 ? ` ${number}` : '') : slotName;
       return {

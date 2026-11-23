@@ -8,12 +8,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use crate::terminal_agent::{AgentSession, AgentStatus, Probe};
 use crate::terminal_agent::sessions::SharedCatalog as AgentCatalog;
 use crate::terminal_attention::{AttentionManager, Sinks as AttentionSinks};
-use crate::terminal_escape::{osc_cwd, EscapeEvent, EscapeStream};
+use crate::terminal_escape::{osc_cwd, osc_notification, EscapeEvent, EscapeStream};
 use crate::terminal_shell::{self, Boundaries, Completion};
 
 const SCROLLBACK_BYTES: usize = 2 * 1024 * 1024;
@@ -61,6 +61,19 @@ pub struct CompletionEvent {
     pub session_id: String,
     pub completion: Option<Completion>,
 }
+
+/// A desktop notification (OSC 9 / OSC 777) from a program that is not a known AI CLI.
+#[derive(Clone, Debug)]
+pub struct ProgramNotice {
+    pub project_id: String,
+    pub slot: u8,
+    pub session_id: String,
+    pub message: String,
+    pub at: u64,
+}
+
+// Programs often send OSC 9 and OSC 777 together; forward one of them.
+const PROGRAM_NOTICE_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Serialize)]
 pub struct TerminalContext {
@@ -352,6 +365,7 @@ type OpenedSink = Arc<dyn Fn(TerminalSessionInfo) + Send + Sync>;
 type ClosedSink = Arc<dyn Fn(TerminalClosed) + Send + Sync>;
 type LimitSource = Arc<dyn Fn() -> Result<u8, String> + Send + Sync>;
 type CompletionSink = Arc<dyn Fn(CompletionEvent, bool) + Send + Sync>;
+type ProgramNoticeSink = Arc<dyn Fn(ProgramNotice) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct TerminalManager {
@@ -367,7 +381,9 @@ pub struct TerminalManager {
     integration: Option<PathBuf>,
     completion_enabled: Arc<AtomicBool>,
     agent_notices: Arc<AtomicBool>,
+    program_notices: Arc<AtomicBool>,
     completion: CompletionSink,
+    program_notice: ProgramNoticeSink,
     inactive: Arc<dyn Fn() -> bool + Send + Sync>,
     visible_tabs: Arc<Mutex<HashSet<TerminalKey>>>,
     agent_catalog: Arc<AgentCatalog>,
@@ -392,7 +408,9 @@ impl TerminalManager {
             integration: None,
             completion_enabled: Arc::new(AtomicBool::new(true)),
             agent_notices: Arc::new(AtomicBool::new(true)),
+            program_notices: Arc::new(AtomicBool::new(true)),
             completion: Arc::new(|_, _| {}),
+            program_notice: Arc::new(|_| {}),
             inactive: Arc::new(|| false),
             visible_tabs: Arc::new(Mutex::new(HashSet::new())),
             agent_catalog: Arc::new(AgentCatalog::new(None, None)),
@@ -414,6 +432,7 @@ impl TerminalManager {
             })
         });
         let notification_app = app.clone();
+        let program_app = app.clone();
         let directory = terminal_data_dir(&app);
         let agent_notices = Arc::new(AtomicBool::new(crate::open_project_db()
             .and_then(|db| crate::settings::enabled(&db, crate::settings::AGENT_NOTICES)).unwrap_or(true)));
@@ -472,6 +491,9 @@ impl TerminalManager {
                 crate::terminal_notifications::post(&notification_app, event);
             }
         });
+        manager.program_notices.store(crate::open_project_db()
+            .and_then(|db| crate::settings::enabled(&db, crate::settings::PROGRAM_NOTICES)).unwrap_or(true), Ordering::Relaxed);
+        manager.program_notice = Arc::new(move |notice| crate::terminal_notifications::post_program(&program_app, notice));
         manager
     }
 
@@ -488,6 +510,10 @@ impl TerminalManager {
 
     pub fn set_agent_notices(&self, enabled: bool) {
         self.agent_notices.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn set_program_notices(&self, enabled: bool) {
+        self.program_notices.store(enabled, Ordering::Relaxed);
     }
 
     pub fn agents(&self) -> Vec<(TerminalKey, AgentSession)> {
@@ -721,6 +747,8 @@ impl TerminalManager {
         let metadata = session.metadata.clone();
         let completion_sink = self.completion.clone();
         let completion_enabled = self.completion_enabled.clone();
+        let program_notices = self.program_notices.clone();
+        let program_notice = self.program_notice.clone();
         let visible_tabs = self.visible_tabs.clone();
         let inactive = self.inactive.clone();
         let reader_result =
@@ -730,6 +758,7 @@ impl TerminalManager {
                     let mut decoder = Utf8Decoder::default();
                 let mut escapes = EscapeStream::default();
                 let mut boundaries = Boundaries::default();
+                let mut last_notice: Option<Instant> = None;
                     let mut buffer = [0; 32 * 1024];
                     let emit = |data: String| {
                         if data.is_empty() {
@@ -756,6 +785,24 @@ impl TerminalManager {
                                             Some(("7", value)) => lock(&metadata).cwd = osc_cwd(value),
                                             Some(("0" | "2", value)) => lock(&metadata).title =
                                                 Some(value.chars().filter(|char| !char.is_control()).take(160).collect()),
+                                            Some((command @ ("9" | "777"), value)) => {
+                                                let Some(message) = osc_notification(command, value) else { continue };
+                                                // Known AI CLIs report through their session state instead.
+                                                if program_notices.load(Ordering::Relaxed)
+                                                    && last_notice.is_none_or(|at| at.elapsed() >= PROGRAM_NOTICE_INTERVAL)
+                                                    && inactive() && !lock(&visible_tabs).contains(&output_key)
+                                                    && attention.agent_process(&output_key, &output_session).is_none()
+                                                {
+                                                    last_notice = Some(Instant::now());
+                                                    program_notice(ProgramNotice {
+                                                        project_id: output_key.project_id.clone(),
+                                                        slot: output_key.slot,
+                                                        session_id: output_session.clone(),
+                                                        message,
+                                                        at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                                                    });
+                                                }
+                                            }
                                             Some(("133", value)) => {
                                                 let result = boundaries.observe(value, Instant::now());
                                                 if let Some(result) = result.filter(|_| completion_enabled.load(Ordering::Relaxed)) {
@@ -1541,6 +1588,48 @@ mod tests {
             session.idle() && session.info().agent_status.agent.is_none()
         });
         assert!(!fixture.manager.list()[0].attention);
+    }
+
+    #[test]
+    fn foreground_generic_cli_reports_its_notification_as_a_session_state() {
+        use crate::terminal_agent::{AgentKind, AgentState};
+        let fixture = Fixture::new();
+        let script = fixture.dir.join("devin");
+        std::fs::write(&script, "#!/bin/sh\nprintf '\\033]777;notify;Devin;Devin needs input\\007'\nread -r reply\n").unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        fixture.create("ai");
+        fixture.idle("ai", 1);
+        fixture.manager.write("ai", 1, format!("/bin/sh -c '{}; :'\r", script.display()).into_bytes()).unwrap();
+        fixture.wait_until("ai", 1, "Devin foreground and waiting", |session| {
+            let info = session.info();
+            !info.attention && info.agent_status.agent.is_some_and(|agent|
+                agent.kind == AgentKind::Devin && agent.state == AgentState::Waiting)
+        });
+        fixture.manager.write("ai", 1, b"exit\r".to_vec()).unwrap();
+        fixture.wait_until("ai", 1, "shell regains foreground", |session| {
+            session.idle() && session.info().agent_status.agent.is_none()
+        });
+    }
+
+    #[test]
+    fn background_program_notifications_are_forwarded_once_and_follow_the_setting() {
+        let mut fixture = Fixture::new();
+        let notices = Arc::new(Mutex::new(Vec::new()));
+        let sink = notices.clone();
+        fixture.manager.inactive = Arc::new(|| true);
+        fixture.manager.program_notice = Arc::new(move |notice| lock(&sink).push(notice.message));
+        fixture.create("notes");
+        fixture.idle("notes", 1);
+        fixture.manager.write("notes", 1, b"printf '\\033]9;4;1;50\\007\\033]9;Build finished\\007\\033]777;notify;Build;finished\\007'; echo SENT_$((1+1))\r".to_vec()).unwrap();
+        fixture.wait_for("notes", "SENT_2");
+        assert_eq!(*lock(&notices), ["Build finished"]);
+        fixture.manager.set_program_notices(false);
+        thread::sleep(PROGRAM_NOTICE_INTERVAL);
+        fixture.manager.write("notes", 1, b"printf '\\033]9;Second\\007'; echo SENT_$((2+1))\r".to_vec()).unwrap();
+        fixture.wait_for("notes", "SENT_3");
+        assert_eq!(*lock(&notices), ["Build finished"]);
     }
 
     #[test]

@@ -1,8 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { TerminalAgentKind, TerminalSessionInfo } from '../types';
+import type { AgentSessionTool, TerminalSessionInfo } from '../types';
 
 export interface AgentHistorySession {
-  tool: TerminalAgentKind;
+  tool: AgentSessionTool;
   id: string;
   cwd: string;
   title: string;
@@ -20,7 +20,7 @@ export type AgentArgv = ['claude' | 'codex'] | ['claude', '--resume', string] | 
 export type OpenAgent = (argv: AgentArgv) => Promise<void>;
 
 export interface AgentMenuData {
-  tools: TerminalAgentKind[];
+  tools: AgentSessionTool[];
   sessions: AgentHistorySession[];
 }
 
@@ -34,7 +34,7 @@ export async function loadAgentIndex<T>(command: 'terminal_agent_project_session
   if (!cachedOnly) receive(await invoke<T>(command, args));
 }
 
-export function agentArgv(tool: TerminalAgentKind, id?: string): AgentArgv {
+export function agentArgv(tool: AgentSessionTool, id?: string): AgentArgv {
   if (id === undefined) return [tool];
   return tool === 'claude' ? ['claude', '--resume', id] : ['codex', 'resume', id];
 }

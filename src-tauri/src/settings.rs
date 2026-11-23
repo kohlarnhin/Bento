@@ -10,6 +10,7 @@ const APPEARANCE: &str = "appearance.theme";
 const QUICK_COMMANDS: &str = "terminal.quickCommands";
 pub const COMMAND_NOTICES: &str = "terminal.commandNotices";
 pub const AGENT_NOTICES: &str = "terminal.agentNotices";
+pub const PROGRAM_NOTICES: &str = "terminal.programNotices";
 pub const SHOW_TRAY: &str = "tray.enabled";
 
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
@@ -66,6 +67,8 @@ pub struct Settings {
     command_notices: bool,
     #[serde(rename = "terminal.agentNotices")]
     agent_notices: bool,
+    #[serde(rename = "terminal.programNotices")]
+    program_notices: bool,
     #[serde(rename = "tray.enabled")]
     show_tray: bool,
 }
@@ -91,6 +94,7 @@ pub fn read(conn: &Connection) -> Result<Settings, String> {
         quick_commands: enabled(conn, QUICK_COMMANDS)?,
         command_notices: enabled(conn, COMMAND_NOTICES)?,
         agent_notices: enabled(conn, AGENT_NOTICES)?,
+        program_notices: enabled(conn, PROGRAM_NOTICES)?,
         show_tray: enabled(conn, SHOW_TRAY)?,
     })
 }
@@ -156,7 +160,7 @@ pub fn set(conn: &Connection, key: &str, value: Value) -> Result<(), String> {
                 .ok_or("外观必须是跟随系统、浅色或深色")?;
             save(conn, key, choice)
         }
-        QUICK_COMMANDS | COMMAND_NOTICES | AGENT_NOTICES | SHOW_TRAY => {
+        QUICK_COMMANDS | COMMAND_NOTICES | AGENT_NOTICES | PROGRAM_NOTICES | SHOW_TRAY => {
             let enabled = value.as_bool().ok_or("该设置只能开启或关闭")?;
             save(conn, key, if enabled { "true" } else { "false" })
         }
@@ -192,6 +196,11 @@ pub fn set_setting(app: AppHandle, key: String, value: Value) -> Result<(), Stri
     if key == AGENT_NOTICES {
         set(&conn, &key, value)?;
         app.state::<crate::terminal::TerminalManager>().set_agent_notices(enabled(&conn, AGENT_NOTICES)?);
+        return Ok(());
+    }
+    if key == PROGRAM_NOTICES {
+        set(&conn, &key, value)?;
+        app.state::<crate::terminal::TerminalManager>().set_program_notices(enabled(&conn, PROGRAM_NOTICES)?);
         return Ok(());
     }
     if key != APPEARANCE {
@@ -235,7 +244,7 @@ mod tests {
         assert_eq!(project_rows(&conn), before);
         assert_eq!(read(&conn).unwrap(), Settings { terminal_font_size: 14, terminal_max_per_project: 2,
             autostart_default_applied: false, appearance: Appearance::System,
-            quick_commands: true, command_notices: true, agent_notices: true, show_tray: true });
+            quick_commands: true, command_notices: true, agent_notices: true, program_notices: true, show_tray: true });
         set(&conn, FONT_SIZE, json!(18)).unwrap();
         assert_eq!(read(&conn).unwrap().terminal_font_size, 18);
         assert_eq!(project_rows(&conn), before);
@@ -278,7 +287,7 @@ mod tests {
         set(&conn, FONT_SIZE, json!(18)).unwrap();
         set(&conn, MAX_PER_PROJECT, json!(4)).unwrap();
         set(&conn, APPEARANCE, json!("dark")).unwrap();
-        for key in [QUICK_COMMANDS, COMMAND_NOTICES, AGENT_NOTICES, SHOW_TRAY] {
+        for key in [QUICK_COMMANDS, COMMAND_NOTICES, AGENT_NOTICES, PROGRAM_NOTICES, SHOW_TRAY] {
             set(&conn, key, json!(false)).unwrap();
         }
         record_default_applied(&conn).unwrap();
@@ -335,6 +344,10 @@ mod tests {
         assert!(set(&conn, AGENT_NOTICES, json!("false")).is_err());
         set(&conn, AGENT_NOTICES, json!(false)).unwrap();
         assert!(!read(&conn).unwrap().agent_notices);
+        assert!(read(&conn).unwrap().program_notices);
+        assert!(set(&conn, PROGRAM_NOTICES, json!(1)).is_err());
+        set(&conn, PROGRAM_NOTICES, json!(false)).unwrap();
+        assert!(!read(&conn).unwrap().program_notices);
         assert!(read(&conn).unwrap().command_notices);
         for value in [json!(0), json!(7), json!(-1), json!(2.5), json!(2.0), json!("2"), json!(true), Value::Null] {
             assert!(set(&conn, MAX_PER_PROJECT, value).is_err());

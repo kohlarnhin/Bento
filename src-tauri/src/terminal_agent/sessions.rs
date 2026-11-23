@@ -353,6 +353,7 @@ fn session_filename(tool: AgentKind, path: &Path) -> bool {
             .is_some_and(|stem| match tool {
                 AgentKind::Claude => SessionRef::new(tool, stem).is_some(),
                 AgentKind::Codex => stem.starts_with("rollout-"),
+                _ => false,
             })
 }
 
@@ -584,6 +585,7 @@ impl Parser {
                 }
                 collect_codex_files(entry_type, payload_type, payload, &mut self.files);
             }
+            _ => (),
         }
         self.record_time(recorded);
     }

@@ -180,7 +180,9 @@ export interface TerminalSessionInfo {
   pid?: number | null;
 }
 
-export type TerminalAgentKind = 'claude' | 'codex';
+export type AgentSessionTool = 'claude' | 'codex';
+export type TerminalAgentKind = AgentSessionTool | 'devin' | 'droid' | 'gemini' | 'cursor' | 'copilot' | 'opencode'
+  | 'aider' | 'qwen' | 'kimi' | 'amp' | 'crush' | 'iflow';
 export type TerminalAgentState = 'thinking' | 'waiting' | 'done';
 
 export interface TerminalAgent {

@@ -11,6 +11,7 @@ interface Settings {
   'terminal.quickCommands'?: boolean;
   'terminal.commandNotices': boolean;
   'terminal.agentNotices': boolean;
+  'terminal.programNotices': boolean;
   'tray.enabled': boolean;
 }
 
@@ -18,6 +19,7 @@ const defaults = {
   'terminal.quickCommands': true,
   'terminal.commandNotices': true,
   'terminal.agentNotices': true,
+  'terminal.programNotices': true,
   'tray.enabled': true,
 };
 type Feature = keyof typeof defaults;
@@ -89,6 +91,7 @@ export function useSettings() {
         'terminal.quickCommands': settings['terminal.quickCommands'] ?? defaults['terminal.quickCommands'],
         'terminal.commandNotices': settings['terminal.commandNotices'] ?? true,
         'terminal.agentNotices': settings['terminal.agentNotices'] ?? true,
+        'terminal.programNotices': settings['terminal.programNotices'] ?? true,
         'tray.enabled': settings['tray.enabled'] ?? true,
       });
     }).catch(error => { if (active) setFontError(`读取设置失败：${error}`); })

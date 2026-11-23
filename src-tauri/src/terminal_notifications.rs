@@ -1,4 +1,4 @@
-use crate::terminal::{CompletionEvent, TerminalClosed, TerminalManager};
+use crate::terminal::{CompletionEvent, ProgramNotice, TerminalClosed, TerminalManager};
 use crate::terminal_agent::AgentState;
 use crate::terminal_attention::AgentEvent;
 use crate::terminal_shell::elapsed_text;
@@ -91,6 +91,13 @@ pub fn post_agent(app: &AppHandle, event: AgentEvent) {
     let Some(number) = target.number(&app.state::<TerminalManager>()) else { return; };
     let body = format!("终端 {number}");
     dispatch(app, target, agent.state_started_at, title, body);
+}
+
+pub fn post_program(app: &AppHandle, notice: ProgramNotice) {
+    let Some(project_name) = project_name(&notice.project_id) else { return; };
+    let target = TerminalTarget { project_id: notice.project_id, slot: notice.slot, session_id: notice.session_id };
+    let Some(number) = target.number(&app.state::<TerminalManager>()) else { return; };
+    dispatch(app, target, notice.at, format!("{project_name} · 终端 {number}"), notice.message);
 }
 
 fn project_name(project_id: &str) -> Option<String> {
