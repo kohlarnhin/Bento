@@ -20,6 +20,7 @@ mod dashboard;
 mod logs;
 mod quit;
 mod tray;
+mod pet;
 mod git;
 mod settings;
 mod snippets;
@@ -539,12 +540,14 @@ pub fn run() {
         .manage(dashboard::ExternalRuns::default())
         .manage(quit::QuitPending::default())
         .manage(tray::TrayState::default())
+        .manage(pet::PetState::default())
         .manage(terminal_notifications::PendingNotification::default())
         .setup(|app| {
             app.manage(terminal::TerminalManager::for_app(app.handle().clone()));
             terminal_notifications::install(app.handle());
             quit::install_menu(app.handle())?;
             tray::install(app.handle())?;
+            pet::install(app.handle());
             if let Err(error) = autostart::initialize(app.handle()) {
                 eprintln!("Bento launch at login: {error}");
             }
@@ -571,10 +574,23 @@ pub fn run() {
                     _ => (),
                 }
             }
+            if window.label() == pet::PET || window.label() == pet::PET_DOCK {
+                match event {
+                    tauri::WindowEvent::Moved(position) => pet::on_moved(window.app_handle(), *position),
+                    tauri::WindowEvent::CloseRequested { api, .. } => api.prevent_close(),
+                    _ => (),
+                }
+            }
             if window.label() == "main" {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    let _ = window.hide();
+                match event {
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        let _ = window.hide();
+                        pet::layout(window.app_handle());
+                    }
+                    tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Focused(_)
+                    | tauri::WindowEvent::ScaleFactorChanged { .. } => pet::layout(window.app_handle()),
+                    _ => (),
                 }
             }
         });
@@ -634,6 +650,19 @@ pub fn run() {
         tray::get_tray_panel,
         tray::note_tray_project,
         tray::tray_panel_action,
+        pet::get_pet_view,
+        pet::pet_menu,
+        pet::pet_action,
+        pet::pet_set_regions,
+        pet::pet_drag_start,
+        pet::pet_dock,
+        pet::pet_set_edge,
+        pet::pet_stop,
+        pet::pet_jump,
+        pet::pet_press,
+        pet::pet_edge,
+        pet::pet_style_init,
+        pet::pet_tucked,
         terminal::terminal_context,
         terminal::terminal_focus,
         terminal::terminal_write,

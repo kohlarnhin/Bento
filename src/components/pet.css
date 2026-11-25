@@ -1,0 +1,872 @@
+/* Bento desktop pet. The window is 320x220 logical px; layout constants live in PetWindow.tsx and pet.rs. */
+.pet-root {
+  position: relative;
+  /* 320px wide in the corner; on Bento's top edge as wide as Bento plus 200px each side (pet.rs sizes the windows). */
+  width: 100vw;
+  /* 220px on Bento, 260px in the corner. */
+  height: 100vh;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+/* Only one of the two pets (on Bento / in the corner) is drawn. The switch is
+   done natively (window alpha) so it is instant; the page itself never fades,
+   since a hidden webview may get its events late. */
+
+/* Soft contact shadow where it rests on an edge. */
+.pet-shadow {
+  position: absolute;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgb(0 0 0 / .34), rgb(0 0 0 / .14) 55%, transparent);
+  filter: blur(1.5px);
+  pointer-events: none;
+}
+/* The character's spot along Bento's top edge: moved every frame while it walks (PetWindow.tsx).
+   Shadow, character and bubble ride on it; in the corner it stays at 0. */
+.pet-track {
+  position: absolute; left: 0; top: 0; width: 320px; height: 100%;
+  will-change: transform;
+}
+
+.pet-character {
+  position: absolute;
+  cursor: grab;
+  transform-origin: 50% 100%;
+  /* No transition on left/top: a pose change must never make the figure slide (it looked like drifting). */
+  transition: opacity .22s ease, transform .26s cubic-bezier(.34, 1.5, .64, 1);
+  will-change: transform;
+}
+.pet-character:active { cursor: grabbing; }
+.pet-character[data-pose="cling"] { transform-origin: 0 40%; }
+.pet-character[data-pose="cling"][data-mirrored] { transform-origin: 100% 40%; }
+
+.pet-figure {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  transform-origin: 50% 100%;
+  animation: pet-breathe 3.6s ease-in-out infinite;
+  filter: drop-shadow(0 3px 5px rgb(0 0 0 / .2)) drop-shadow(0 1px 1.5px rgb(0 0 0 / .18));
+}
+.pet-character[data-pose="lie"] .pet-figure { animation-duration: 5.2s; }
+.pet-figure > img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  image-rendering: auto;
+}
+.pet-character[data-mirrored] .pet-figure > img { transform: scaleX(-1); }
+/* Walking: one column of the walk sprite sheet (19 frames of one walk cycle), switched with hard cuts (PetWindow.tsx). */
+.pet-figure > .pet-walk-sheet {
+  width: 100%; height: 100%;
+  background-repeat: no-repeat;
+  background-size: 1900% 100%;
+  pointer-events: none;
+}
+.pet-character[data-mirrored] .pet-figure > .pet-walk-sheet { transform: scaleX(-1); }
+
+@keyframes pet-breathe {
+  0%, 100% { transform: scale(1, 1); }
+  50% { transform: scale(1.008, 1.018); }
+}
+
+/* The face on the visor: soft rounded vector marks in mint with a gentle glow, under a soft glass highlight. */
+.pet-face {
+  position: absolute;
+  box-sizing: border-box;
+  overflow: visible;
+  pointer-events: none;
+  filter: drop-shadow(0 0 1.2px color-mix(in srgb, currentColor 80%, transparent)) drop-shadow(0 0 4px color-mix(in srgb, currentColor 45%, transparent));
+  transition: color .3s ease;
+}
+.pet-face .pet-face-glass { filter: blur(.6px); }
+.pet-face .pet-cursor { animation: pet-cursor 1.1s steps(1) infinite; }
+.pet-face .pet-dots circle { animation: pet-dot 1.2s ease-in-out infinite; }
+.pet-face .pet-dots circle:nth-child(2) { animation-delay: .18s; }
+.pet-face .pet-dots circle:nth-child(3) { animation-delay: .36s; }
+.pet-face .pet-blush { filter: none; }
+@keyframes pet-cursor { 50% { opacity: 0; } }
+@keyframes pet-dot { 0%, 100% { opacity: .25; } 40% { opacity: 1; } }
+
+/* Motions. */
+.pet-character[data-landing] { animation: pet-land .45s cubic-bezier(.34, 1.56, .64, 1); }
+.pet-character[data-motion="walk"] .pet-figure {
+  animation: pet-step .36s ease-in-out infinite;
+}
+.pet-character[data-motion="run"] .pet-figure { animation: pet-run .22s ease-in-out infinite; }
+.pet-character[data-motion="hop"] .pet-figure { animation: pet-hop .9s cubic-bezier(.3, .7, .4, 1) 1; }
+.pet-character[data-motion="sway"] .pet-figure { animation: pet-sway 4.2s ease-in-out infinite; }
+.pet-character[data-motion="stretch"] .pet-figure { animation: pet-stretch 1.5s ease-in-out 1; }
+.pet-character[data-motion="look"] .pet-figure { animation: pet-breathe 3.6s ease-in-out infinite; }
+.pet-character[data-pose="cling"][data-motion="peek"] .pet-figure { animation: pet-peek 2.6s ease-in-out 1; }
+.pet-character[data-pose="cling"][data-motion="sway"] .pet-figure { transform-origin: 0 30%; animation: pet-hang 3.4s ease-in-out infinite; }
+.pet-character[data-pose="cling"][data-mirrored][data-motion="sway"] .pet-figure { transform-origin: 100% 30%; }
+
+.pet-character[data-motion="nod"] .pet-figure { animation: pet-nod 3.2s ease-in-out infinite; }
+.pet-character[data-motion="bob"] .pet-figure { animation: pet-bob .9s ease-in-out infinite; }
+/* Listening to music: a small bob on every beat, swaying side to side every other one. */
+.pet-character[data-motion="beat"] .pet-figure { animation: pet-beat 1.2s ease-in-out infinite; transform-origin: 50% 100%; }
+.pet-character[data-motion="wiggle"] .pet-figure { animation: pet-wiggle 1s ease-in-out 1; }
+.pet-character[data-motion="tilt"] .pet-figure { animation: pet-tilt 2.4s ease-in-out 1; }
+.pet-character:not([data-pose="cling"])[data-motion="peek"] .pet-figure { animation: pet-lean 4s ease-in-out 1 forwards; }
+
+@keyframes pet-nod {
+  0%, 30%, 100% { transform: none; }
+  55%, 75% { transform: rotate(4deg) translateY(1.5px); }
+  80% { transform: rotate(-1deg); }
+}
+@keyframes pet-bob {
+  0%, 100% { transform: rotate(-3deg) translateY(0); }
+  25% { transform: rotate(0) translateY(-2px); }
+  50% { transform: rotate(3deg) translateY(0); }
+  75% { transform: rotate(0) translateY(-2px); }
+}
+@keyframes pet-beat {
+  0%, 50%, 100% { transform: translateY(0) rotate(0) scale(1); }
+  25% { transform: translateY(1.5px) rotate(-2deg) scale(1.02, .97); }
+  75% { transform: translateY(1.5px) rotate(2deg) scale(1.02, .97); }
+}
+@keyframes pet-wiggle {
+  0%, 100% { transform: none; }
+  15% { transform: translateY(-6px) rotate(-5deg); }
+  30% { transform: translateY(0) scale(1.04, .96); }
+  50% { transform: translateY(-6px) rotate(5deg); }
+  65% { transform: translateY(0) scale(1.04, .96); }
+}
+@keyframes pet-tilt {
+  0%, 100% { transform: none; }
+  25%, 75% { transform: rotate(-9deg); }
+}
+@keyframes pet-lean {
+  0% { transform: none; }
+  20%, 85% { transform: rotate(6deg) translateY(2px); }
+  100% { transform: none; }
+}
+.pet-notes {
+  position: absolute;
+  top: -4px;
+  right: -2px;
+  pointer-events: none;
+  color: #7cf2c4;
+  font: 700 11px/1 ui-rounded, -apple-system, BlinkMacSystemFont, sans-serif;
+  text-shadow: 0 0 6px rgb(124 242 196 / .6);
+}
+.pet-notes b { position: absolute; opacity: 0; animation: pet-note 1.8s ease-out infinite; }
+.pet-notes b + b { right: 10px; animation-delay: .9s; }
+@keyframes pet-note {
+  0% { opacity: 0; transform: translate(0, 4px) scale(.7); }
+  25% { opacity: 1; }
+  100% { opacity: 0; transform: translate(6px, -16px) scale(1.05) rotate(10deg); }
+}
+
+@keyframes pet-land {
+  0% { transform: translateY(-14px) scale(.94, 1.06); opacity: 0; }
+  55% { transform: translateY(0) scale(1.05, .94); opacity: 1; }
+  100% { transform: none; }
+}
+@keyframes pet-step {
+  0%, 100% { transform: translateY(0) rotate(calc(var(--walk-dir, 1) * 2deg)); }
+  50% { transform: translateY(-2.5px) rotate(calc(var(--walk-dir, 1) * -2deg)); }
+}
+@keyframes pet-run {
+  0%, 100% { transform: translateY(0) rotate(calc(var(--walk-dir, 1) * 6deg)) scale(1.03, .97); }
+  50% { transform: translateY(-3px) rotate(calc(var(--walk-dir, 1) * 3deg)) scale(.98, 1.03); }
+}
+@keyframes pet-hop {
+  0% { transform: none; }
+  18% { transform: scale(1.06, .92); }
+  45% { transform: translateY(-14px) scale(.96, 1.05); }
+  70% { transform: translateY(0) scale(1.05, .95); }
+  100% { transform: none; }
+}
+@keyframes pet-sway {
+  0%, 100% { transform: rotate(-1.6deg); }
+  50% { transform: rotate(1.6deg); }
+}
+@keyframes pet-stretch {
+  0%, 100% { transform: none; }
+  30% { transform: scale(.95, 1.09); }
+  60% { transform: scale(1.04, .97); }
+}
+@keyframes pet-peek {
+  0%, 100% { transform: none; }
+  35%, 65% { transform: rotate(-7deg) translateX(4px); }
+}
+@keyframes pet-hang {
+  0%, 100% { transform: rotate(-2deg); }
+  50% { transform: rotate(2deg); }
+}
+
+.pet-z, .pet-mark {
+  position: absolute;
+  top: -6px;
+  right: 6px;
+  color: #7cf2c4;
+  font: 700 11px/1 ui-rounded, -apple-system, BlinkMacSystemFont, sans-serif;
+  text-shadow: 0 0 6px rgb(124 242 196 / .6);
+  pointer-events: none;
+}
+.pet-z { animation: pet-z 2.8s ease-in-out infinite; }
+.pet-mark { color: #ffd27a; text-shadow: 0 0 6px rgb(255 210 122 / .6); font-size: 14px; animation: pet-hop .9s ease-in-out infinite; }
+@keyframes pet-z {
+  0% { opacity: 0; transform: translate(0, 6px) scale(.7); }
+  30% { opacity: 1; }
+  100% { opacity: 0; transform: translate(8px, -14px) scale(1.1); }
+}
+
+/* Speech bubble: stays mounted and fades, so changing what it says never flashes. */
+.pet-bubble {
+  position: absolute;
+  max-width: 196px;
+  padding: 6px 10px;
+  border-radius: 12px;
+  background: rgb(28 28 30 / .96);
+  box-shadow: inset 0 0 0 .5px rgb(255 255 255 / .14), 0 4px 12px rgb(0 0 0 / .22);
+  color: #f2f2f4;
+  font: 500 11.5px/1.4 -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif;
+  letter-spacing: .01em;
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(4px) scale(.97);
+  transition: opacity .22s ease, transform .22s ease;
+  pointer-events: none;
+}
+.pet-bubble[data-visible] { opacity: 1; transform: none; pointer-events: auto; }
+.pet-bubble-text {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  word-break: break-all;
+  animation: pet-text-in .25s ease-out;
+}
+.pet-bubble i {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin: 0 6px 1px 0;
+  border-radius: 50%;
+  vertical-align: middle;
+  background: #8e8e93;
+}
+.pet-bubble[data-tone="error"] i { background: #ff7a6e; box-shadow: 0 0 6px #ff7a6e; }
+.pet-bubble[data-tone="notify"] i { background: #ffc94d; box-shadow: 0 0 6px #ffc94d; }
+.pet-bubble[data-tone="done"] i, .pet-bubble[data-tone="running"] i { background: #5fe0aa; box-shadow: 0 0 6px #5fe0aa; }
+.pet-bubble[data-tone="working"] i { background: #5fe0aa; animation: pet-dot 1.2s ease-in-out infinite; }
+.pet-bubble[data-tone="tip"] { color: #d1d1d6; }
+@keyframes pet-text-in { from { opacity: 0; } to { opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .pet-figure, .pet-character, .pet-z, .pet-mark, .pet-notes b, .pet-face .pet-cursor { animation: none !important; }
+}
+
+/* Moving to another spot on Bento: gone here, then pops up there. */
+.pet-character[data-away] { opacity: 0; transform: scale(.6) translateY(10px); }
+.pet-character[data-away] ~ .pet-bubble { opacity: 0; }
+
+/* Peeking from behind a side of Bento / hanging under its bottom edge: the
+   character is cut at the window's edge, so it can slip behind it. */
+.pet-character[data-pose="peek"] { clip-path: inset(-60px -90px -60px 0); }
+.pet-character[data-pose="peek"][data-mirrored] { clip-path: inset(-60px 0 -60px -90px); }
+.pet-character[data-pose="hang"] { clip-path: inset(0 -90px -90px -90px); }
+.pet-character[data-pose="peek"] .pet-figure,
+.pet-character[data-pose="hang"] .pet-figure { transition: translate .42s cubic-bezier(.5, 0, .3, 1); }
+.pet-character[data-pose="peek"][data-away],
+.pet-character[data-pose="hang"][data-away] { opacity: 1; transform: none; }
+.pet-character[data-pose="peek"][data-away] .pet-figure { translate: calc(var(--tuck) * 108%) 0; }
+.pet-character[data-pose="hang"][data-away] .pet-figure { translate: 0 -108%; }
+.pet-character[data-pose="peek"][data-away] ~ .pet-bubble,
+.pet-character[data-pose="hang"][data-away] ~ .pet-bubble { opacity: 0; }
+.pet-character[data-pose="peek"] .pet-figure { transform-origin: calc(50% + var(--tuck) * 50%) 60%; }
+.pet-character[data-pose="hang"] .pet-figure { transform-origin: 82% 0; }
+
+.pet-character[data-motion="duck"] .pet-figure { animation: pet-duck 1.6s cubic-bezier(.5, 0, .3, 1) 1; }
+.pet-character[data-motion="lean"] .pet-figure { animation: pet-lean-out 3.4s ease-in-out infinite; }
+.pet-character[data-motion="swing"] .pet-figure { animation: pet-swing 2.6s ease-in-out infinite; }
+.pet-character[data-pose="hang"][data-motion="kick"] .pet-figure { animation: pet-swing .7s ease-in-out infinite; }
+.pet-character:not([data-pose="hang"])[data-motion="kick"] .pet-figure { animation: pet-kick .5s ease-in-out infinite; }
+.pet-character[data-motion="tap"] .pet-figure { animation: pet-tap .22s ease-in-out infinite; }
+/* Typing: only the paw tips move, so the body holds still (no breathing sway). */
+.pet-character[data-pose^="type-"] .pet-figure { animation: none; }
+.pet-character[data-motion="sneeze"] .pet-figure { animation: pet-sneeze 1.3s ease-in-out 1; }
+
+@keyframes pet-duck {
+  0%, 100% { translate: 0 0; }
+  30%, 62% { translate: calc(var(--tuck) * 72%) 0; }
+}
+@keyframes pet-lean-out {
+  0%, 100% { transform: none; }
+  45%, 60% { transform: translateX(calc(var(--tuck) * -3px)) rotate(calc(var(--tuck) * -6deg)); }
+}
+@keyframes pet-swing {
+  0%, 100% { transform: rotate(-5deg); }
+  50% { transform: rotate(5deg); }
+}
+@keyframes pet-kick {
+  0%, 100% { transform: rotate(-2.2deg) translateY(0); }
+  50% { transform: rotate(2.2deg) translateY(-1.5px); }
+}
+@keyframes pet-tap {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-1px) scale(1.005, .995); }
+}
+@keyframes pet-sneeze {
+  0% { transform: none; }
+  40% { transform: rotate(-7deg) translateY(-2px) scale(.98, 1.03); }
+  52% { transform: rotate(9deg) scale(1.05, .94); }
+  70% { transform: rotate(-2deg); }
+  100% { transform: none; }
+}
+
+/* Typing on its own screen. */
+.pet-face .pet-keys rect { opacity: .2; animation: pet-key .9s steps(1) infinite; }
+.pet-face .pet-keys rect:nth-child(2) { animation-delay: .3s; }
+.pet-face .pet-keys rect:nth-child(3) { animation-delay: .6s; }
+@keyframes pet-key { 0% { opacity: 1; } 66% { opacity: .2; } }
+
+/* Something finished: a little burst of stars. */
+.pet-sparkles { position: absolute; left: 50%; top: 20%; pointer-events: none; }
+.pet-sparkles b {
+  position: absolute;
+  color: #ffd27a;
+  font: 700 10px/1 ui-rounded, -apple-system, BlinkMacSystemFont, sans-serif;
+  text-shadow: 0 0 6px rgb(255 210 122 / .7);
+  opacity: 0;
+  animation: pet-spark 1.4s ease-out 1 forwards;
+}
+.pet-sparkles b:nth-child(1) { --dx: -30px; --dy: -22px; }
+.pet-sparkles b:nth-child(2) { --dx: 26px; --dy: -26px; animation-delay: .08s; color: #7cf2c4; }
+.pet-sparkles b:nth-child(3) { --dx: -18px; --dy: -38px; animation-delay: .16s; }
+.pet-sparkles b:nth-child(4) { --dx: 34px; --dy: -6px; animation-delay: .22s; color: #7cf2c4; }
+@keyframes pet-spark {
+  0% { opacity: 0; transform: translate(0, 0) scale(.4) rotate(0); }
+  25% { opacity: 1; }
+  100% { opacity: 0; transform: translate(var(--dx), var(--dy)) scale(1.1) rotate(90deg); }
+}
+
+/* Sneeze puff. */
+.pet-puff {
+  position: absolute;
+  left: 46%;
+  top: 46%;
+  width: 10px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgb(255 255 255 / .9);
+  box-shadow: 5px -2px 0 -1px rgb(255 255 255 / .85), -4px 2px 0 -1px rgb(255 255 255 / .8);
+  pointer-events: none;
+  animation: pet-puff .8s ease-out 1 forwards;
+}
+@keyframes pet-puff {
+  from { opacity: 1; transform: translate(0, 0) scale(.5); }
+  to { opacity: 0; transform: translate(-6px, 10px) scale(1.6); }
+}
+
+/* Fishing line into Bento. */
+.pet-fish { position: absolute; overflow: visible; pointer-events: none; }
+.pet-fish path { fill: none; stroke: rgb(60 60 66 / .55); stroke-width: 1; }
+.pet-fish .pet-bobber { fill: #ff8a7a; stroke: #fff; stroke-width: 1; animation: pet-bobber 2.2s ease-in-out infinite; }
+@keyframes pet-bobber { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(2px); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .pet-sparkles b, .pet-puff, .pet-fish .pet-bobber, .pet-face .pet-keys rect { animation: none !important; }
+}
+
+/* ---- pastimes ---------------------------------------------------------------- */
+.pet-character[data-motion="sip"] .pet-figure { animation: pet-sip 1.4s ease-in-out 1; transform-origin: 50% 90%; }
+.pet-character[data-motion="pour"] .pet-figure { animation: pet-pour 2.2s ease-in-out infinite; transform-origin: 30% 90%; }
+.pet-character[data-motion="breathe"] .pet-figure { animation: pet-breathe 3.6s ease-in-out infinite; transform-origin: 50% 100%; }
+.pet-character[data-motion="slash"] .pet-figure { animation: pet-slash .7s cubic-bezier(.2, .8, .2, 1) 1; transform-origin: 50% 95%; }
+.pet-character[data-motion="dangle"] .pet-figure { animation: pet-dangle .9s ease-in-out infinite; transform-origin: 50% 8%; }
+.pet-character[data-motion="page"] .pet-figure { animation: pet-page .7s ease-in-out 1; transform-origin: 50% 95%; }
+.pet-character[data-motion="pat"] .pet-figure { animation: pet-pat .45s ease-in-out 3; transform-origin: 50% 100%; }
+
+@keyframes pet-sip {
+  0%, 100% { transform: none; }
+  35%, 70% { transform: rotate(-3deg) translateY(-1px); }
+}
+@keyframes pet-pour {
+  0%, 100% { transform: rotate(0); }
+  50% { transform: rotate(2.5deg); }
+}
+@keyframes pet-breathe {
+  0%, 100% { transform: scale(1, 1); }
+  50% { transform: scale(1.012, .985); }
+}
+@keyframes pet-slash {
+  0% { transform: none; }
+  25% { transform: translateX(-2px) rotate(-6deg) scale(.97, 1.03); }
+  45% { transform: translateX(4px) rotate(5deg) scale(1.04, .96); }
+  100% { transform: none; }
+}
+@keyframes pet-dangle {
+  0%, 100% { transform: rotate(-6deg); }
+  50% { transform: rotate(6deg); }
+}
+@keyframes pet-page {
+  0%, 100% { transform: none; }
+  50% { transform: rotate(1.5deg) translateY(-.5px); }
+}
+@keyframes pet-pat {
+  0%, 100% { transform: scale(1, 1); }
+  50% { transform: scale(1.04, .95); }
+}
+
+/* Hearts float up from a pat or a watered plant. */
+.pet-hearts { position: absolute; left: 50%; top: 10%; pointer-events: none; }
+.pet-hearts b {
+  position: absolute;
+  color: #ff9ec4;
+  font: 700 11px/1 -apple-system, BlinkMacSystemFont, sans-serif;
+  text-shadow: 0 0 6px rgb(255 158 196 / .6);
+  opacity: 0;
+  animation: pet-heart 1.6s ease-out 1 forwards;
+}
+.pet-hearts b:nth-child(1) { --dx: -22px; }
+.pet-hearts b:nth-child(2) { --dx: 4px; animation-delay: .2s; font-size: 9px; }
+.pet-hearts b:nth-child(3) { --dx: 24px; animation-delay: .4s; }
+@keyframes pet-heart {
+  0% { opacity: 0; transform: translate(0, 4px) scale(.5); }
+  25% { opacity: 1; }
+  100% { opacity: 0; transform: translate(var(--dx), -30px) scale(1.1); }
+}
+
+/* A sword cut: a bright arc that sweeps and fades. */
+.pet-slash {
+  position: absolute;
+  left: 8%;
+  top: 18%;
+  width: 90%;
+  height: 60%;
+  border-radius: 50%;
+  border-top: 3px solid rgb(230 248 255 / .95);
+  filter: drop-shadow(0 0 5px rgb(124 242 196 / .8));
+  pointer-events: none;
+  opacity: 0;
+  animation: pet-cut .6s ease-out 1 forwards;
+}
+@keyframes pet-cut {
+  0% { opacity: 0; transform: rotate(-35deg) scale(.6); }
+  30% { opacity: 1; }
+  100% { opacity: 0; transform: rotate(20deg) scale(1.05); }
+}
+
+/* Thinking: three dots drifting up beside its head. */
+/* Thinking: a thought bubble with "..." rising beside its head. */
+.pet-think { position: absolute; left: 6%; top: -6%; width: 0; height: 0; pointer-events: none; z-index: 3; }
+.pet-think b {
+  position: absolute; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / .3);
+  opacity: 0; animation: pet-think-in .3s ease-out forwards;
+}
+/* Thought trail rises up-left from the head, so it never runs past the corner window's right edge. */
+.pet-think b:nth-child(1) { left: -1px; top: 26px; width: 5px; height: 5px; }
+.pet-think b:nth-child(2) { left: -9px; top: 16px; width: 8px; height: 8px; animation-delay: .2s; }
+.pet-think b:nth-child(3) {
+  left: -40px; top: -10px; width: 34px; height: 22px; border-radius: 11px; animation-delay: .4s;
+  display: flex; align-items: center; justify-content: center; gap: 3px;
+}
+.pet-think b:nth-child(3)::before, .pet-think b:nth-child(3)::after, .pet-think i {
+  content: ''; width: 4px; height: 4px; border-radius: 50%; background: #4a4a52; animation: pet-dot 1.2s ease-in-out infinite;
+}
+.pet-think b:nth-child(3)::after { animation-delay: .36s; }
+.pet-think i { animation-delay: .18s; }
+@keyframes pet-think-in { from { opacity: 0; transform: scale(.4); } to { opacity: 1; transform: none; } }
+@keyframes pet-dot { 0%, 100% { opacity: 0; } 30%, 80% { opacity: 1; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .pet-character[data-motion] .pet-figure, .pet-hearts b, .pet-slash, .pet-think b { animation: none !important; }
+}
+
+/* ---- workout on the top edge ------------------------------------------------- */
+.pet-character[data-motion="squat"] .pet-figure { animation: pet-squat .9s ease-in-out infinite; transform-origin: 50% 100%; }
+.pet-character[data-motion="jump"] .pet-figure { animation: pet-jump .6s cubic-bezier(.3, .7, .4, 1) infinite; transform-origin: 50% 100%; }
+.pet-character[data-motion="bend"] .pet-figure { animation: pet-bend 1.6s ease-in-out infinite; transform-origin: 50% 100%; }
+@keyframes pet-squat {
+  0%, 100% { transform: none; }
+  50% { transform: scale(1.07, .86); }
+}
+@keyframes pet-jump {
+  0%, 100% { transform: scale(1.05, .93); }
+  45% { transform: translateY(-10px) scale(.97, 1.04); }
+}
+@keyframes pet-bend {
+  0%, 100% { transform: rotate(0); }
+  25% { transform: rotate(-9deg); }
+  75% { transform: rotate(9deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pet-character[data-motion="squat"] .pet-figure, .pet-character[data-motion="jump"] .pet-figure,
+  .pet-character[data-motion="bend"] .pet-figure { animation: none !important; }
+}
+
+/* ---- pastime effects (the figure stays still; these carry the motion) ---------- */
+.pet-steam { position: absolute; overflow: visible; pointer-events: none; fill: none; stroke: rgb(255 255 255 / .75); stroke-width: 1.6; stroke-linecap: round; }
+.pet-steam path { opacity: 0; animation: pet-steam 2.6s ease-out infinite; }
+.pet-steam path + path { animation-delay: 1.3s; }
+.pet-steam[data-sigh] path { animation: pet-sigh 1.3s ease-out 1 forwards; }
+@keyframes pet-steam {
+  0% { opacity: 0; transform: translateY(6px) scaleY(.6); }
+  30% { opacity: .9; }
+  100% { opacity: 0; transform: translateY(-10px) scaleY(1.1); }
+}
+@keyframes pet-sigh {
+  0% { opacity: 0; transform: translate(0, 0) scale(.8); }
+  30% { opacity: 1; }
+  100% { opacity: 0; transform: translate(10px, -14px) scale(1.4); }
+}
+
+/* Coding: little glyphs float up off the laptop, keys flash under its hands. */
+.pet-code { position: absolute; pointer-events: none; font: 700 8px/1 ui-monospace, SFMono-Regular, Menlo, monospace; color: #7cf2c4; text-shadow: 0 0 5px rgb(124 242 196 / .7); }
+.pet-code b { position: absolute; left: 0; top: 0; opacity: 0; white-space: nowrap; animation: pet-glyph 2.4s ease-out infinite; }
+.pet-code b:nth-child(1) { --gx: -26px; }
+.pet-code b:nth-child(2) { --gx: 18px; animation-delay: .6s; }
+.pet-code b:nth-child(3) { --gx: -8px; animation-delay: 1.2s; }
+.pet-code b:nth-child(4) { --gx: 26px; animation-delay: 1.8s; }
+.pet-code i { position: absolute; top: 4px; width: 3px; height: 2px; border-radius: 1px; background: #7cf2c4; box-shadow: 0 0 4px #7cf2c4; opacity: 0; animation: pet-keyflash .5s steps(1) infinite; }
+.pet-code i:nth-of-type(1) { left: -14px; }
+.pet-code i:nth-of-type(2) { left: -2px; animation-delay: .17s; }
+.pet-code i:nth-of-type(3) { left: 10px; animation-delay: .34s; }
+@keyframes pet-glyph {
+  0% { opacity: 0; transform: translate(-50%, 0) scale(.6); }
+  20% { opacity: 1; }
+  100% { opacity: 0; transform: translate(calc(-50% + var(--gx)), -46px) scale(1); }
+}
+@keyframes pet-keyflash { 0% { opacity: 1; } 40% { opacity: 0; } }
+
+/* Turning a page: a sheet lifts off the right half and folds over. */
+.pet-page {
+  position: absolute; pointer-events: none;
+  background: linear-gradient(90deg, #efe9dc, #fbf8f1);
+  border-radius: 1px 3px 3px 1px;
+  box-shadow: 0 1px 2px rgb(0 0 0 / .25);
+  transform-origin: 0 50%;
+  animation: pet-flip .8s ease-in-out 1 forwards;
+}
+@keyframes pet-flip {
+  0% { transform: perspective(80px) rotateY(0); opacity: .95; }
+  60% { opacity: .95; }
+  100% { transform: perspective(80px) rotateY(-175deg); opacity: 0; }
+}
+
+/* Humming while watering. */
+.pet-sing { right: auto; }
+.pet-sing b:nth-child(3) { right: auto; left: 12px; animation-delay: .45s; }
+/* Water running from the spout onto the plant. */
+.pet-water { position: absolute; width: 6px; pointer-events: none; }
+.pet-water i {
+  position: absolute; left: 1px; top: 0; width: 2.4px; height: 3.4px;
+  border-radius: 50% 50% 50% 50% / 60% 60% 40% 40%;
+  background: #8fd3ff; box-shadow: 0 0 3px rgb(143 211 255 / .9);
+  opacity: 0; animation: pet-drop .55s linear infinite;
+}
+.pet-water i:nth-child(2) { left: 2.5px; animation-delay: .11s; }
+.pet-water i:nth-child(3) { left: 0; animation-delay: .22s; }
+.pet-water i:nth-child(4) { left: 3px; animation-delay: .33s; }
+.pet-water i:nth-child(5) { left: 1.5px; animation-delay: .44s; }
+@keyframes pet-drop {
+  0% { opacity: 0; transform: translate(0, 0); }
+  15% { opacity: 1; }
+  100% { opacity: .2; transform: translate(1.5px, var(--fall, 16px)); }
+}
+
+/* Sword sheathed: a few leaves drift down past the hat. */
+.pet-petals { position: absolute; inset: 0; pointer-events: none; }
+.pet-petals b {
+  position: absolute; top: 4%; width: 5px; height: 3px; border-radius: 3px 0;
+  background: #ffb7c9; opacity: 0;
+  animation: pet-petal 2.2s ease-in 1 forwards;
+}
+.pet-petals b:nth-child(1) { left: 20%; }
+.pet-petals b:nth-child(2) { left: 44%; animation-delay: .25s; background: #ffd0dc; }
+.pet-petals b:nth-child(3) { left: 66%; animation-delay: .5s; }
+.pet-petals b:nth-child(4) { left: 32%; animation-delay: .8s; background: #ffd0dc; }
+.pet-petals b:nth-child(5) { left: 78%; animation-delay: 1s; }
+@keyframes pet-petal {
+  0% { opacity: 0; transform: translate(0, 0) rotate(0); }
+  15% { opacity: 1; }
+  100% { opacity: 0; transform: translate(-16px, 70px) rotate(240deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pet-steam path, .pet-code b, .pet-code i, .pet-page, .pet-water i, .pet-petals b { animation: none !important; }
+}
+
+
+/* Side-on thrust: a short streak along the toy sword, out in front. */
+.pet-character[data-pose="sword-cut"] .pet-slash { left: 58%; top: 50%; width: 42%; height: 20%; }
+
+/* Sword flourish (挽剑花): the body holds still; the jian whirls round the raised fist in a figure eight,
+   one loop on each side of the wrist, with a faint ∞ trail. Origin of .pet-blade = the fist's centre. */
+.pet-character[data-motion="still"] .pet-figure { animation: none; }
+.pet-blade {
+  position: absolute; left: var(--fx); top: var(--fy); width: 0; height: 0;
+  pointer-events: none;
+}
+.pet-blade-spin {
+  position: absolute; left: 0; top: 0; width: 0; height: 0;
+  transform-origin: 0 0; animation: pet-blade-eight .92s linear infinite;
+}
+.pet-blade-spin img {
+  position: absolute; display: block;
+  /* The global img reset (max-width: 100%) inside this zero-width box squashed the jian to nothing. */
+  max-width: none; max-height: none;
+  /* c-blade.webp: the grip sits on the fist, the blade points out to the right, the tassel hangs from the pommel. */
+  left: calc(-12.6px * var(--k)); top: calc(-5.4px * var(--k));
+  width: calc(84.3px * var(--k)); height: calc(48.3px * var(--k));
+}
+.pet-blade-trail {
+  position: absolute; overflow: visible;
+  left: calc(-92px * var(--k)); top: calc(-46px * var(--k)); width: calc(184px * var(--k)); height: calc(92px * var(--k));
+  transform: rotate(-18deg); filter: drop-shadow(0 0 2px rgb(255 230 180 / .8));
+}
+.pet-blade-trail path {
+  fill: none; stroke: rgb(255 240 205 / .8); stroke-width: 2.2; stroke-linecap: round;
+  stroke-dasharray: 34 66; animation: pet-blade-trail .92s linear infinite;
+}
+/* Two loops in opposite directions, the wrist drifting from one side to the other: a figure eight. */
+@keyframes pet-blade-eight {
+  0% { transform: translateX(calc(5px * var(--k))) rotate(0deg); }
+  50% { transform: translateX(calc(-5px * var(--k))) rotate(-360deg); }
+  100% { transform: translateX(calc(5px * var(--k))) rotate(0deg); }
+}
+@keyframes pet-blade-trail { to { stroke-dashoffset: -100; } }
+@media (prefers-reduced-motion: reduce) { .pet-blade-spin, .pet-blade-trail path { animation-duration: 1.8s; } }
+/* The walk is drawn frame by frame (contact, down, passing, up), so no extra rocking. */
+.pet-character[data-motion="walk"][data-pose^="walk"] .pet-figure { animation: none; }
+/* Jogging on the same sheet: a steady lean into the run instead of the fast rocking bounce. */
+.pet-character[data-motion="run"][data-pose^="walk"] .pet-figure {
+  animation: none;
+  transform: rotate(calc(var(--walk-dir, 1) * 4deg));
+}
+
+
+/* ---- 2026-11-24: nook, body-only breathing, visor ring, winter, bubble actions, opacity, stepping aside ---- */
+
+/* Opacity picked in the menu; hovering brings it back to full so it is easy to see what you touch. */
+.pet-character, .pet-shadow { opacity: var(--pet-opacity, 1); }
+.pet-character:hover { opacity: 1; }
+.pet-character[data-away] { opacity: 0; }
+
+/* Another app is fullscreen or a meeting is in front: the corner pet fades away until it is over. */
+.pet-root { transition: opacity .5s ease; }
+.pet-root[data-tucked] { opacity: 0; pointer-events: none; }
+
+/* No rug and no standing plant in the corner: the watering frames bring their own pot. */
+
+/* Stool frames: legs and stool are one layer, the body another that breathes from the seat line. */
+.pet-figure > .pet-legs { position: absolute; inset: 0; }
+.pet-upper { position: absolute; inset: 0; }
+.pet-upper > img:first-child { display: block; width: 100%; height: 100%; pointer-events: none; }
+.pet-character[data-stool]:is([data-motion="none"], [data-motion="breathe"], [data-motion="look"]) .pet-figure { animation: none; }
+.pet-character[data-stool]:is([data-motion="none"], [data-motion="breathe"], [data-motion="look"]) .pet-upper {
+  animation: pet-body-breathe 3.6s ease-in-out infinite;
+}
+@keyframes pet-body-breathe {
+  0%, 100% { transform: scale(1, 1); }
+  50% { transform: scale(1.007, 1.017); }
+}
+
+/* Visor ring. */
+.pet-ring { position: absolute; overflow: visible; pointer-events: none; }
+.pet-ring rect { fill: none; stroke-width: 2.2; stroke-linecap: round; }
+.pet-ring[data-ring="busy"] rect {
+  stroke: #7cf2c4;
+  stroke-dasharray: 22 78;
+  filter: drop-shadow(0 0 2.5px #7cf2c4);
+  animation: pet-ring-spin 1.5s linear infinite;
+}
+.pet-ring[data-ring="wait"] rect { stroke: #ffd27a; filter: drop-shadow(0 0 3px #ffd27a); animation: pet-ring-pulse 1.6s ease-in-out infinite; }
+.pet-ring[data-ring="done"] rect { stroke: #7cf2c4; filter: drop-shadow(0 0 4px #7cf2c4); animation: pet-ring-done 2.4s ease-out 1 forwards; }
+@keyframes pet-ring-spin { to { stroke-dashoffset: -100; } }
+@keyframes pet-ring-pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+@keyframes pet-ring-done { 0% { opacity: 0; } 15% { opacity: 1; } 100% { opacity: 0; } }
+
+/* Snow, December to February. */
+.pet-snow { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.pet-snow i {
+  position: absolute;
+  top: -8px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: rgb(255 255 255 / .85);
+  box-shadow: 0 0 3px rgb(255 255 255 / .7);
+  opacity: 0;
+  animation: pet-snow 9s linear infinite;
+}
+.pet-snow i:nth-child(1) { left: 150px; animation-delay: 0s; }
+.pet-snow i:nth-child(2) { left: 190px; animation-delay: 1.3s; width: 3px; height: 3px; }
+.pet-snow i:nth-child(3) { left: 228px; animation-delay: 2.6s; }
+.pet-snow i:nth-child(4) { left: 262px; animation-delay: 3.9s; width: 3px; height: 3px; }
+.pet-snow i:nth-child(5) { left: 172px; animation-delay: 5.2s; width: 5px; height: 5px; }
+.pet-snow i:nth-child(6) { left: 246px; animation-delay: 6.5s; }
+.pet-snow i:nth-child(7) { left: 208px; animation-delay: 7.8s; width: 3px; height: 3px; }
+@keyframes pet-snow {
+  0% { opacity: 0; transform: translate(0, 0); }
+  10% { opacity: .9; }
+  50% { transform: translate(8px, 120px); }
+  85% { opacity: .8; }
+  100% { opacity: 0; transform: translate(-4px, 230px); }
+}
+
+/* Bubble: typed out with a caret, then 打开 / 稍后. */
+.pet-caret {
+  display: inline-block;
+  width: 1.5px;
+  height: 1em;
+  margin-left: 1px;
+  vertical-align: -2px;
+  background: currentColor;
+  animation: pet-cursor .8s steps(1) infinite;
+}
+.pet-bubble-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  max-height: 0;
+  margin-top: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: max-height .2s ease, margin-top .2s ease, opacity .2s ease;
+}
+.pet-bubble-actions[data-shown] { max-height: 24px; margin-top: 5px; opacity: 1; }
+.pet-bubble-actions button {
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  padding: 2px 9px;
+  font: 600 10.5px/1.5 -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif;
+  color: #d1d1d6;
+  background: rgb(255 255 255 / .1);
+  cursor: pointer;
+}
+.pet-bubble-actions button:first-child { color: #0d2a20; background: #7cf2c4; }
+.pet-bubble-actions button:hover { filter: brightness(1.1); }
+
+@media (prefers-reduced-motion: reduce) {
+  .pet-upper, .pet-snow i, .pet-ring rect, .pet-caret { animation: none !important; }
+  .pet-snow { display: none; }
+}
+
+
+/* ---- 2026-11-24 (round 2) ---- */
+
+/* On the stool only the body moves: hops, wiggles, pats and the rest play on the upper body, pivoting on the
+   seat, while the stool and the feet stay exactly where they are. */
+.pet-character[data-stool] .pet-figure { animation: none !important; }
+/* Arriving in the corner: the body bounces onto the seat; the stool is already there. */
+.pet-character[data-stool][data-landing] { animation: none; }
+.pet-character[data-stool][data-landing] .pet-upper { animation: pet-seat-hop .45s cubic-bezier(.34, 1.56, .64, 1) 1; }
+.pet-character[data-stool][data-motion="hop"] .pet-upper { animation: pet-seat-hop .9s cubic-bezier(.3, .7, .4, 1) 1; }
+.pet-character[data-stool][data-motion="wiggle"] .pet-upper { animation: pet-seat-wiggle 1s ease-in-out 1; }
+.pet-character[data-stool][data-motion="tilt"] .pet-upper { animation: pet-seat-tilt 2.4s ease-in-out 1; }
+.pet-character[data-stool][data-motion="pat"] .pet-upper { animation: pet-seat-pat .45s ease-in-out 3; }
+.pet-character[data-stool][data-motion="beat"] .pet-upper { animation: pet-seat-beat 1.2s ease-in-out infinite; }
+.pet-character[data-stool]:is([data-motion="stretch"], [data-motion="sway"]) .pet-upper { animation: pet-seat-tilt 2.4s ease-in-out 1; }
+.pet-character[data-stool]:is([data-motion="sip"], [data-motion="pour"], [data-motion="dangle"], [data-motion="kick"], [data-motion="jump"], [data-motion="squat"], [data-motion="bend"]) .pet-upper {
+  animation: pet-body-breathe 3.6s ease-in-out infinite;
+}
+@keyframes pet-seat-hop {
+  0%, 100% { transform: none; }
+  20% { transform: scale(1.05, .93); }
+  48% { transform: scale(.97, 1.06); }
+  72% { transform: scale(1.03, .97); }
+}
+/* Swaying on the stool leans the body over the hips (skewX pivots on the seat line): the bottom stays
+   flat on the seat and lined up with the legs, instead of a flat cut tipping over the stool. */
+@keyframes pet-seat-wiggle {
+  0%, 100% { transform: none; }
+  25% { transform: skewX(4deg); }
+  50% { transform: skewX(-3.5deg); }
+  75% { transform: skewX(2deg); }
+}
+@keyframes pet-seat-tilt {
+  0%, 100% { transform: none; }
+  30%, 70% { transform: skewX(5deg); }
+}
+@keyframes pet-seat-pat {
+  0%, 100% { transform: none; }
+  50% { transform: scale(1.03, .95); }
+}
+@keyframes pet-seat-beat {
+  0%, 50%, 100% { transform: none; }
+  25% { transform: skewX(-2.5deg) scale(1.01, .98); }
+  75% { transform: skewX(2.5deg) scale(1.01, .98); }
+}
+/* Keystrokes: a small lean toward the typing hand, from the seat. */
+.pet-character[data-stool][data-pose="type-l"] .pet-upper { transform: skewX(1.2deg) scale(1, .992); }
+.pet-character[data-stool][data-pose="type-r"] .pet-upper { transform: skewX(-1.2deg) scale(1, .992); }
+.pet-character[data-stool] .pet-upper { transition: transform .08s ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .pet-character[data-stool] .pet-upper { animation: none !important; }
+}
+
+/* Turning a page over the book (PageTurn). */
+.pet-page-turn { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.pet-page-hand {
+  position: absolute; left: 0; top: 0; display: block;
+  width: 100%; height: 100%; max-width: none; max-height: none;
+  pointer-events: none;
+  /* Just the right mitten, cut from the same frame. */
+  clip-path: ellipse(7.8% 6.9% at 70.9% 61.5%);
+  transform-origin: 70.9% 61.5%;
+}
+
+/* Winter scarf pastime: a snowflake drifts down, swaying, and settles on the raised mitten. */
+.pet-flake { position: absolute; pointer-events: none; z-index: 3; overflow: visible;
+  filter: drop-shadow(0 0 2px rgba(180, 220, 255, .9));
+  animation: pet-flake-fall 1.7s cubic-bezier(.3, .1, .4, 1) both, pet-flake-twinkle 1.6s ease-in-out 1.7s infinite; }
+@keyframes pet-flake-fall {
+  0% { opacity: 0; transform: translate(10px, var(--drop)) rotate(-60deg) scale(.7); }
+  20% { opacity: 1; }
+  45% { transform: translate(-6px, calc(var(--drop) * .55)) rotate(-20deg) scale(.85); }
+  75% { transform: translate(4px, calc(var(--drop) * .2)) rotate(10deg) scale(.95); }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes pet-flake-twinkle { 50% { transform: scale(1.12) rotate(12deg); filter: drop-shadow(0 0 4px rgba(200, 235, 255, 1)); } }
+@media (prefers-reduced-motion: reduce) { .pet-flake { animation: none; } }
+
+/* Doze: z, z, Z float up and fade, one after another. */
+.pet-zz { position: absolute; pointer-events: none; z-index: 3; font: 700 11px/1 ui-rounded, system-ui, sans-serif; color: #b9d8ff; }
+.pet-zz b { position: absolute; left: 0; top: 0; opacity: 0; text-shadow: 0 0 3px rgb(80 120 200 / .6); animation: pet-zz 2.4s ease-out infinite; }
+.pet-zz b:nth-child(2) { animation-delay: .8s; font-size: 13px; }
+.pet-zz b:nth-child(3) { animation-delay: 1.6s; font-size: 16px; }
+@keyframes pet-zz { 0% { opacity: 0; transform: translate(0, 0) scale(.6); } 20% { opacity: 1; } 100% { opacity: 0; transform: translate(14px, -26px) scale(1); } }
+
+/* Bubbles: blown from the wand ring, drift up and sideways, wobble, then pop. */
+.pet-bubbles { position: absolute; width: 0; height: 0; pointer-events: none; z-index: 3; }
+.pet-bubbles i {
+  position: absolute; left: -5px; top: -5px; width: 10px; height: 10px; border-radius: 50%;
+  background: radial-gradient(circle at 32% 30%, rgb(255 255 255 / .95) 0 12%, rgb(255 255 255 / 0) 22%),
+    radial-gradient(circle, rgb(255 255 255 / .05) 55%, rgb(170 220 255 / .55) 72%, rgb(255 190 240 / .6) 86%, rgb(255 255 255 / .8) 100%);
+  opacity: 0; animation: pet-bubble 2.6s ease-out both;
+}
+.pet-bubbles i:nth-child(1) { --x: -26px; --y: -46px; --s: 1.3; }
+.pet-bubbles i:nth-child(2) { --x: -10px; --y: -64px; --s: .9; animation-delay: .25s; }
+.pet-bubbles i:nth-child(3) { --x: -40px; --y: -30px; --s: .7; animation-delay: .45s; }
+.pet-bubbles i:nth-child(4) { --x: 6px; --y: -52px; --s: 1.1; animation-delay: .7s; }
+.pet-bubbles i:nth-child(5) { --x: -20px; --y: -80px; --s: .6; animation-delay: .9s; }
+@keyframes pet-bubble {
+  0% { opacity: 0; transform: translate(0, 0) scale(.2); }
+  12% { opacity: 1; }
+  50% { transform: translate(calc(var(--x) * .6), calc(var(--y) * .55)) scale(var(--s), calc(var(--s) * .92)); }
+  88% { opacity: 1; transform: translate(var(--x), var(--y)) scale(var(--s)); }
+  94% { opacity: .9; transform: translate(var(--x), var(--y)) scale(calc(var(--s) * 1.35)); }
+  100% { opacity: 0; transform: translate(var(--x), var(--y)) scale(calc(var(--s) * 1.5)); }
+}
+
+/* Paper plane: leaves the hand and glides off to the upper left, dipping and banking, until it is gone. */
+.pet-plane { position: absolute; pointer-events: none; z-index: 3; overflow: visible; filter: drop-shadow(0 1px 1px rgb(0 0 0 / .18));
+  animation: pet-plane 2.6s cubic-bezier(.25, .1, .3, 1) both; }
+@keyframes pet-plane {
+  0% { opacity: 1; transform: translate(0, 0) rotate(0deg) scale(1); }
+  30% { transform: translate(-40px, -22px) rotate(-8deg) scale(.95); }
+  55% { transform: translate(-80px, -14px) rotate(6deg) scale(.85); }
+  80% { opacity: 1; transform: translate(-118px, -40px) rotate(-12deg) scale(.7); }
+  100% { opacity: 0; transform: translate(-150px, -58px) rotate(-16deg) scale(.55); }
+}
+@media (prefers-reduced-motion: reduce) { .pet-zz b, .pet-bubbles i, .pet-plane { animation-duration: .01s; } }

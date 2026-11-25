@@ -144,12 +144,6 @@
     --sidebar-width: var(--sidebar-compact-width);
     --sidebar-focus-share: var(--motion-sidebar-focus-share, 1);
   }
-  .h1-window:is([data-focus-mode], [data-terminal-layout-motion]) {
-    /* The gap is transparent in the standard layout. Back it during focus so it
-       cannot reveal another surface as the two panels move. */
-    background: linear-gradient(var(--terminal-surface), var(--terminal-surface))
-      left var(--sidebar-current-width) top / var(--panel-gap) 100% no-repeat;
-  }
   .h1-sidebar-panel, .h1-main {
     --frame-edge: var(--panel-edge);
     overflow: hidden;

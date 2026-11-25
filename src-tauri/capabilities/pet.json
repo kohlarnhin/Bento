@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "pet",
+  "description": "Events and dragging for the Bento desktop pet",
+  "windows": ["bento-pet", "bento-pet-dock"],
+  "permissions": ["core:event:default", "core:window:allow-start-dragging"]
+}

@@ -13,6 +13,9 @@ interface Settings {
   'terminal.agentNotices': boolean;
   'terminal.programNotices': boolean;
   'tray.enabled': boolean;
+  'pet.enabled': boolean;
+  'pet.top.enabled'?: boolean;
+  'pet.corner.enabled'?: boolean;
 }
 
 const defaults = {
@@ -21,6 +24,9 @@ const defaults = {
   'terminal.agentNotices': true,
   'terminal.programNotices': true,
   'tray.enabled': true,
+  'pet.enabled': true,
+  'pet.top.enabled': true,
+  'pet.corner.enabled': true,
 };
 type Feature = keyof typeof defaults;
 type Appearance = 'system' | 'light' | 'dark';
@@ -93,6 +99,9 @@ export function useSettings() {
         'terminal.agentNotices': settings['terminal.agentNotices'] ?? true,
         'terminal.programNotices': settings['terminal.programNotices'] ?? true,
         'tray.enabled': settings['tray.enabled'] ?? true,
+        'pet.enabled': settings['pet.enabled'] ?? true,
+        'pet.top.enabled': settings['pet.top.enabled'] ?? true,
+        'pet.corner.enabled': settings['pet.corner.enabled'] ?? true,
       });
     }).catch(error => { if (active) setFontError(`读取设置失败：${error}`); })
       .finally(() => { if (active) setFontLoading(false); });

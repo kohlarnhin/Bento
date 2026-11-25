@@ -6,11 +6,14 @@ import App from './App';
 import { isTauri } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { TrayPanel } from './components/TrayPanel';
+import { PetWindow } from './components/PetWindow';
 import './index.css';
 
-const trayPanel = isTauri() && getCurrentWebviewWindow().label === 'bento-tray-panel';
+const label = isTauri() ? getCurrentWebviewWindow().label : 'main';
+const trayPanel = label === 'bento-tray-panel';
+const pet = label === 'bento-pet' || label === 'bento-pet-dock';
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
-    {trayPanel ? <TrayPanel /> : <App />}
+    {pet ? <PetWindow /> : trayPanel ? <TrayPanel /> : <App />}
   </React.StrictMode>,
 );

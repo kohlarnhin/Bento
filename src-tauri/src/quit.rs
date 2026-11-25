@@ -74,6 +74,8 @@ pub fn install_menu(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         } else if event.id().as_ref() == "apphub-settings" {
             crate::reopen_main_window(app);
             let _ = app.emit("bento-open-settings", ());
+        } else if crate::pet::is_menu(event.id().as_ref()) {
+            crate::pet::handle_menu(app, event.id().as_ref());
         } else {
             crate::tray::handle_menu(app, event.id().as_ref());
         }

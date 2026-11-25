@@ -12,6 +12,10 @@ pub const COMMAND_NOTICES: &str = "terminal.commandNotices";
 pub const AGENT_NOTICES: &str = "terminal.agentNotices";
 pub const PROGRAM_NOTICES: &str = "terminal.programNotices";
 pub const SHOW_TRAY: &str = "tray.enabled";
+pub const SHOW_PET: &str = "pet.enabled";
+/// Where the pet shows, each on its own: on Bento's top edge, and in the screen corner.
+pub const SHOW_PET_TOP: &str = "pet.top.enabled";
+pub const SHOW_PET_CORNER: &str = "pet.corner.enabled";
 
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -71,6 +75,12 @@ pub struct Settings {
     program_notices: bool,
     #[serde(rename = "tray.enabled")]
     show_tray: bool,
+    #[serde(rename = "pet.enabled")]
+    show_pet: bool,
+    #[serde(rename = "pet.top.enabled")]
+    show_pet_top: bool,
+    #[serde(rename = "pet.corner.enabled")]
+    show_pet_corner: bool,
 }
 
 pub fn enabled(conn: &Connection, key: &str) -> Result<bool, String> {
@@ -96,6 +106,9 @@ pub fn read(conn: &Connection) -> Result<Settings, String> {
         agent_notices: enabled(conn, AGENT_NOTICES)?,
         program_notices: enabled(conn, PROGRAM_NOTICES)?,
         show_tray: enabled(conn, SHOW_TRAY)?,
+        show_pet: enabled(conn, SHOW_PET)?,
+        show_pet_top: enabled(conn, SHOW_PET_TOP)?,
+        show_pet_corner: enabled(conn, SHOW_PET_CORNER)?,
     })
 }
 
@@ -160,7 +173,7 @@ pub fn set(conn: &Connection, key: &str, value: Value) -> Result<(), String> {
                 .ok_or("外观必须是跟随系统、浅色或深色")?;
             save(conn, key, choice)
         }
-        QUICK_COMMANDS | COMMAND_NOTICES | AGENT_NOTICES | PROGRAM_NOTICES | SHOW_TRAY => {
+        QUICK_COMMANDS | COMMAND_NOTICES | AGENT_NOTICES | PROGRAM_NOTICES | SHOW_TRAY | SHOW_PET => {
             let enabled = value.as_bool().ok_or("该设置只能开启或关闭")?;
             save(conn, key, if enabled { "true" } else { "false" })
         }
@@ -186,6 +199,15 @@ pub fn set_setting(app: AppHandle, key: String, value: Value) -> Result<(), Stri
             let _ = crate::tray::set_enabled(&app, previous);
             return Err(format!("保存菜单栏设置失败：{error}"));
         }
+        return Ok(());
+    }
+    if key == SHOW_PET {
+        set(&conn, &key, value)?;
+        return crate::pet::set_enabled(&app, enabled(&conn, SHOW_PET)?);
+    }
+    if key == SHOW_PET_TOP || key == SHOW_PET_CORNER {
+        set(&conn, &key, value)?;
+        crate::pet::set_places(&app, enabled(&conn, SHOW_PET_TOP)?, enabled(&conn, SHOW_PET_CORNER)?);
         return Ok(());
     }
     if key == COMMAND_NOTICES {
@@ -244,7 +266,8 @@ mod tests {
         assert_eq!(project_rows(&conn), before);
         assert_eq!(read(&conn).unwrap(), Settings { terminal_font_size: 14, terminal_max_per_project: 2,
             autostart_default_applied: false, appearance: Appearance::System,
-            quick_commands: true, command_notices: true, agent_notices: true, program_notices: true, show_tray: true });
+            quick_commands: true, command_notices: true, agent_notices: true, program_notices: true, show_tray: true, show_pet: true,
+            show_pet_top: true, show_pet_corner: true });
         set(&conn, FONT_SIZE, json!(18)).unwrap();
         assert_eq!(read(&conn).unwrap().terminal_font_size, 18);
         assert_eq!(project_rows(&conn), before);
@@ -287,7 +310,7 @@ mod tests {
         set(&conn, FONT_SIZE, json!(18)).unwrap();
         set(&conn, MAX_PER_PROJECT, json!(4)).unwrap();
         set(&conn, APPEARANCE, json!("dark")).unwrap();
-        for key in [QUICK_COMMANDS, COMMAND_NOTICES, AGENT_NOTICES, PROGRAM_NOTICES, SHOW_TRAY] {
+        for key in [QUICK_COMMANDS, COMMAND_NOTICES, AGENT_NOTICES, PROGRAM_NOTICES, SHOW_TRAY, SHOW_PET] {
             set(&conn, key, json!(false)).unwrap();
         }
         record_default_applied(&conn).unwrap();

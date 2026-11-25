@@ -1,5 +1,6 @@
-import type { KeyboardEvent, ReactNode } from 'react';
-import { Bell, Info, SlidersHorizontal, SquareTerminal } from 'lucide-react';
+import { useState, type KeyboardEvent, type ReactNode } from 'react';
+import { Bell, Check, Info, PawPrint, SlidersHorizontal, SquareTerminal } from 'lucide-react';
+import { PET_LOOK, PET_PASTIMES, readPastimesOff, writePastimesOff } from '../lib/petPastimes';
 import type { SettingsController } from '../hooks/useSettings';
 import type { UpdaterController } from '../hooks/useUpdater';
 import { DEFAULT_TERMINAL_FONT_SIZE } from '../lib/terminalAppearance';
@@ -13,6 +14,7 @@ const categories = [
   { id: 'general', label: '通用', icon: SlidersHorizontal },
   { id: 'terminal', label: '终端', icon: SquareTerminal },
   { id: 'notifications', label: '通知', icon: Bell },
+  { id: 'pet', label: '桌宠', icon: PawPrint },
   { id: 'about', label: '关于', icon: Info },
 ] as const;
 
@@ -51,19 +53,20 @@ function SettingsRow({ label, description, error, children }: {
   </div>;
 }
 
-function FeatureRow({ settings, feature, id = feature, label, description }: {
+function FeatureRow({ settings, feature, id = feature, label, description, disabled = false }: {
   settings: SettingsController;
   feature: keyof SettingsController['features'];
   id?: string;
   label: string;
   description?: string;
+  disabled?: boolean;
 }) {
   const descriptionId = description ? `${id}-help` : undefined;
   const error = settings.featureError?.key === feature ? settings.featureError.message : null;
   return <SettingsRow label={<label htmlFor={id}>{label}</label>}
     description={description && <p id={descriptionId}>{description}</p>}
     error={error && <p role="alert" className="h1-list-note">{error}</p>}>
-    <Switch id={id} checked={settings.features[feature]} disabled={settings.fontLoading || !!settings.featureSaving}
+    <Switch id={id} checked={settings.features[feature]} disabled={disabled || settings.fontLoading || !!settings.featureSaving}
       aria-describedby={descriptionId} onCheckedChange={value => { void settings.changeFeature(feature, value); }} />
   </SettingsRow>;
 }
@@ -94,6 +97,57 @@ function GeneralSettings({ settings }: { settings: SettingsController }) {
           onCheckedChange={enabled => { void settings.changeAutostart(enabled); }} />
       </SettingsRow>
       <FeatureRow settings={settings} feature="tray.enabled" id="settings-show-tray" label="在菜单栏显示" />
+    </SettingsGroup>
+  </>;
+}
+
+function PetSettings({ settings }: { settings: SettingsController }) {
+  const [off, setOff] = useState(readPastimesOff);
+  const petOn = settings.features['pet.enabled'];
+  const onCount = PET_PASTIMES.filter(item => !off.includes(item.id)).length;
+  const toggle = (id: string) => {
+    const turningOff = !off.includes(id);
+    // At least one pastime stays in the round.
+    if (turningOff && onCount <= 1) return;
+    const next = turningOff ? [...off, id] : off.filter(item => item !== id);
+    setOff(next);
+    writePastimesOff(next);
+  };
+  return <>
+    <SettingsGroup id="settings-pet-look-group" title="当前形象">
+      <SettingsRow label={PET_LOOK.name} description={<p>{PET_LOOK.description}</p>}>
+        <img src={PET_LOOK.src} alt={`${PET_LOOK.name} 当前形象`} draggable={false} className="h-20 w-auto shrink-0 object-contain" />
+      </SettingsRow>
+    </SettingsGroup>
+
+    <SettingsGroup id="settings-pet-show-group" title="显示">
+      <FeatureRow settings={settings} feature="pet.enabled" id="settings-show-pet" label="桌宠"
+        description="Bento 在前台时站在窗口上，切到别的 App 时去屏幕右下角，右键可快速启停项目" />
+      <FeatureRow settings={settings} feature="pet.top.enabled" id="settings-show-pet-top" label="在窗口顶部显示"
+        description="Bento 在前台时，在窗口顶边上走来走去" disabled={!petOn} />
+      <FeatureRow settings={settings} feature="pet.corner.enabled" id="settings-show-pet-corner" label="在屏幕右下角显示"
+        description="切到别的 App 时在右下角展示动作；把文件夹拖给它可以添加项目" disabled={!petOn} />
+    </SettingsGroup>
+
+    <SettingsGroup id="settings-pet-pastimes-group" title="右下角动作">
+      <div className="settings-row">
+        <p className="px-3 pt-3 text-xs leading-4 text-muted-foreground">勾选的动作参与循环：每轮随机展示一遍、不重复，播完再重新随机。至少保留一个。</p>
+        <div role="group" aria-label="参与循环的动作" className="grid grid-cols-[repeat(auto-fill,minmax(92px,1fr))] gap-2 p-3">
+          {PET_PASTIMES.map(item => {
+            const on = !off.includes(item.id);
+            return <button key={item.id} type="button" aria-pressed={on} disabled={on && onCount <= 1}
+              title={on && onCount <= 1 ? '至少保留一个动作' : on ? '点击移出循环' : '点击加入循环'}
+              onClick={() => toggle(item.id)}
+              className={`relative flex flex-col items-center gap-1 rounded-[10px] border px-1.5 pb-2 pt-1.5 text-[12px] transition-colors disabled:cursor-not-allowed ${on ? 'border-primary/60 bg-primary/5 text-foreground' : 'border-border text-muted-foreground opacity-60 hover:opacity-90'}`}>
+              <img src={item.thumb} alt="" draggable={false} loading="lazy" className="h-16 w-full object-contain" />
+              <span>{item.label}{item.note && <span className="ml-0.5 text-[10px] text-muted-foreground">（{item.note}）</span>}</span>
+              <span aria-hidden="true" className={`absolute right-1.5 top-1.5 flex size-4 items-center justify-center rounded-full border ${on ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-background'}`}>
+                {on && <Check size={11} strokeWidth={3} />}
+              </span>
+            </button>;
+          })}
+        </div>
+      </div>
     </SettingsGroup>
   </>;
 }
@@ -142,6 +196,7 @@ export function SettingsDialog({ settings, updater, category, onCategoryChange, 
       <FeatureRow settings={settings} feature="terminal.agentNotices" label="AI 会话提醒" description="Claude、Codex、Devin 等 AI CLI 等你确认或一轮结束时提醒你" />
       <FeatureRow settings={settings} feature="terminal.programNotices" label="终端程序通知" description="终端里的其他程序发出系统通知时（OSC 9 / 777），在 Bento 后台转为通知" />
     </SettingsGroup>,
+    pet: <PetSettings settings={settings} />,
     about: <div className="settings-group">
       <SettingsRow label={<>版本 <span className="tabular-nums">v{version}</span></>}>
         <Button variant="outline" size="sm" className="shrink-0" onClick={onCheckUpdates}>检查更新</Button>
@@ -187,7 +242,7 @@ export function SettingsDialog({ settings, updater, category, onCategoryChange, 
       <div className="flex min-h-0 min-w-0 flex-col">
         <DialogHeader className="shrink-0 pb-5 pl-[clamp(12px,3vw,30px)] pr-14 pt-6">
           <DialogTitle className="text-[23px] leading-8"><span className="sr-only">设置 · </span>{categories[activeIndex].label}</DialogTitle>
-          <DialogDescription className="sr-only">管理外观、启动、终端、通知和更新设置。</DialogDescription>
+          <DialogDescription className="sr-only">管理外观、启动、终端、通知、桌宠和更新设置。</DialogDescription>
         </DialogHeader>
         {categories.map(({ id }) => <div key={id} id={`settings-panel-${id}`} role="tabpanel"
           aria-labelledby={`settings-tab-${id}`} hidden={category !== id} tabIndex={category === id ? 0 : undefined}

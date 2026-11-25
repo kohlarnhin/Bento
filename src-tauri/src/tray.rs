@@ -219,6 +219,12 @@ pub struct TrayState {
     enabled: AtomicBool,
 }
 
+impl TrayState {
+    pub fn recent_projects(&self) -> Vec<String> {
+        self.recent.lock().unwrap_or_else(|err| err.into_inner()).clone()
+    }
+}
+
 fn menu(app: &AppHandle, view: &TrayView) -> tauri::Result<Menu<tauri::Wry>> {
     let menu = Menu::new(app)?;
     for item in &view.items {
@@ -409,6 +415,7 @@ pub fn tray_panel_action(app: AppHandle, action: String, project_id: Option<Stri
 }
 
 pub fn refresh(app: &AppHandle) {
+    crate::pet::refresh(app);
     let Some(state) = app.try_state::<TrayState>() else {
         return;
     };
@@ -492,7 +499,7 @@ pub fn handle_menu(app: &AppHandle, id: &str) {
     }
 }
 
-fn request_stop_all(app: &AppHandle) {
+pub(crate) fn request_stop_all(app: &AppHandle) {
     if app
         .state::<TrayState>()
         .stop_pending

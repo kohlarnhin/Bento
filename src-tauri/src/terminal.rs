@@ -487,6 +487,7 @@ impl TerminalManager {
         manager.completion_enabled.store(enabled, Ordering::Relaxed);
         manager.completion = Arc::new(move |event, background| {
             let _ = notification_app.emit("terminal-completion", &event);
+            crate::pet::note_completion(&notification_app, &event);
             if background && event.completion.is_some() {
                 crate::terminal_notifications::post(&notification_app, event);
             }

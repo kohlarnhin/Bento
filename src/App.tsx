@@ -513,17 +513,27 @@ export function App() {
     return () => { void unlisten.then(stop => stop()); };
   }, [openSettings]);
 
+  // A project folder dropped on the desktop pet: the pet brings Bento forward and hands it over here.
+  useEffect(() => {
+    const unlisten = listen<ProjectDirInspection>('bento-pet-drop', ({ payload }) => openCreate(payload));
+    return () => { void unlisten.then(stop => stop()); };
+  }, [openCreate]);
+
   useEffect(() => {
     if (updater.isModalOpen) setSettingsOpen(false);
   }, [updater.isModalOpen]);
 
   useEffect(() => {
-    const unlisten = listen<{ projectId: string }>('apphub-select-project', ({ payload }) => {
+    const unlisten = listen<{ projectId: string; slot?: number | null; terminal?: boolean }>('apphub-select-project', ({ payload }) => {
       if (!navigation.current.projects.some(project => project.id === payload.projectId)) { setSearchQuery(''); setFilter('all'); }
-      selectProject(payload.projectId);
+      const snapshot = Object.values(getTerminalSnapshot());
+      const slot = payload.slot ?? (payload.terminal ? firstOpenedTerminalSlot(payload.projectId, snapshot) : undefined);
+      if (slot != null && getTerminalSnapshot()[terminalKey(payload.projectId, slot)]?.sessionId) selectTerminalSlot(payload.projectId, slot);
+      else if (payload.terminal) void openTerminal(payload.projectId);
+      else selectProject(payload.projectId);
     });
     return () => { void unlisten.then(stop => stop()); };
-  }, [selectProject]);
+  }, [selectProject, selectTerminalSlot, openTerminal]);
 
   useEffect(() => {
     if (!projectsLoaded) return;
