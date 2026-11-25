@@ -301,6 +301,13 @@ export function PetWindow() {
   const [restFace, setRestFace] = useState<Face>('idle');
   const [reaction, setReaction] = useState<Face>();
   const [hover, setHover] = useState(false);
+  // Hover is read from the pointer position Rust sends (pet-gaze), not from pointerleave: once the
+  // window lets clicks through again it gets no more mouse events, and a missed leave kept the
+  // 「N 个项目运行中」 bubble up for good. 打开 / 稍后 on a hover bubble mute it until the pointer leaves.
+  const hoverNow = useRef(false);
+  const hoverMuted = useRef(false);
+  const setHovering = (next: boolean) => { if (hoverNow.current !== next) { hoverNow.current = next; setHover(next); } };
+  const muteHover = () => { hoverMuted.current = true; setHovering(false); };
   const [blink, setBlink] = useState(false);
   const [gaze, setGaze] = useState<[number, number]>([0, 0]);
   const [autoGaze, setAutoGaze] = useState<[number, number]>();
@@ -386,6 +393,16 @@ export function PetWindow() {
       if (Math.abs(x - payload[0]) + Math.abs(y - payload[1]) > 6) pointerMovedAt.current = Date.now();
       pointer.current = payload;
       setGaze(payload);
+      const [px, py] = payload;
+      const within = (element: HTMLElement | null) => {
+        const box = element?.getBoundingClientRect();
+        return !!box && box.width > 0 && px >= box.left - 4 && px <= box.right + 4 && py >= box.top - 4 && py <= box.bottom + 4;
+      };
+      const onBody = within(bodyRef.current);
+      const onBubble = !!bubbleRef.current?.dataset.visible && within(bubbleRef.current);
+      if (!onBody && !onBubble) hoverMuted.current = false;
+      // Moving from the body onto its bubble keeps the hover, so its buttons can be reached.
+      setHovering(!hoverMuted.current && (onBody || (onBubble && hoverNow.current)));
     });
     void invoke<Place>('pet_dock').then(place => { setDock(place.dock); setActive(place.active); setLedge(place.ledge); }).catch(() => undefined);
     void unRefresh.then(refresh);
@@ -1434,11 +1451,14 @@ export function PetWindow() {
   }, [bubble?.key, bubbleText]);
   const typedAll = typed >= bubbleText.length;
   // 打开 takes you to the item in Bento; 稍后 puts it off (a waiting item for ten minutes).
+  useEffect(() => { if (!active) { hoverMuted.current = false; setHovering(false); } }, [active]);
   const openItem = (item?: Item) => {
+    muteHover();
     setAnnouncing(undefined);
     void invoke('pet_action', { action: 'open', projectId: item?.projectId ?? null, slot: item?.slot ?? null }).catch(() => undefined);
   };
   const putOff = (shown: Bubble) => {
+    if (shown.key.startsWith('hover-')) muteHover();
     if (shown.item?.urgent) setSnoozed(current => ({ ...current, [shown.item!.id]: Date.now() + 10 * 60_000 }));
     else if (shown.key.startsWith('rest-')) setRest(undefined);
     else if (announcing?.key === shown.key) setAnnouncing(undefined);
@@ -1589,6 +1609,7 @@ export function PetWindow() {
 
   // Clicking a bubble just brings Bento to the front; the user sees there what finished or waits.
   const openBento = () => {
+    muteHover();
     setAnnouncing(undefined);
     void invoke('pet_action', { action: 'open', projectId: null, slot: null }).catch(() => undefined);
   };
@@ -1800,7 +1821,7 @@ export function PetWindow() {
     <div ref={bodyRef} className="pet-character" data-pose={shownPose} data-motion={shownMotion} data-landing={landing || undefined} data-stool={stool || undefined}
       data-mirrored={mirrored || undefined} data-away={away || undefined} style={characterStyle} role="button" aria-label="Bento 桌宠"
       onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onClick={onClick}
-      onPointerEnter={() => setHover(true)} onPointerLeave={() => setHover(false)}>
+      onPointerEnter={() => { if (!hoverMuted.current) setHovering(true); }}>
       <div className="pet-figure">
         {stool ? <>
           {/* On the stool the body breathes on its own: the stool and feet below the seat line stay put. */}
