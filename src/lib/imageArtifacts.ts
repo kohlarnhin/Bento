@@ -10,11 +10,11 @@ export interface ImagePreviewRequest { projectId: string; path: string; base: Pr
 const EXTENSIONS = 'png|jpe?g|webp|gif|svg|avif|bmp';
 const SEGMENT = String.raw`[\w@%+\-.\u4e00-\u9fff]+`;
 const IMAGE_PATH = new RegExp(String.raw`(?:~\/|\.{1,2}\/|\/)?(?:${SEGMENT}\/)*${SEGMENT}\.(?:${EXTENSIONS})(?![\w/]|\.\w)`, 'giu');
-const URL = /[a-z][\w+.-]*:\/\/\S+/giu;
+const WEB_URL = /[a-z][\w+.-]*:\/\/\S+/giu;
 
 /** Image paths in one line of terminal text, skipping ones that are part of a URL (web links handle those). */
 export function findImagePaths(line: string): { text: string; index: number }[] {
-  const urls = [...line.matchAll(URL)].map(match => [match.index ?? 0, (match.index ?? 0) + match[0].length]);
+  const urls = [...line.matchAll(WEB_URL)].map(match => [match.index ?? 0, (match.index ?? 0) + match[0].length]);
   const found: { text: string; index: number }[] = [];
   for (const match of line.matchAll(IMAGE_PATH)) {
     const index = match.index ?? 0;
@@ -22,6 +22,17 @@ export function findImagePaths(line: string): { text: string; index: number }[] 
     found.push({ text: match[0], index });
   }
   return found;
+}
+
+const IMAGE_FILE = new RegExp(String.raw`\.(?:${EXTENSIONS})$`, 'iu');
+export const isImagePath = (path: string) => IMAGE_FILE.test(path);
+
+/** The local path behind a terminal hyperlink (OSC 8): a file:// URI or a bare absolute/~ path. */
+export function linkPath(uri: string): string | null {
+  if (/^file:\/\//iu.test(uri)) {
+    try { return decodeURIComponent(new URL(uri).pathname); } catch { return null; }
+  }
+  return uri.startsWith('/') || uri.startsWith('~/') ? uri : null;
 }
 
 const cache = new Map<string, Promise<ImageData>>();

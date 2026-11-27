@@ -9,7 +9,7 @@ import { ProjectTerminal, type ProjectTerminalControls, type TerminalDimensions 
 import { TerminalSnippets } from './TerminalSnippets';
 import { LogText } from './LogText';
 import { ImageArtifactsPane, type ImageFocus } from './ImageArtifactsPane';
-import { IMAGE_PREVIEW_EVENT, type ImagePreviewRequest } from '../lib/imageArtifacts';
+import { IMAGE_PREVIEW_EVENT, type ImageArtifact, type ImagePreviewRequest } from '../lib/imageArtifacts';
 import { Select } from './ui/select';
 
 export interface TerminalWorkspaceControls extends ProjectTerminalControls {
@@ -118,6 +118,26 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
   useEffect(() => {
     if (source?.startsWith('terminal:') && !slots.includes(Number(source.slice('terminal:'.length)))) setSource(undefined);
   }, [source, slots]);
+  // When an AI round in this project ends having produced images, show the newest one right away.
+  const mountedAt = useRef(Date.now());
+  const handledRounds = useRef(new Set<string>());
+  useEffect(() => {
+    for (const status of Object.values(terminals)) {
+      const agent = status.agent;
+      if (status.projectId !== project.id || agent?.state !== 'done' || agent.stateStartedAt < mountedAt.current) continue;
+      const roundStart = agent.roundStartedAt ?? agent.stateStartedAt - 15 * 60_000;
+      const key = `${status.sessionId}:${agent.stateStartedAt}`;
+      if (handledRounds.current.has(key)) continue;
+      handledRounds.current.add(key);
+      void invoke<ImageArtifact[]>('project_images', { path: project.path, sinceMs: roundStart, limit: 1 }).then(([newest]) => {
+        if (!newest) return;
+        setImageFocus(previous => ({ path: newest.path, base: Promise.resolve(null), nonce: (previous?.nonce ?? 0) + 1 }));
+        setSource('images');
+        setInputPane('left');
+        setSplit(true);
+      }, () => undefined);
+    }
+  }, [terminals, project.id, project.path]);
   // An image path clicked in one of this project's terminals opens in the 图片产物 pane.
   useEffect(() => {
     const preview = (event: Event) => {

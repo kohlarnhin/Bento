@@ -12,7 +12,7 @@ import type { TerminalAgentEvent, TerminalAttention, TerminalCompletionEvent, Te
 import { formatDroppedPaths, recoverShiftedImeInput, trackBareShift, transformTypedInput, type TerminalImeState } from './terminalInput';
 import { DEFAULT_TERMINAL_FONT_SIZE, TERMINAL_FALLBACK_FONT_FAMILY, TERMINAL_FONT_FAMILY, TERMINAL_LINE_HEIGHT, TERMINAL_THEME } from './terminalAppearance';
 import { createTitlePublisher, projectTerminalSlots } from './terminalUsability';
-import { findImagePaths, hideImageTip, requestImagePreview, showImageTip } from './imageArtifacts';
+import { findImagePaths, hideImageTip, isImagePath, linkPath, requestImagePreview, showImageTip } from './imageArtifacts';
 
 type TerminalClosed = Pick<TerminalSessionInfo, 'projectId' | 'slot' | 'sessionId'>;
 export interface TerminalStatus extends Partial<TerminalSessionInfo> {
@@ -363,6 +363,24 @@ function createEntry(projectId: string, slot: number): Entry {
     cursorBlink: true,
     cursorStyle: 'block',
     scrollback: 5000,
+    // Hyperlinks (OSC 8) such as Codex's「打开这张图」: images open in the 图片产物 pane, other local
+    // files are shown in Finder, web pages open in the browser.
+    linkHandler: {
+      allowNonHttpProtocols: true,
+      activate: (event, uri) => {
+        event.preventDefault();
+        hideImageTip();
+        const path = linkPath(uri);
+        if (path && isImagePath(path)) requestImagePreview({ projectId, path, base: Promise.resolve(null) });
+        else if (path) void invoke('reveal_path', { path }).catch((error) => registry.showError(`打开文件失败：${error}`));
+        else void invoke('open_url', { url: uri }).catch((error) => registry.showError(`打开链接失败：${error}`));
+      },
+      hover: (event, uri) => {
+        const path = linkPath(uri);
+        if (path && isImagePath(path)) showImageTip(event, path, Promise.resolve(null));
+      },
+      leave: () => hideImageTip(),
+    },
   });
   const fit = new FitAddon();
   // Scrollback is bounded by the terminal; include every retained match.

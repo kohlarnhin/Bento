@@ -2,7 +2,10 @@
 //! terminal: a scan of the project for recent image files, and a reader that hands one image to the
 //! webview as a data URL.
 
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -84,8 +87,82 @@ pub fn scan(root: &Path, since_ms: u64, limit: usize) -> Vec<ImageArtifact> {
             found.push(ImageArtifact { path: path.to_string_lossy().into_owned(), relative, modified_ms, size: meta.len() });
         }
     }
+    newest_first(&mut found, limit);
+    found
+}
+
+fn newest_first(found: &mut Vec<ImageArtifact>, limit: usize) {
     found.sort_by(|a, b| b.modified_ms.cmp(&a.modified_ms).then_with(|| a.relative.cmp(&b.relative)));
     found.truncate(limit);
+}
+
+fn codex_home() -> Option<PathBuf> {
+    std::env::var_os("CODEX_HOME").filter(|home| !home.is_empty()).map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
+}
+
+/// The working directory recorded in the first line (session_meta) of a Codex rollout.
+fn rollout_cwd(path: &Path) -> Option<PathBuf> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut line = String::new();
+    BufReader::new(file.take(512 * 1024)).read_line(&mut line).ok()?;
+    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    value.pointer("/payload/cwd")?.as_str().map(PathBuf::from)
+}
+
+fn sorted_children(path: &Path) -> Vec<PathBuf> {
+    let mut children: Vec<_> = std::fs::read_dir(path).map(|entries| entries.flatten().map(|entry| entry.path()).collect()).unwrap_or_default();
+    children.sort_unstable_by(|a, b| b.cmp(a));
+    children
+}
+
+/// Codex keeps rollouts in sessions/YYYY/MM/DD/rollout-<time>-<session id>.jsonl.
+fn session_cwd(codex: &Path, id: &str) -> Option<PathBuf> {
+    static CACHE: OnceLock<Mutex<HashMap<(PathBuf, String), Option<PathBuf>>>> = OnceLock::new();
+    let key = (codex.to_path_buf(), id.to_string());
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(cwd) = cache.lock().unwrap_or_else(|error| error.into_inner()).get(&key) {
+        return cwd.clone();
+    }
+    let suffix = format!("-{id}.jsonl");
+    let cwd = sorted_children(&codex.join("sessions")).iter()
+        .flat_map(|year| sorted_children(year))
+        .flat_map(|month| sorted_children(&month))
+        .flat_map(|day| sorted_children(&day))
+        .find(|file| file.file_name().is_some_and(|name| name.to_string_lossy().ends_with(&suffix)))
+        .and_then(|rollout| rollout_cwd(&rollout));
+    cache.lock().unwrap_or_else(|error| error.into_inner()).insert(key, cwd.clone());
+    cwd
+}
+
+/// Images Codex generated (codex/generated_images/<session id>/…) in sessions run inside `project`.
+pub fn codex_images(codex: &Path, project: &Path, since_ms: u64) -> Vec<ImageArtifact> {
+    let project = project.canonicalize().unwrap_or_else(|_| project.to_path_buf());
+    let Ok(sessions) = std::fs::read_dir(codex.join("generated_images")) else { return Vec::new() };
+    let mut found = Vec::new();
+    for session in sessions.flatten() {
+        let Ok(meta) = session.metadata() else { continue };
+        // Adding a file bumps the folder's time, so older folders hold nothing new.
+        if !meta.is_dir() || millis(meta.modified()) < since_ms {
+            continue;
+        }
+        let id = session.file_name().to_string_lossy().into_owned();
+        let Some(cwd) = session_cwd(codex, &id) else { continue };
+        if !cwd.canonicalize().unwrap_or(cwd).starts_with(&project) {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(session.path()) else { continue };
+        for file in files.flatten() {
+            let path = file.path();
+            let Ok(meta) = file.metadata() else { continue };
+            let modified_ms = millis(meta.modified());
+            if !meta.is_file() || !is_image(&path) || modified_ms < since_ms {
+                continue;
+            }
+            let relative = format!("Codex 生成/{}", file.file_name().to_string_lossy());
+            found.push(ImageArtifact { path: path.to_string_lossy().into_owned(), relative, modified_ms, size: meta.len() });
+        }
+    }
     found
 }
 
@@ -155,7 +232,15 @@ pub async fn project_images(path: String, since_ms: Option<u64>, limit: Option<u
         return Err("项目目录不存在".into());
     }
     let limit = limit.unwrap_or(200).clamp(1, MAX_LIMIT);
-    tauri::async_runtime::spawn_blocking(move || scan(&root, since_ms.unwrap_or(0), limit))
+    let since_ms = since_ms.unwrap_or(0);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut found = scan(&root, since_ms, limit);
+        if let Some(codex) = codex_home() {
+            found.extend(codex_images(&codex, &root, since_ms));
+            newest_first(&mut found, limit);
+        }
+        found
+    })
         .await
         .map_err(|error| format!("扫描图片失败：{error}"))
 }
@@ -209,6 +294,31 @@ mod tests {
         assert_eq!(names, ["deep/a/b/c.JPG", "design/hero.png", "public/logo.svg"]);
         assert!(scan(&root, u64::MAX, 50).is_empty());
         assert_eq!(scan(&root, 0, 1).len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn codex_images_belong_to_sessions_run_in_the_project() {
+        let root = temp_dir("codex");
+        let project = root.join("project");
+        let codex = root.join("codex");
+        let day = codex.join("sessions/2026/11/27");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::create_dir_all(&day).unwrap();
+        let ours = "11111111-1111-1111-1111-111111111111";
+        let other = "22222222-2222-2222-2222-222222222222";
+        for (id, cwd) in [(ours, project.join("src")), (other, root.join("elsewhere"))] {
+            std::fs::write(day.join(format!("rollout-2026-11-27T17-00-40-{id}.jsonl")),
+                format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{id}\",\"cwd\":{}}}}}\n", serde_json::json!(cwd))).unwrap();
+            let images = codex.join("generated_images").join(id);
+            std::fs::create_dir_all(&images).unwrap();
+            std::fs::write(images.join("exec-a.png"), b"x").unwrap();
+        }
+        let found = codex_images(&codex, &project, 0);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].path.contains(ours));
+        assert_eq!(found[0].relative, "Codex 生成/exec-a.png");
+        assert!(codex_images(&codex, &project, u64::MAX).is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 
