@@ -135,7 +135,71 @@ pub fn get_db_path() -> PathBuf {
     }
 }
 
+/// The CREATE TABLE text with NOT NULL taken off the `port` column, renamed to `table`.
+fn relax_port_definition(sql: &str, table: &str) -> Option<String> {
+    let open = sql.find('(')?;
+    let close = sql.rfind(')')?;
+    let body = sql.get(open + 1..close)?;
+    let mut columns = Vec::new();
+    let (mut depth, mut start) = (0i32, 0usize);
+    for (index, character) in body.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                columns.push(&body[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    columns.push(&body[start..]);
+    let mut changed = false;
+    let columns: Vec<String> = columns.into_iter().map(|column| {
+        let name = column.split_whitespace().next().unwrap_or_default().trim_matches(['"', '`', '[', ']']);
+        if name.eq_ignore_ascii_case("port") {
+            // ASCII uppercasing keeps byte offsets, so the match indexes the original text.
+            if let Some(at) = column.to_ascii_uppercase().find("NOT NULL") {
+                changed = true;
+                return format!("{}{}", &column[..at], &column[at + "NOT NULL".len()..]);
+            }
+        }
+        column.to_string()
+    }).collect();
+    changed.then(|| format!("CREATE TABLE {table} ({})", columns.join(",")))
+}
+
+/// Databases carried over from FrontHub declared `port INTEGER NOT NULL`, so projects with no port
+/// (nothing to run, or services without a web port) could not be saved. SQLite can't drop a column
+/// constraint, so the table is rebuilt with the same columns and rows.
+fn relax_legacy_port_column(conn: &Connection) -> rusqlite::Result<()> {
+    use rusqlite::OptionalExtension;
+    let not_null = conn.query_row("SELECT \"notnull\" FROM pragma_table_info('projects') WHERE name = 'port'", [], |row| row.get::<_, i64>(0))
+        .optional()?.unwrap_or(0) != 0;
+    if !not_null {
+        return Ok(());
+    }
+    let sql: String = conn.query_row("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'projects'", [], |row| row.get(0))?;
+    let Some(create) = relax_port_definition(&sql, "projects_relaxed_port") else { return Ok(()) };
+    let foreign_keys: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+    // Dropping the old table must not cascade into snippets that reference it.
+    conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+    let rebuilt = (|| {
+        let transaction = conn.unchecked_transaction()?;
+        transaction.execute_batch(&format!("DROP TABLE IF EXISTS projects_relaxed_port; {create};
+            INSERT INTO projects_relaxed_port SELECT * FROM projects;
+            DROP TABLE projects;
+            ALTER TABLE projects_relaxed_port RENAME TO projects;"))?;
+        transaction.commit()
+    })();
+    if foreign_keys != 0 {
+        conn.execute_batch("PRAGMA foreign_keys = ON")?;
+    }
+    rebuilt
+}
+
 pub fn init_db(conn: &Connection) -> Result<(), rusqlite::Error> {
+    relax_legacy_port_column(conn)?;
     let transaction = conn.unchecked_transaction()?;
     transaction.execute(
         "CREATE TABLE IF NOT EXISTS settings (
@@ -851,6 +915,35 @@ fn reopen_main_window(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_not_null_port_is_relaxed_without_losing_rows_or_snippets() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;
+            CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, display_name TEXT, description TEXT, path TEXT NOT NULL, port INTEGER NOT NULL UNIQUE, start_command TEXT NOT NULL, created_at TEXT, updated_at TEXT);
+            INSERT INTO projects (id, name, path, port, start_command) VALUES ('old', 'old', '/tmp', 3000, 'npm run dev');
+            CREATE TABLE project_snippets (id INTEGER PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, name TEXT NOT NULL, command TEXT NOT NULL);
+            INSERT INTO project_snippets (project_id, name, command) VALUES ('old', 'build', 'npm run build');").unwrap();
+        init_db(&conn).unwrap();
+        let not_null: i64 = conn.query_row("SELECT \"notnull\" FROM pragma_table_info('projects') WHERE name = 'port'", [], |row| row.get(0)).unwrap();
+        assert_eq!(not_null, 0);
+        let old = read_projects(&conn).unwrap().remove(0);
+        assert_eq!((old.id.as_str(), old.port), ("old", Some(3000)));
+        let snippets: i64 = conn.query_row("SELECT COUNT(*) FROM project_snippets", [], |row| row.get(0)).unwrap();
+        assert_eq!(snippets, 1);
+        conn.execute("INSERT INTO projects (id, name, path, port, start_command) VALUES ('docs', 'docs', '/tmp', NULL, '')", []).unwrap();
+        let foreign_keys: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0)).unwrap();
+        assert_eq!(foreign_keys, 1);
+        init_db(&conn).unwrap();
+    }
+
+    #[test]
+    fn relaxing_the_port_definition_keeps_other_constraints() {
+        let sql = "CREATE TABLE projects (id TEXT PRIMARY KEY, port integer not null UNIQUE, start_command TEXT NOT NULL, x TEXT DEFAULT (lower('A,B')))";
+        assert_eq!(relax_port_definition(sql, "t").unwrap(),
+            "CREATE TABLE t (id TEXT PRIMARY KEY, port integer  UNIQUE, start_command TEXT NOT NULL, x TEXT DEFAULT (lower('A,B')))");
+        assert!(relax_port_definition("CREATE TABLE projects (id TEXT, port INTEGER UNIQUE)", "t").is_none());
+    }
 
     #[test]
     fn create_project_dir_makes_a_new_folder_only() {
