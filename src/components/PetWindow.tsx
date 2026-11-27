@@ -1473,13 +1473,36 @@ export function PetWindow() {
   useEffect(() => {
     if (ON_BENTO) return;
     let hovering = false;
+    // Only drives the "hands up" pose. Tauri's drag position is physical px on some macOS builds and
+    // already logical on others; dividing a logical point by the Retina scale landed it far above the
+    // character, so the drop was ignored. Accept either reading.
     const over = (position: { x: number; y: number }) => {
       const box = bodyRef.current?.getBoundingClientRect();
       if (!box) return false;
-      const x = position.x / window.devicePixelRatio;
-      const y = position.y / window.devicePixelRatio;
-      return x >= box.left - 12 && x <= box.right + 12 && y >= box.top - 12 && y <= box.bottom + 12;
+      const scale = window.devicePixelRatio || 1;
+      return [[position.x / scale, position.y / scale], [position.x, position.y]].some(([x, y]) =>
+        x >= box.left - 24 && x <= box.right + 24 && y >= box.top - 24 && y <= box.bottom + 24);
     };
+    // Hand the folder to Bento's main window and wait until it confirms, resending meanwhile: right after
+    // Bento is brought forward its listener may not be ready, and a lone emit was simply lost.
+    const handOver = (inspection: Inspection) => new Promise<boolean>(resolve => {
+      const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      let finished = false, tries = 0, timer = 0;
+      const acked = listen<string>('bento-pet-drop-ack', ({ payload }) => { if (payload === token) finish(true); });
+      function finish(ok: boolean) {
+        if (finished) return;
+        finished = true;
+        window.clearInterval(timer);
+        void acked.then(stop => stop());
+        resolve(ok);
+      }
+      const send = () => {
+        if (finished) return;
+        if (++tries > 15) { finish(false); return; }
+        void emitTo('main', 'bento-pet-drop', { token, from: getCurrentWindow().label, inspection }).catch(() => undefined);
+      };
+      void acked.then(() => { send(); timer = window.setInterval(send, 300); }, () => finish(false));
+    });
     const take = async (path: string) => {
       setReaction('happy');
       setSparkle(Date.now());
@@ -1490,14 +1513,13 @@ export function PetWindow() {
         if (found.exists && !found.isDir) {
           found = await invoke<Inspection>('inspect_project_dir', { path: path.replace(/[/\\][^/\\]+$/u, ''), excludeId: null });
           if (!found.existingProject) { sayRef.current('只能接住项目文件夹哦'); return; }
-        }
-        if (!found.exists) { sayRef.current('这个文件夹找不到了'); return; }
-        if (found.existingProject) {
           await invoke('pet_action', { action: 'open', projectId: found.existingProject.id, slot: null });
           return;
         }
+        if (!found.exists) { sayRef.current('这个文件夹找不到了'); return; }
+        // A folder always opens Bento's 添加项目 page (it notes when the folder is already a project).
         await invoke('pet_action', { action: 'open', projectId: null, slot: null });
-        window.setTimeout(() => { void emitTo('main', 'bento-pet-drop', found).catch(() => undefined); }, 400);
+        if (!(await handOver(found))) sayRef.current('Bento 没接住，再拖一次试试');
       } catch {
         sayRef.current('没能打开这个文件夹');
       }
@@ -1514,7 +1536,9 @@ export function PetWindow() {
       }
       hovering = false;
       window.setTimeout(() => setCatching(false), 500);
-      if (!inside || !payload.paths.length) { setReaction(undefined); return; }
+      // The window lets the pointer through everywhere but the character, so any drop that reaches it
+      // landed on the pet.
+      if (!payload.paths.length) { setReaction(undefined); return; }
       void take(payload.paths[0]);
     });
     return () => { void stop.then(unlisten => unlisten()); };

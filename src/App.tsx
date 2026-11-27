@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo, useSyncExternalStore, type CSSProperties } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { emitTo, listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { DragDropEvent } from '@tauri-apps/api/webview';
@@ -509,10 +509,30 @@ export function App() {
   }, [openSettings]);
 
   // A project folder dropped on the desktop pet: the pet brings Bento forward and hands it over here.
+  // Each hand-over is acknowledged (the pet resends until then) and opened once. With another dialog
+  // open, it waits and opens the 添加项目 page as soon as that dialog closes.
+  const pendingPetDrop = useRef<ProjectDirInspection | null>(null);
+  const handledPetDrops = useRef(new Set<string>());
   useEffect(() => {
-    const unlisten = listen<ProjectDirInspection>('bento-pet-drop', ({ payload }) => openCreate(payload));
+    const unlisten = listen<{ token: string; from: string; inspection: ProjectDirInspection }>('bento-pet-drop', ({ payload }) => {
+      void emitTo(payload.from, 'bento-pet-drop-ack', payload.token).catch(() => undefined);
+      if (handledPetDrops.current.has(payload.token)) return;
+      handledPetDrops.current.add(payload.token);
+      if (dialogOpen.current) {
+        pendingPetDrop.current = payload.inspection;
+        toast.info(`关闭当前窗口后添加「${payload.inspection.name}」`);
+        return;
+      }
+      openCreate(payload.inspection);
+    });
     return () => { void unlisten.then(stop => stop()); };
   }, [openCreate]);
+  useEffect(() => {
+    if (dialogOpen.current || !pendingPetDrop.current) return;
+    const next = pendingPetDrop.current;
+    pendingPetDrop.current = null;
+    openCreate(next);
+  });
 
   useEffect(() => {
     if (updater.isModalOpen) setSettingsOpen(false);
