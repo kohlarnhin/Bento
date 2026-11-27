@@ -2,7 +2,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview, type DragDropEvent } from '@tauri-apps/api/webview';
-import { Terminal } from '@xterm/xterm';
+import { Terminal, type IBufferLine, type ILink } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -12,6 +12,7 @@ import type { TerminalAgentEvent, TerminalAttention, TerminalCompletionEvent, Te
 import { formatDroppedPaths, recoverShiftedImeInput, trackBareShift, transformTypedInput, type TerminalImeState } from './terminalInput';
 import { DEFAULT_TERMINAL_FONT_SIZE, TERMINAL_FALLBACK_FONT_FAMILY, TERMINAL_FONT_FAMILY, TERMINAL_LINE_HEIGHT, TERMINAL_THEME } from './terminalAppearance';
 import { createTitlePublisher, projectTerminalSlots } from './terminalUsability';
+import { findImagePaths, hideImageTip, requestImagePreview, showImageTip } from './imageArtifacts';
 
 type TerminalClosed = Pick<TerminalSessionInfo, 'projectId' | 'slot' | 'sessionId'>;
 export interface TerminalStatus extends Partial<TerminalSessionInfo> {
@@ -311,6 +312,47 @@ function queueInput(entry: Entry, data: string, binary = false) {
   void drainInput(entry);
 }
 
+/** A buffer line as text, with the cell column of every UTF-16 unit (wide CJK cells count once). */
+function lineText(line: IBufferLine, cols: number) {
+  let text = '';
+  const columns: number[] = [];
+  for (let x = 0; x < cols; x++) {
+    const cell = line.getCell(x);
+    if (!cell) break;
+    if (cell.getWidth() === 0) continue;
+    const chars = cell.getChars() || ' ';
+    for (let unit = 0; unit < chars.length; unit++) columns.push(x);
+    text += chars;
+  }
+  return { text, columns };
+}
+
+/** The directory relative image paths in this terminal are resolved against. */
+function terminalCwd(projectId: string, slot: number): Promise<string | null> {
+  const sessionId = registry.entries.get(terminalKey(projectId, slot))?.sessionId;
+  if (!sessionId) return Promise.resolve(null);
+  return invoke<{ cwd: string | null } | null>('terminal_context', { projectId, slot, sessionId })
+    .then(context => context?.cwd ?? null, () => null);
+}
+
+function imageLinks(terminal: Terminal, projectId: string, slot: number, y: number): ILink[] {
+  const line = terminal.buffer.active.getLine(y - 1);
+  if (!line) return [];
+  const { text, columns } = lineText(line, terminal.cols);
+  return findImagePaths(text).map(({ text: path, index }) => ({
+    range: { start: { x: columns[index] + 1, y }, end: { x: columns[index + path.length - 1] + 1, y } },
+    text: path,
+    decorations: { underline: true, pointerCursor: true },
+    activate: event => {
+      event.preventDefault();
+      hideImageTip();
+      requestImagePreview({ projectId, path, base: terminalCwd(projectId, slot) });
+    },
+    hover: event => showImageTip(event, path, terminalCwd(projectId, slot)),
+    leave: () => hideImageTip(),
+  }));
+}
+
 function createEntry(projectId: string, slot: number): Entry {
   const terminal = new Terminal({
     theme: TERMINAL_THEME,
@@ -333,6 +375,12 @@ function createEntry(projectId: string, slot: number): Entry {
     event.preventDefault();
     void invoke('open_url', { url }).catch((error) => registry.showError(`打开链接失败：${error}`));
   }));
+  terminal.registerLinkProvider({
+    provideLinks: (y, callback) => {
+      const links = imageLinks(terminal, projectId, slot, y);
+      callback(links.length ? links : undefined);
+    },
+  });
   const container = document.createElement('div');
   container.className = 'terminal-container';
   container.dataset.terminalProject = projectId;

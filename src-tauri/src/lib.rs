@@ -27,6 +27,7 @@ mod snippets;
 mod sidebar;
 mod autostart;
 mod traffic_lights;
+mod artifacts;
 use lifecycle::ProcessMap;
 use projects::{PortConflictCheck, ProjectDraft, ProjectDirInspection};
 #[cfg(debug_assertions)]
@@ -675,6 +676,8 @@ pub fn run() {
         open_url,
         local_network_ip,
         reveal_path,
+        artifacts::project_images,
+        artifacts::read_image_file,
         open_config_file,
         settings::get_settings,
         settings::set_setting,

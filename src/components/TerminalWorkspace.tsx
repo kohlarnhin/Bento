@@ -8,6 +8,8 @@ import type { ProjectConfig, Service, Snippet, SnippetChange } from '../types';
 import { ProjectTerminal, type ProjectTerminalControls, type TerminalDimensions } from './ProjectTerminal';
 import { TerminalSnippets } from './TerminalSnippets';
 import { LogText } from './LogText';
+import { ImageArtifactsPane, type ImageFocus } from './ImageArtifactsPane';
+import { IMAGE_PREVIEW_EVENT, type ImagePreviewRequest } from '../lib/imageArtifacts';
 import { Select } from './ui/select';
 
 export interface TerminalWorkspaceControls extends ProjectTerminalControls {
@@ -90,7 +92,9 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
   const services = useMemo(() => dashboardServices(project), [project.port, project.services]);
   const logOptions = [{ value: 'logs', label: '合并日志' }, ...services.map(service => ({ value: `log:${service.id}`, label: `${service.name} · 日志` }))];
   const peers = slots.filter(slot => slot !== activeSlot);
-  const options = [...peers.map(slot => ({ value: `terminal:${slot}`, label: `终端 ${terminalDisplayNumber(slots, slot)}` })), ...logOptions];
+  const options = [...peers.map(slot => ({ value: `terminal:${slot}`, label: `终端 ${terminalDisplayNumber(slots, slot)}` })), ...logOptions,
+    { value: 'images', label: '图片产物' }];
+  const [imageFocus, setImageFocus] = useState<ImageFocus>();
   const selected = options.some(option => option.value === source) ? source! : logOptions[services.length > 1 ? 1 : 0].value;
   const rightSlot = split ? peers.find(slot => selected === `terminal:${slot}`) : undefined;
   const activeNumber = terminalDisplayNumber(slots, activeSlot)!;
@@ -114,6 +118,19 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
   useEffect(() => {
     if (source?.startsWith('terminal:') && !slots.includes(Number(source.slice('terminal:'.length)))) setSource(undefined);
   }, [source, slots]);
+  // An image path clicked in one of this project's terminals opens in the 图片产物 pane.
+  useEffect(() => {
+    const preview = (event: Event) => {
+      const { projectId, path, base } = (event as CustomEvent<ImagePreviewRequest>).detail;
+      if (projectId !== project.id) return;
+      setImageFocus(previous => ({ path, base, nonce: (previous?.nonce ?? 0) + 1 }));
+      setSource('images');
+      setInputPane('left');
+      setSplit(true);
+    };
+    window.addEventListener(IMAGE_PREVIEW_EVENT, preview);
+    return () => window.removeEventListener(IMAGE_PREVIEW_EVENT, preview);
+  }, [project.id]);
   useLayoutEffect(() => {
     if (!interactive || !ready) return;
     const frame = requestAnimationFrame(() => getTerminal(project.id, currentInputSlot.current)?.focus());
@@ -141,6 +158,7 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
   const focusRight = () => setInputPane('right');
   const sourceChanged = (next: string) => {
     setSource(next);
+    setImageFocus(undefined);
     setInputPane('left');
   };
 
@@ -176,7 +194,8 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
             <Select id="terminal-split-source" label="右侧窗格内容" value={selected} options={options}
               onValueChange={sourceChanged} className="terminal-source-select" popupClassName="terminal-chrome" />
           </div>
-          {rightSlot === undefined ? <ServiceLogPane key={selected} projectId={project.id} services={services} serviceId={rightService} /> :
+          {selected === 'images' ? <ImageArtifactsPane projectPath={project.path} focus={imageFocus} /> :
+            rightSlot === undefined ? <ServiceLogPane key={selected} projectId={project.id} services={services} serviceId={rightService} /> :
             <ProjectTerminal project={project} activeSlot={rightSlot} terminalNumber={terminalDisplayNumber(slots, rightSlot)!}
               ref={rightControls} interactive={interactive} onFocus={focusRight} onResize={resize} />}
         </div>
