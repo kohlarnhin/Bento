@@ -122,10 +122,6 @@
   font: 11.5px var(--font-mono);
 }
 .terminal-status-shortcuts { flex: none; margin-left: auto; }
-.terminal-status[data-terminal-agent] { gap: 9px; font: 12px var(--font-ui); }
-.terminal-status .agent-status-chip[data-agent-state="thinking"] { border-color: var(--hairline-selection); padding-inline: 8px; }
-.terminal-status-next { flex: none; margin-inline-start: auto; white-space: nowrap; }
-.terminal-status-next:hover { color: hsl(var(--foreground)); }
 
 .terminal-focus-rail {
   display: flex;

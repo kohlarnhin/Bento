@@ -347,9 +347,6 @@ export function App() {
     dialogOpen.current = true;
     setProjectForm({ project, focusPort, scanOnOpen });
   }, []);
-  const openProjectEditor = useCallback((id: string) => {
-    void invoke('dashboard_open_editor', { id }).catch(error => toast.error(String(error)));
-  }, []);
   const handleRevealPath = useCallback((path: string) => {
     void invoke('reveal_path', { path }).catch(error => toast.error(`定位路径失败 · ${error}`));
   }, []);
@@ -438,7 +435,6 @@ export function App() {
       const key = event.key.toLowerCase();
       const reveal = event.altKey && !event.shiftKey && (event.code === 'KeyR' || key === 'r');
       if (!event.metaKey || event.ctrlKey || (event.altKey && !reveal)) return;
-      const editor = !event.altKey && !event.shiftKey && (event.code === 'KeyO' || key === 'o');
       const focusShortcut = inTerminal && event.shiftKey && key === 'enter';
       const splitShortcut = inTerminal && !event.shiftKey && key === 'd';
       const cycle = event.shiftKey && ['BracketLeft', 'BracketRight'].includes(event.code) && inTerminal;
@@ -447,7 +443,7 @@ export function App() {
       const zoomReset = inTerminal && !event.shiftKey && (event.code === 'Digit0' || key === '0');
       const jump = event.shiftKey && (event.code === 'KeyU' || key === 'u');
       const findNext = finding && key === 'g';
-      if (!reveal && !editor && !focusShortcut && !splitShortcut && !cycle && !zoomIn && !zoomOut && !zoomReset && !jump && !findNext
+      if (!reveal && !focusShortcut && !splitShortcut && !cycle && !zoomIn && !zoomOut && !zoomReset && !jump && !findNext
           && (event.shiftKey || (key !== 'p' && key !== 't' && key !== 'n' && key !== 'f' && key !== ',' && !/^[1-9]$/.test(key)))) return;
       event.preventDefault();
       event.stopPropagation();
@@ -458,7 +454,6 @@ export function App() {
       if (dialogOpen.current || document.querySelector('[role="dialog"][data-state="open"]')) return;
       const project = navigation.current.project;
       if (reveal) { if (project && !event.repeat) handleRevealPath(project.path); }
-      else if (editor) { if (project && !event.repeat) openProjectEditor(project.id); }
       else if (key === 'p' && !event.repeat) openQuickSwitcher();
       else if (focusShortcut) { if (!event.repeat) toggleFocusMode(); }
       else if (splitShortcut) { if (!event.repeat) toggleSplit(); }
@@ -505,7 +500,7 @@ export function App() {
       sidebarDragPaths = [];
       void unlisten.then((stop) => stop());
     };
-  }, [openCreate, openSettings, openProjectConfig, openProjectEditor, handleRevealPath, openQuickSwitcher, openTerminal,
+  }, [openCreate, openSettings, openProjectConfig, handleRevealPath, openQuickSwitcher, openTerminal,
     selectProject, selectTerminalSlot, changeFontSize, toggleFocusMode, toggleSplit, jumpToAttention]);
 
   useEffect(() => {
@@ -898,7 +893,6 @@ export function App() {
                   onOpenBrowser={handleOpenBrowser}
                   onSetDefaultService={setDefaultService}
                   onRevealPath={handleRevealPath}
-                  onOpenEditor={() => openProjectEditor(selectedProject.id)}
                   onOpenLogs={id => openProjectLogs(selectedProject, id)}
                   onClearLogs={() => handleClearLogs(selectedProject.id)}
                   onEdit={focusPort => openProjectConfig(selectedProject, focusPort)}

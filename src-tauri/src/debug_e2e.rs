@@ -167,7 +167,6 @@ pub fn record_command(command: &str) {
                 | "dashboard_snapshot"
                 | "dashboard_health"
                 | "dashboard_git"
-                | "dashboard_open_editor"
                 | "dashboard_release_port"
                 | "add_project"
                 | "reorder_projects"

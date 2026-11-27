@@ -78,13 +78,12 @@ export function DashboardOutput({ project, services, active, last, now, onJump, 
     </div>
   </section>;
 }
-export function DashboardGitCard({ git, now, onEditor }: { git: DashboardGit; now: number; onEditor: () => void }) {
+export function DashboardGitCard({ git, now }: { git: DashboardGit; now: number }) {
   const branch = git.branch ?? (git.head ? '分离 · ' + git.head : '未建立分支');
   return <section className="dash-git" aria-labelledby="dash-git-heading" data-dashboard-git>
     <header className="dash-output-heading">
       <h2 className="h1-group-title" id="dash-git-heading">Git 改动</h2>
       <span className="dash-muted">{git.changes} 个文件</span>
-      <button type="button" className="h1-tag dash-right" onClick={onEditor}>在编辑器打开</button>
     </header>
     <div className="h1-group dash-files">
       {git.files.map(file => <div key={file.path} className="dash-file">

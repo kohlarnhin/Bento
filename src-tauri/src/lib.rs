@@ -480,6 +480,52 @@ async fn check_service_port_conflicts(
     }).await.map_err(|err| format!("检查服务端口失败：{err}"))?
 }
 
+/// The machine's IPv4 address on the local network, used to show LAN URLs for running services.
+/// Reads the physical interfaces (en*) from ifconfig instead of the default route: with a TUN proxy
+/// (Clash, Surge, VPNs) the route points at a utun/198.18.x address that other devices cannot reach.
+#[tauri::command]
+fn local_network_ip() -> Option<String> {
+    let output = std::process::Command::new("/sbin/ifconfig").output().ok()?;
+    lan_ip_from_ifconfig(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn lan_ip_from_ifconfig(text: &str) -> Option<String> {
+    // (interface name, active, private IPv4 addresses), in ifconfig order.
+    let mut interfaces: Vec<(String, bool, Vec<std::net::Ipv4Addr>)> = Vec::new();
+    for line in text.lines() {
+        if !line.starts_with(char::is_whitespace) && !line.is_empty() {
+            let name = line.split(':').next().unwrap_or_default().to_string();
+            interfaces.push((name, false, Vec::new()));
+            continue;
+        }
+        let Some(current) = interfaces.last_mut() else { continue };
+        let line = line.trim();
+        if line == "status: active" { current.1 = true; }
+        if let Some(rest) = line.strip_prefix("inet ") {
+            if let Some(ip) = rest.split_whitespace().next().and_then(|value| value.parse::<std::net::Ipv4Addr>().ok()) {
+                if ip.is_private() && !ip.is_loopback() && !ip.is_link_local() { current.2.push(ip); }
+            }
+        }
+    }
+    let physical = |name: &str| name.starts_with("en");
+    interfaces.iter().find(|(name, active, ips)| physical(name) && *active && !ips.is_empty())
+        .or_else(|| interfaces.iter().find(|(name, _, ips)| physical(name) && !ips.is_empty()))
+        .and_then(|(_, _, ips)| ips.first()).map(|ip| ip.to_string())
+}
+
+#[cfg(test)]
+mod lan_ip_tests {
+    #[test]
+    fn prefers_active_physical_interface_over_tun_and_bridges() {
+        let text = "lo0: flags=8049<UP,LOOPBACK>\n\tinet 127.0.0.1 netmask 0xff000000\n\
+bridge100: flags=8863<UP>\n\tinet 192.168.0.1 netmask 0xffffff00\n\tstatus: active\n\
+en0: flags=8863<UP>\n\tinet 192.168.1.43 netmask 0xfffffc00 broadcast 192.168.3.255\n\tstatus: active\n\
+utun6: flags=8051<UP>\n\tinet 198.18.0.1 --> 198.18.0.1 netmask 0xfffffffc\n";
+        assert_eq!(super::lan_ip_from_ifconfig(text).as_deref(), Some("192.168.1.43"));
+        assert_eq!(super::lan_ip_from_ifconfig("utun6: flags=1\n\tinet 198.18.0.1 --> 198.18.0.1\n"), None);
+    }
+}
+
 #[tauri::command]
 async fn open_url(url: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || open_url_sync(&url)).await
@@ -627,6 +673,7 @@ pub fn run() {
         lifecycle::get_port_owners,
         lifecycle::stop_external_process,
         open_url,
+        local_network_ip,
         reveal_path,
         open_config_file,
         settings::get_settings,
@@ -671,7 +718,6 @@ pub fn run() {
         terminal::terminal_resize,
         git::git_info,
         git::dashboard_git,
-        git::dashboard_open_editor,
         #[cfg(debug_assertions)]
         debug_e2e::e2e_report,
         #[cfg(debug_assertions)]

@@ -2,11 +2,10 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffec
 import { invoke } from '@tauri-apps/api/core';
 import { dashboardLog, dashboardServices, logTime } from '../lib/dashboard';
 import { getTerminal, terminalKey, type TerminalStatus } from '../lib/terminalRegistry';
-import { agentNames, agentNeedsAttention, agentStateLabels, terminalDisplayNumber } from '../lib/terminalUsability';
+import { terminalDisplayNumber } from '../lib/terminalUsability';
 import { useProjectLogLines } from '../lib/useProjectLogs';
 import type { ProjectConfig, Service, Snippet, SnippetChange } from '../types';
 import { ProjectTerminal, type ProjectTerminalControls, type TerminalDimensions } from './ProjectTerminal';
-import { AgentElapsedTime } from './AgentElapsedTime';
 import { TerminalSnippets } from './TerminalSnippets';
 import { LogText } from './LogText';
 import { Select } from './ui/select';
@@ -78,7 +77,7 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
   onFocusedSlot: (projectId: string, slot: number, left: number, right?: number) => void;
   onJumpToAttention: () => void;
 }>(function TerminalWorkspace({ project, activeSlot, slots, terminals, focused, interactive, ready,
-  showQuickCommands, snippets, onRunSnippet, onChangeSnippet, onReady, onFocusedSlot, onJumpToAttention }, ref) {
+  showQuickCommands, snippets, onRunSnippet, onChangeSnippet, onReady, onFocusedSlot }, ref) {
   const [split, setSplit] = useState(false);
   const [source, setSource] = useState<string>();
   const [splitWidth, setSplitWidth] = useState(50);
@@ -100,9 +99,7 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
   const currentInputSlot = useRef(inputSlot);
   currentInputSlot.current = inputSlot;
   const terminalStatus = terminals[terminalKey(project.id, inputSlot)];
-  const agent = terminalStatus?.agent;
-  const otherPending = agent ? Object.values(terminals).filter(terminal => terminal !== terminalStatus && agentNeedsAttention(terminal.agent)).length : 0;
-  const context = useTerminalContext(project.id, inputSlot, terminalStatus, interactive && !agent);
+  const context = useTerminalContext(project.id, inputSlot, terminalStatus, interactive);
   const size = dimensions[inputSlot];
   const shell = context?.shell ?? 'shell';
   const cwd = context?.cwd ?? project.path;
@@ -186,24 +183,11 @@ export const TerminalWorkspace = forwardRef<TerminalWorkspaceControls, {
       </>}
     </div>
     {showQuickCommands && <TerminalSnippets projectId={project.id} entries={snippets} onRun={onRunSnippet} onChange={onChangeSnippet} />}
-    <footer className="terminal-status" data-terminal-status data-terminal-agent={agent?.state}>
-      {agent ? <>
-        <span className="agent-status-chip" data-agent-state={agent.state}>
-          {agent.state === 'thinking' && <span className="agent-thinking-ring" aria-hidden="true" />}
-          {agentStateLabels[agent.state]}
-        </span>
-        <span className="truncate">{agent.kind === 'claude' ? 'Claude Code' : agentNames[agent.kind]}
-          {agent.roundStartedAt != null && <> · 本轮 <AgentElapsedTime startAt={agent.roundStartedAt}
-            endAt={agent.state === 'done' ? agent.stateStartedAt : undefined} paused={!interactive} /></>}
-        </span>
-        {otherPending > 0 && <button type="button" className="terminal-status-next" aria-keyshortcuts="Meta+Shift+U"
-          onClick={onJumpToAttention}>还有 {otherPending} 个会话在等 · ⌘⇧U 下一个</button>}
-      </> : <>
-        <span data-terminal-status-shell>{shell}</span>
-        <span className="truncate" title={cwd} data-terminal-status-cwd>{cwd}</span>
-        <span className="shrink-0" data-terminal-status-size>{size ? `${size.cols}×${size.rows}` : '—'}</span>
-        <span className="terminal-status-shortcuts">⌘D 分屏 · ⌘⇧↩ {focused ? '退出专注' : '专注'}</span>
-      </>}
+    <footer className="terminal-status" data-terminal-status>
+      <span data-terminal-status-shell>{shell}</span>
+      <span className="truncate" title={cwd} data-terminal-status-cwd>{cwd}</span>
+      <span className="shrink-0" data-terminal-status-size>{size ? `${size.cols}×${size.rows}` : '—'}</span>
+      <span className="terminal-status-shortcuts">⌘D 分屏 · ⌘⇧↩ {focused ? '退出专注' : '专注'}</span>
     </footer>
   </div>;
 });

@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import gsap from 'gsap';
-import { invertMotionBox, motionSeconds, REDUCED_MOTION_QUERY, type MotionBox } from './motionMath';
+import { motionSeconds, REDUCED_MOTION_QUERY, type MotionBox } from './motionMath';
 
 const listeners = new Set<() => void>();
 let media: ReturnType<typeof gsap.matchMedia> | undefined;
@@ -39,13 +39,15 @@ export function boxIn(element: HTMLElement, parent: HTMLElement): MotionBox {
 }
 
 export function moveIndicator(node: HTMLElement, next: MotionBox, seconds: number, reduced: boolean) {
-  const parent = node.offsetParent;
-  const previous = node.style.width && parent instanceof HTMLElement ? boxIn(node, parent) : undefined;
-  const inverse = previous && invertMotionBox(previous, next);
+  // Slide the thumb: tween position and size directly (no scale), so the pill keeps its rounded ends
+  // while it glides from the old segment to the new one.
+  const placed = Boolean(node.style.width);
   gsap.killTweensOf(node);
-  gsap.set(node, { width: next.width, height: next.height, x: next.x, y: next.y, scaleX: 1, scaleY: 1, transformOrigin: 'left top' });
   const duration = motionSeconds(seconds, reduced);
-  if (!inverse || !duration) return;
-  gsap.fromTo(node, { x: next.x + inverse.x, y: next.y + inverse.y, scaleX: inverse.scaleX, scaleY: inverse.scaleY },
-    { x: next.x, y: next.y, scaleX: 1, scaleY: 1, duration, ease: 'power3.out' });
+  if (!placed || !duration) {
+    gsap.set(node, { width: next.width, height: next.height, x: next.x, y: next.y, scaleX: 1, scaleY: 1, transformOrigin: 'left top' });
+    return;
+  }
+  gsap.set(node, { scaleX: 1, scaleY: 1 });
+  gsap.to(node, { x: next.x, y: next.y, width: next.width, height: next.height, duration, ease: 'power3.out', overwrite: true });
 }

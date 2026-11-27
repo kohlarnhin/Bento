@@ -208,23 +208,6 @@ pub async fn dashboard_git(id: String) -> Result<Option<DashboardGit>, String> {
 }
 
 #[tauri::command]
-pub async fn dashboard_open_editor(id: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let project = crate::get_projects_sync()?.projects.into_iter().find(|project| project.id == id).ok_or("未找到项目")?;
-        let path = crate::expand_tilde(&project.path);
-        if !Path::new(&path).is_dir() { return Err("项目目录不存在".into()); }
-        let preferred = std::env::var("BENTO_EDITOR").ok();
-        let editors = ["Visual Studio Code", "Cursor", "Zed", "Windsurf", "Sublime Text"];
-        for editor in preferred.as_deref().into_iter().chain(editors) {
-            if Command::new("open").args(["-a", editor, &path]).output().is_ok_and(|result| result.status.success()) {
-                return Ok(());
-            }
-        }
-        Err("找不到可打开项目的编辑器。请安装支持的编辑器或设置 BENTO_EDITOR。".into())
-    }).await.map_err(|error| format!("打开编辑器失败：{error}"))?
-}
-
-#[tauri::command]
 pub async fn git_info(id: String) -> Result<Option<GitInfo>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let project = crate::get_projects_sync()?

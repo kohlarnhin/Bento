@@ -209,7 +209,6 @@ const TIPS = [
   '终端里 ⌘⇧↩ 进入专注模式',
   '⌘T 给当前项目开一个新终端',
   '终端里 ⌘D 左右分屏',
-  '⌘O 用编辑器打开当前项目',
   '右键我，可以快速启动或停止项目',
   '右键我，可以打开快捷菜单',
   '在角落戳戳我，或者摸摸我的头',
@@ -1422,7 +1421,6 @@ export function PetWindow() {
     if (!view) return undefined;
     const items = view.items;
     if (items.length) return { key: 'hover-' + items[0].id, text: items.length > 1 ? `${items[0].text} 等 ${items.length} 条` : items[0].text, tone: items[0].tone, item: items[0] };
-    if (view.running) return { key: 'hover-runs', text: `${view.running} 个项目运行中`, tone: 'running' };
     return undefined;
   }, [view]);
 

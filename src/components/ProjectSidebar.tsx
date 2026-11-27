@@ -145,6 +145,7 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
   const sections = useMemo(() => sidebarSections(projects, projectGroups), [projects, projectGroups]);
   const orderedGroups = [...projectGroups].sort((a, b) => a.sortOrder - b.sortOrder || a.id.localeCompare(b.id));
   const runningCount = projects.filter(project => statuses[project.id] === 'running').length;
+  const pinnedCount = projects.filter(project => project.pinned && !project.archived).length;
   const versionLabel = currentVersion ? `v${currentVersion}` : '检查更新';
   const updateLabel = availableVersion ? `更新到 v${availableVersion}` : '检查更新';
   useEffect(() => {
@@ -485,8 +486,10 @@ export const ProjectSidebar = memo(function ProjectSidebar({ projects, inactive,
     <SegmentedControl<SidebarFilter> className="sidebar-filters" label="筛选项目" value={filter} onChange={onFilterChange}
       options={[
         { value: 'all', label: '全部', attributes: { 'data-sidebar-filter': 'all' } },
-        { value: 'running', label: '运行中 ' + runningCount, attributes: { 'data-sidebar-filter': 'running' } },
-        { value: 'pinned', label: '置顶', attributes: { 'data-sidebar-filter': 'pinned' } },
+        { value: 'running', title: `运行中 ${runningCount} 个`, attributes: { 'data-sidebar-filter': 'running' },
+          label: <>运行中{runningCount > 0 && <span className="sidebar-filter-count" data-tone="running">{runningCount}</span>}</> },
+        { value: 'pinned', title: `置顶 ${pinnedCount} 个`, attributes: { 'data-sidebar-filter': 'pinned' },
+          label: <>置顶{pinnedCount > 0 && <span className="sidebar-filter-count">{pinnedCount}</span>}</> },
       ]} />
     <SidebarScrollArea ref={scrollArea} className="sidebar-scroll min-h-0 flex-1">
       <nav ref={projectList} id="project-list" aria-label="项目列表" className="relative flex min-h-full flex-col">

@@ -285,6 +285,13 @@
   gap: 16px;
 }
 .dash-service-address code { color: hsl(var(--muted-foreground)); font-size: 12px; }
+.dash-address-list { display: flex; min-width: 0; flex-direction: column; align-items: flex-end; gap: 1px; }
+.dash-address { display: inline-flex; max-width: 100%; align-items: baseline; gap: 6px; border-radius: 6px; padding: 1px 5px; }
+.dash-address:hover { background-color: var(--h1-hover); }
+.dash-address:hover code { color: hsl(var(--foreground)); }
+.dash-address small { flex: none; color: var(--h1-label); font-size: 10.5px; }
+.dash-address code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dash-quick-path { min-width: 0; max-width: 60%; direction: rtl; text-align: left; font-family: var(--font-mono, ui-monospace, monospace); font-size: 11.5px; }
 .dash-service-address .h1-tag { padding-inline: 3px; }
 
 .dash-inspect-panel {

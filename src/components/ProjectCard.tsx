@@ -1,13 +1,14 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import gsap from 'gsap';
 import { invoke } from '@tauri-apps/api/core';
-import { ArrowUpRight, CodeXml, Folder, GitBranch, Globe2, Maximize2, Minimize2, Pencil, Play, Square, SquareTerminal } from 'lucide-react';
+import { ArrowUpRight, CodeXml, Copy, Folder, GitBranch, Globe2, Maximize2, Minimize2, Pencil, Play, Square, SquareTerminal } from 'lucide-react';
 import type {
   DashboardConflict, DashboardCpuPoint, DashboardGit, DashboardHealth, DashboardRun, DashboardServiceSample, DashboardUsage,
   PortConflict, ProjectConfig, ProjectRuntimeStatus, ProjectStatus, ProjectView, Service, Snippet, SnippetChange,
 } from '../types';
 import { cpuChart, dashboardListeningPort, dashboardServices, dashboardStatus, durationText, relativeTime, runInterval } from '../lib/dashboard';
 import { useDashboard } from '../lib/useDashboard';
+import { copyText, useLanAddress } from '../lib/lanAddress';
 import { useProjectLaunch } from '../lib/useProjectLaunch';
 import { usePortStandard } from '../lib/usePortStandard';
 import { useReducedMotion } from '../lib/motion';
@@ -57,7 +58,6 @@ interface ProjectCardProps {
   onOpenBrowser: (port: number) => void;
   onSetDefaultService: (serviceId: string) => Promise<void>;
   onRevealPath: (path: string) => void;
-  onOpenEditor: () => void;
   onOpenLogs: (id?: string) => void;
   onClearLogs: () => void;
   onEdit: (conflict?: DashboardConflict) => void;
@@ -100,6 +100,7 @@ function ServiceRow({ service, sample, health, last, history, active, framework,
   const check = live ? (health?.port === port ? health : undefined) : previous?.health;
   const usage = live ? serviceSample?.usage : undefined;
   const unexpected = serviceSample?.unexpectedPorts ?? [];
+  const lan = useLanAddress();
   const placeholder = service.key === 'PORT' ? '{port}' : '{port:' + service.key + '}';
   const process = usage?.process ?? previous?.process;
   const folder = service.dir === '.' ? './' : service.dir.replace(/\/+$/u, '') + '/';
@@ -127,7 +128,16 @@ function ServiceRow({ service, sample, health, last, history, active, framework,
         </div>
       </details>
       <div className="dash-service-address">
-        <code>{port == null ? '—' : 'localhost:' + port}</code>
+        {port == null ? <code>—</code> : <span className="dash-address-list" data-service-addresses>
+          <button type="button" className="dash-address" title={`复制 http://localhost:${port}`}
+            onClick={() => copyText(`http://localhost:${port}`, '已复制本机地址')} data-address="local">
+            <small>本机</small><code>localhost:{port}</code>
+          </button>
+          {lan && <button type="button" className="dash-address" title={`复制 http://${lan}:${port}`}
+            onClick={() => copyText(`http://${lan}:${port}`, '已复制局域网地址')} data-address="lan">
+            <small>局域网</small><code>{lan}:{port}</code>
+          </button>}
+        </span>}
         <span className="h1-status-dot" data-tone={state === 'listening' ? 'running' : state === 'occupied' ? 'warning' : undefined}
           aria-label={statusLabel} title={statusLabel} />
         {port != null && <OpenServiceButton port={port} listening={state !== 'idle'} onOpen={onOpen}
@@ -162,11 +172,11 @@ function ResourceSummary({ active, uptime, usage, history, external }: {
   </details>;
 }
 
-function ProjectQuickActions({ git, unconfigured, terminalLimit, onEditor, onTerminal, onGit, onReveal, onEdit }: {
+function ProjectQuickActions({ path, git, unconfigured, terminalLimit, onTerminal, onGit, onReveal, onEdit }: {
+  path: string;
   git: DashboardGit | null | undefined;
   unconfigured: boolean;
   terminalLimit: boolean;
-  onEditor: () => void;
   onTerminal: () => void;
   onGit: () => void;
   onReveal: () => void;
@@ -179,8 +189,9 @@ function ProjectQuickActions({ git, unconfigured, terminalLimit, onEditor, onTer
       {unconfigured && <button type="button" className="dash-launch-notice" onClick={onEdit} data-dashboard-unconfigured>未配置启动</button>}
     </header>
     <div className="dash-quick-list" data-workspace-content>
-      <button type="button" aria-keyshortcuts="Meta+O" onClick={onEditor} data-dashboard-quick="editor">
-        <CodeXml size={16} aria-hidden="true" />在编辑器打开<kbd aria-hidden="true">⌘O</kbd>
+      <button type="button" title={`复制 ${path}`} onClick={() => copyText(path, '已复制项目路径')} data-dashboard-quick="path">
+        <Copy size={16} aria-hidden="true" />项目路径
+        <small className="dash-truncate dash-quick-path">{path}</small>
       </button>
       <button type="button" aria-keyshortcuts="Meta+T" disabled={terminalLimit} onClick={onTerminal} data-dashboard-quick="terminal">
         <SquareTerminal size={16} aria-hidden="true" />新终端<kbd aria-hidden="true">⌘T</kbd>
@@ -251,7 +262,7 @@ function ConflictDialog({ conflict, onClose, onConfirm }: {
 export function ProjectCard({ project, view, slots, activeSlot, terminals, terminalControls, onFocusedTerminal, onJumpToAttention, onSelectView, onSelectTerminal,
   focused, maxTerminals, showQuickCommands, snippets, onRunSnippet, onChangeSnippet, onToggleFocus, onNewTerminal, onOpenAgent, closeActiveTab,
   status: runtimeStatus, runtime, conflicts, onStart, onStop, onRestart, onOpenBrowser,
-  onSetDefaultService, onRevealPath, onOpenEditor, onOpenLogs, onClearLogs, onEdit }: ProjectCardProps) {
+  onSetDefaultService, onRevealPath, onOpenLogs, onClearLogs, onEdit }: ProjectCardProps) {
   const runnable = project.runnable;
   const { snapshot, snapshotError, git, health, now, refresh } = useDashboard(project, runtime, view, runnable || !!runtime?.isManaged);
   const launch = useProjectLaunch(project, runnable);
@@ -450,18 +461,18 @@ export function ProjectCard({ project, view, slots, activeSlot, terminals, termi
                 <p>此项目不由 Bento 启动，可以直接在终端中开发。需要启动服务时，请在编辑配置中勾选「需要运行」。</p>
               </div>
             </section>}
-            <ProjectQuickActions git={git} unconfigured={unconfigured} terminalLimit={terminalLimit}
-              onEditor={onOpenEditor} onTerminal={() => { void onNewTerminal(); }} onGit={() => onSelectView('git')}
+            <ProjectQuickActions path={project.path} git={git} unconfigured={unconfigured} terminalLimit={terminalLimit}
+              onTerminal={() => { void onNewTerminal(); }} onGit={() => onSelectView('git')}
               onReveal={() => onRevealPath(project.path)} onEdit={() => onEdit()} />
           </div>
           {showRun ? <DashboardOutput project={project} services={services} active={active} last={last} now={now}
             onJump={onOpenLogs} onClear={onClearLogs} />
-            : git && <div className="h1-project-scroll" data-workspace-content><DashboardGitCard git={git} now={now} onEditor={onOpenEditor} /></div>}
+            : git && <div className="h1-project-scroll" data-workspace-content><DashboardGitCard git={git} now={now} /></div>}
         </div>
       </div>
       <div className="workspace-view" data-workspace-view="git" {...{ inert: shown !== 'git' || view !== 'git' ? '' : undefined }}>
         <div className="h1-project-scroll" data-project-git={project.id} data-workspace-content>
-          {git ? <DashboardGitCard git={git} now={now} onEditor={onOpenEditor} /> :
+          {git ? <DashboardGitCard git={git} now={now} /> :
             <Empty className="h1-group"><EmptyTitle>暂无 Git 信息</EmptyTitle>
               <EmptyDescription>此项目的分支与文件改动会显示在这里。</EmptyDescription></Empty>}
         </div>
