@@ -83,6 +83,29 @@ function validateServices(services: ServiceDraft[], conflictForPort: (port: numb
   return errors;
 }
 
+const dirModes = [
+  { value: 'existing', label: '已有目录' },
+  { value: 'create', label: '新建目录' },
+] as const;
+type DirMode = typeof dirModes[number]['value'];
+const NEW_PARENT_KEY = 'bento:new-project-parent';
+
+function folderNameError(name: string) {
+  const trimmed = name.trim();
+  if (!trimmed) return '请输入目录名称';
+  if (trimmed === '.' || trimmed === '..' || /[/:]/u.test(trimmed)) return '目录名称不能是 . 或 ..，也不能包含 / 或 :';
+  return undefined;
+}
+
+/** Where new project folders go: the last place one was created, else next to the newest project. */
+function defaultNewParent(projects: ProjectConfig[]) {
+  const remembered = localStorage.getItem(NEW_PARENT_KEY);
+  if (remembered) return remembered;
+  const latest = projects.at(-1)?.path.replace(/\/+$/u, '');
+  const parent = latest?.slice(0, latest.lastIndexOf('/'));
+  return parent || '~/Projects';
+}
+
 function UpdatedBadge() {
   return <span className="service-primary-label ml-1.5">已更新</span>;
 }
@@ -104,6 +127,11 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, scanO
   }
   const groupOptions = [{ value: '', label: '未分组', count: counts.get('') },
     ...groups.map(group => ({ value: group.id, label: group.name, count: counts.get(group.id) }))];
+  const canCreateDir = !project && !initialInspection;
+  const [dirMode, setDirMode] = useState<DirMode>('existing');
+  const [newDir, setNewDir] = useState(() => ({ parent: defaultNewParent(projects), name: '' }));
+  const creatingDir = canCreateDir && dirMode === 'create';
+  const newDirPath = `${newDir.parent.trim().replace(/\/+$/u, '')}/${newDir.name.trim()}`;
   const [values, setValues] = useState<Values>(() => ({
     path: project?.path ?? initialInspection?.path ?? '', name: project?.name ?? '', runnable: project?.runnable ?? true,
     displayName: project?.displayName ?? '', description: project?.description ?? '',
@@ -355,18 +383,56 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, scanO
       setErrors((current) => ({ ...current, path: `选择目录失败：${error}` }));
     }
   };
+  const changeDirMode = (mode: DirMode) => {
+    setDirMode(mode);
+    setErrors(current => ({ ...current, path: undefined }));
+    // A brand-new folder has nothing to run yet.
+    if (mode === 'create' && !edited.current.startCommand && !values.startCommand.trim()) changeRunnable(false);
+  };
+  const changeNewDir = (field: 'parent' | 'name', value: string) => {
+    setNewDir(current => ({ ...current, [field]: value }));
+    setErrors(current => ({ ...current, path: undefined }));
+    if (field === 'name' && !edited.current.name) setValues(current => ({ ...current, name: value.trim() }));
+  };
+  const pickNewParent = async () => {
+    try {
+      const home = (await homeDir()).replace(/\/$/, '');
+      const parent = newDir.parent.trim();
+      const defaultPath = parent === '~' ? home : parent.startsWith('~/') ? home + parent.slice(1) : parent || home;
+      const selected = await open({ directory: true, multiple: false, defaultPath });
+      if (typeof selected === 'string') changeNewDir('parent', selected);
+    } catch (error) {
+      setErrors((current) => ({ ...current, path: `选择目录位置失败：${error}` }));
+    }
+  };
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (composing.current || saving || groupSaving) return;
     setSaving(true);
     setSaveError('');
     try {
-      const directory = values.path.trim()
-        ? inspected.current?.path === values.path ? inspected.current.result : await inspect(values.path)
+      let current = values;
+      if (creatingDir) {
+        const problem = !newDir.parent.trim() ? '请选择目录位置' : folderNameError(newDir.name);
+        if (problem) {
+          setErrors(previous => ({ ...previous, path: problem }));
+          requestAnimationFrame(() => form.current?.querySelector<HTMLElement>(newDir.parent.trim() ? '#project-new-name' : '#project-new-parent')?.focus());
+          return;
+        }
+        const created = await invoke<string>('create_project_dir', { parent: newDir.parent, name: newDir.name });
+        localStorage.setItem(NEW_PARENT_KEY, newDir.parent.trim());
+        // From here on it is an existing folder: a failed save below never creates it twice.
+        pathRef.current = created;
+        current = { ...values, path: created, name: values.name.trim() || newDir.name.trim() };
+        setValues(current);
+        setDirMode('existing');
+      }
+      const directory = current.path.trim()
+        ? inspected.current?.path === current.path ? inspected.current.result : await inspect(current.path)
         : undefined;
-      const next = validate(values, directory);
-      const advanced = validateAdvanced(values.env, values.commands);
-      const invalidServices = validateServices(values.runnable ? values.services : [], conflictForPort);
+      const next = validate(current, directory);
+      const advanced = validateAdvanced(current.env, current.commands);
+      const invalidServices = validateServices(current.runnable ? current.services : [], conflictForPort);
       setErrors(next);
       setValidateServiceFields(true);
       setAdvancedErrors(advanced);
@@ -382,10 +448,10 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, scanO
         });
         return;
       }
-      const services = values.runnable ? savedServices(values.services) : [];
-      const port = !values.runnable ? null : services.length ? services.find(service => service.openWeb)?.port ?? null : portNumber(values.port);
-      const draft: ProjectDraft = { ...values, services, port, startCommand: values.runnable ? values.startCommand : '',
-        groupId: groupId || null, autoOpen: canAutoOpen && values.autoOpen };
+      const services = current.runnable ? savedServices(current.services) : [];
+      const port = !current.runnable ? null : services.length ? services.find(service => service.openWeb)?.port ?? null : portNumber(current.port);
+      const draft: ProjectDraft = { ...current, services, port, startCommand: current.runnable ? current.startCommand : '',
+        groupId: groupId || null, autoOpen: canAutoOpen && current.autoOpen };
       const saved = await invoke<ProjectConfig>(project ? 'update_project' : 'add_project', { ...(project ? { id: project.id } : {}), project: draft });
       toast.success(project ? '已保存修改' : `已添加项目「${saved.displayName || saved.name}」`);
       if (project && saved.path !== project.path && Object.values(getTerminalSnapshot()).some(terminal => terminal.projectId === project.id && terminal.alive)) toast('终端仍在原目录，可在侧边栏重启终端');
@@ -459,15 +525,35 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, scanO
   const detectedScript = multiService ? inspection?.startScripts?.find(script => script.command === values.startCommand.trim()) : undefined;
   const serviceLayout = multiService || !!diff?.serviceChanges.length;
   const projectDetails = <div className="h1-group h1-form-group">
-      <div className="space-y-2">
-        <Label htmlFor="project-path">项目目录 <span className="text-destructive">*</span></Label>
+      {creatingDir ? <div className="space-y-2" data-project-new-dir>
+        <Label id="project-path-label">项目目录 <span className="text-destructive">*</span></Label>
+        <SegmentedControl labelledBy="project-path-label" options={dirModes} value={dirMode} onChange={changeDirMode} className="border" disabled={saving} />
+        <div className="space-y-1.5">
+          <Label htmlFor="project-new-parent" className="text-[11px] font-normal text-muted-foreground">位置</Label>
+          <div className="flex gap-2">
+            <Input id="project-new-parent" value={newDir.parent} disabled={saving} placeholder="~/Projects" aria-describedby="project-path-message"
+              aria-invalid={!!errors.path && !newDir.parent.trim()} onChange={event => changeNewDir('parent', event.target.value)}
+              className="font-mono text-[length:var(--text-control)]" />
+            <Button type="button" variant="outline" onClick={() => { void pickNewParent(); }} disabled={saving}><FolderOpen data-icon="inline-start" />选择…</Button>
+          </div>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="project-new-name" className="text-[11px] font-normal text-muted-foreground">目录名称</Label>
+          <Input id="project-new-name" value={newDir.name} disabled={saving} placeholder="例如 my-app" autoFocus aria-describedby="project-path-message"
+            aria-invalid={!!errors.path && !!newDir.parent.trim()} onChange={event => changeNewDir('name', event.target.value)}
+            className="font-mono text-[length:var(--text-control)]" />
+        </div>
+        {message('path', newDir.name.trim() && newDir.parent.trim() ? `将新建 ${newDirPath}` : '在所选位置新建一个空文件夹作为项目目录，支持 ~')}
+      </div> : <div className="space-y-2">
+        <Label htmlFor="project-path" id="project-path-label">项目目录 <span className="text-destructive">*</span></Label>
+        {canCreateDir && <SegmentedControl labelledBy="project-path-label" options={dirModes} value={dirMode} onChange={changeDirMode} className="border" disabled={saving} />}
         <div className="flex gap-2">
           <Input {...fieldProps('path')} placeholder="~/Projects/my-project" autoFocus={!focusPort} className="font-mono text-[length:var(--text-control)]" />
           <Button type="button" variant="outline" onClick={() => { void pickFolder(); }} disabled={saving}><FolderOpen data-icon="inline-start" />选择…</Button>
         </div>
         {message('path', '支持 ~，也可以从 Finder 拖入文件夹到侧边栏')}
         {inspection?.existingProject && <p className="text-[11px] text-warning-foreground" role="status">此目录已用于项目「{inspection.existingProject.name}」，仍可继续添加。</p>}
-      </div>
+      </div>}
       <div className="space-y-2"><Label htmlFor="project-name">名称 <span className="text-destructive">*</span></Label><Input {...fieldProps('name')} placeholder="项目名称" />{errors.name && message('name')}</div>
       <div className="space-y-2"><Label htmlFor="project-displayName">显示名称 <span className="font-normal text-muted-foreground">（可选）</span></Label><Input {...fieldProps('displayName')} placeholder="在侧边栏显示的名称" /></div>
       <div className="space-y-2">
@@ -555,7 +641,7 @@ export function ProjectFormDialog({ project, initialInspection, focusPort, scanO
                 {scanning ? '扫描中…' : '重新扫描'}
               </Button>}
             </div>
-            <DialogDescription className={serviceLayout ? 'sr-only' : undefined}>{project ? '调整本地目录与运行配置。' : '选择本地项目目录，自动识别运行配置。'}</DialogDescription>
+            <DialogDescription className={serviceLayout ? 'sr-only' : undefined}>{project ? '调整本地目录与运行配置。' : creatingDir ? '新建一个文件夹作为项目目录。' : '选择本地项目目录，自动识别运行配置。'}</DialogDescription>
           </DialogHeader>
           <div className={cn('min-h-0 space-y-4 overflow-y-auto px-6 pb-5 pt-1', serviceLayout && 'space-y-[18px] px-[26px]')} data-project-form-body>
             {project && (status === 'running' || status === 'starting') && <Alert><AlertDescription>{runnable ? '项目正在运行，修改将在重启后生效' : '项目正在运行，保存后仍可在概览中停止'}</AlertDescription></Alert>}

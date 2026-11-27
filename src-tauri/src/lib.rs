@@ -563,6 +563,38 @@ async fn reveal_path(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Creates `<parent>/<name>` for a new project. Missing parent folders are created too; an existing
+/// folder of that name is never reused, so a typo can't silently point the project at old files.
+fn create_project_dir_sync(parent: &str, name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("请输入目录名称".into());
+    }
+    if name == "." || name == ".." || name.contains(['/', ':', '\0']) {
+        return Err("目录名称不能是 . 或 ..，也不能包含 / 或 :".into());
+    }
+    let parent = PathBuf::from(expand_tilde(parent.trim()));
+    if !parent.is_absolute() {
+        return Err("请选择目录位置".into());
+    }
+    if parent.exists() && !parent.is_dir() {
+        return Err(format!("{} 不是文件夹", parent.display()));
+    }
+    std::fs::create_dir_all(&parent).map_err(|error| format!("创建目录位置失败：{error}"))?;
+    let path = parent.join(name);
+    std::fs::create_dir(&path).map_err(|error| match error.kind() {
+        std::io::ErrorKind::AlreadyExists => format!("「{name}」已存在，换个名称，或改用「已有目录」添加"),
+        _ => format!("创建目录失败：{error}"),
+    })?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+async fn create_project_dir(parent: String, name: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || create_project_dir_sync(&parent, &name)).await
+        .map_err(|error| format!("创建目录失败：{error}"))?
+}
+
 #[tauri::command]
 async fn open_config_file() -> Result<(), String> {
     let db_path = get_db_path();
@@ -676,6 +708,7 @@ pub fn run() {
         open_url,
         local_network_ip,
         reveal_path,
+        create_project_dir,
         artifacts::project_images,
         artifacts::read_image_file,
         open_config_file,
@@ -818,6 +851,23 @@ fn reopen_main_window(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_project_dir_makes_a_new_folder_only() {
+        let root = std::env::temp_dir().join(format!("bento-new-project-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let parent = root.join("nested/Projects");
+        let parent_text = parent.to_string_lossy().into_owned();
+        let created = create_project_dir_sync(&parent_text, " my-app ").unwrap();
+        assert_eq!(PathBuf::from(&created), parent.join("my-app"));
+        assert!(parent.join("my-app").is_dir());
+        assert!(create_project_dir_sync(&parent_text, "my-app").unwrap_err().contains("已存在"));
+        for bad in ["", "..", "a/b", "a:b"] {
+            assert!(create_project_dir_sync(&parent_text, bad).is_err(), "{bad}");
+        }
+        assert!(create_project_dir_sync("relative/dir", "x").is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn advanced_migration_is_idempotent_and_corrupt_json_stays_readable() {
